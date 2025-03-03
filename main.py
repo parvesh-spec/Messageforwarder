@@ -6,14 +6,13 @@ import re
 
 # These example values won't work. You must get your own api_id and
 # api_hash from https://my.telegram.org, under API Development.
-API_ID = 27202142  # Replace with your API ID
-API_HASH = 'db4dd0d95dc68d46b77518bf997ed165'  # Replace with your API hash
+API_ID = int(os.getenv('API_ID', '27202142'))  # Replace with your API ID
+API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')  # Replace with your API hash
 
 # The first parameter is the .session file name (absolute paths allowed)
 client = TelegramClient('anon', API_ID, API_HASH, connection_retries=5, timeout=30)
 
 # Define source and destination channels
-# You will need to replace these with your actual channel IDs or usernames
 SOURCE_CHANNEL = None  # Will be set during runtime
 DESTINATION_CHANNEL = None  # Will be set during runtime
 
@@ -25,30 +24,17 @@ async def main():
     print("Starting Telegram client...")
     await client.start()
 
-    # Cache entities to minimize API calls
-    print("Initializing entity cache to reduce API calls...")
-    client._entity_cache = {}
-
     # Check if already authorized
     if not await client.is_user_authorized():
         print("You are not authorized. Let's log in.")
-        phone = input(
-            "Enter your phone number with country code (e.g., +11234567890): ")
-
-        # Send code request
+        phone = input("Enter your phone number with country code (e.g., +11234567890): ")
         await client.send_code_request(phone)
-
-        # Get the verification code from the user
         verification_code = input("Enter the verification code you received: ")
 
         try:
-            # Sign in with the code
             await client.sign_in(phone, verification_code)
         except SessionPasswordNeededError:
-            # 2FA is enabled
-            password = input(
-                "You have two-factor authentication enabled. Please enter your password: "
-            )
+            password = input("Two-factor authentication is enabled. Please enter your password: ")
             await client.sign_in(password=password)
 
     # Get information about yourself
@@ -57,58 +43,52 @@ async def main():
 
     # Get user input for channel settings
     global SOURCE_CHANNEL, DESTINATION_CHANNEL, TEXT_REPLACEMENTS
-
     print("\n----- Channel Auto-Forwarding Setup -----")
 
-    # Function to validate channel access
     async def validate_channel(channel_input):
         try:
-            # Clean up the input
+            print(f"\nValidating channel input: {channel_input}")
             channel_input = channel_input.strip()
 
             # Handle different channel ID formats
             if channel_input.isdigit() or (channel_input.startswith('-') and channel_input[1:].isdigit()):
-                # Remove any existing -100 prefix to avoid duplication
-                clean_id = channel_input.replace('-100', '')
-                # Remove any leading dash
-                clean_id = clean_id.lstrip('-')
-                # Add the correct -100 prefix
+                # Remove any existing -100 prefix and clean the ID
+                clean_id = channel_input.replace('-100', '').lstrip('-')
                 channel_input = f"-100{clean_id}"
-                print(f"Using formatted channel ID: {channel_input}")
+                print(f"Formatted channel ID: {channel_input}")
 
                 try:
-                    # Try to access the channel
+                    print("Attempting to access channel...")
                     channel_entity = await client.get_entity(int(channel_input))
                     channel_name = getattr(channel_entity, 'title', 'Unknown')
                     print(f"✓ Successfully verified channel: {channel_name}")
                     return channel_input
                 except ValueError as e:
-                    print("❌ Cannot access this channel. Please check:")
+                    print(f"❌ Error accessing channel: {str(e)}")
+                    print("Please check:")
                     print("1. You are a member of the channel")
                     print("2. The channel ID is correct")
                     print("3. Your account has permission to access it")
                     retry = input("\nWould you like to try another channel ID? (y/n): ")
                     if retry.lower() == 'y':
                         return await validate_channel(input("Enter channel identifier: "))
-                    print("Using the provided ID anyway. This may cause errors later.")
                     return channel_input
 
             # For usernames starting with @
             elif channel_input.startswith('@'):
                 try:
+                    print("Attempting to access channel via username...")
                     entity = await client.get_entity(channel_input)
                     print(f"✓ Successfully found channel: {entity.title if hasattr(entity, 'title') else channel_input}")
                     return channel_input
                 except Exception as e:
-                    print(f"❌ Error accessing channel: {str(e)}")
+                    print(f"❌ Error accessing channel via username: {str(e)}")
 
             # Ask if it's a private channel
             is_private = input("Is this a private channel? (y/n): ")
             if is_private.lower() == 'y':
                 print("\nEnter the channel ID with proper format (should start with -100)")
                 direct_id = input("Channel ID: ")
-
-                # Clean and format the ID
                 clean_id = direct_id.replace('-100', '').lstrip('-')
                 formatted_id = f"-100{clean_id}"
                 print(f"Using channel ID: {formatted_id}")
@@ -126,10 +106,11 @@ async def main():
 
         except Exception as e:
             print(f"Validation error: {str(e)}")
+            print("Stack trace:", e.__traceback__)
             return await validate_channel(input("Enter channel identifier again: "))
 
     # Validate source channel
-    print("Setting up source channel (where messages come from):")
+    print("\nSetting up source channel (where messages come from):")
     source_input = input("Enter the source channel username or ID (e.g., @channelname or -1001234567890): ")
     SOURCE_CHANNEL = await validate_channel(source_input)
 
@@ -138,7 +119,7 @@ async def main():
     destination_input = input("Enter the destination channel username or ID (e.g., @channelname or -1001234567890): ")
     DESTINATION_CHANNEL = await validate_channel(destination_input)
 
-    # Ask if user wants to set up text replacements
+    # Set up text replacements
     setup_replacements = input("\nDo you want to set up text replacements in forwarded messages? (y/n): ")
     if setup_replacements.lower() == 'y':
         print("\n----- Text Replacement Setup -----")
@@ -149,130 +130,75 @@ async def main():
             original_text = input("\nEnter the original text to replace (or leave empty to finish): ")
             if not original_text:
                 break
-
             replacement_text = input(f"Enter the text to replace '{original_text}' with: ")
             TEXT_REPLACEMENTS[original_text] = replacement_text
             print(f"✓ Added replacement: '{original_text}' → '{replacement_text}'")
 
-        print(f"\nSet up {len(TEXT_REPLACEMENTS)} text replacements.")
-
-    print(f"\nSet up forwarding from {SOURCE_CHANNEL} to {DESTINATION_CHANNEL}")
+    print(f"\nForwarding setup complete:")
+    print(f"Source: {SOURCE_CHANNEL}")
+    print(f"Destination: {DESTINATION_CHANNEL}")
     if TEXT_REPLACEMENTS:
-        print("Text replacements enabled:")
+        print("Text replacements:")
         for original, replacement in TEXT_REPLACEMENTS.items():
             print(f"- '{original}' → '{replacement}'")
 
-    print("Monitoring for new messages. Press Ctrl+C to stop.")
-
-    # Validate that we can access both channels before monitoring
-    try:
-        print("\nVerifying access to source channel...")
-        source_entity = await client.get_entity(int(SOURCE_CHANNEL))
-        print(f"✓ Successfully verified access to source channel: {getattr(source_entity, 'title', 'Unknown')}")
-
-        print("Verifying access to destination channel...")
-        dest_entity = await client.get_entity(int(DESTINATION_CHANNEL))
-        print(f"✓ Successfully verified access to destination channel: {getattr(dest_entity, 'title', 'Unknown')}")
-    except ValueError as e:
-        print(f"❌ Error: {e}")
-        print("\nPossible issues:")
-        print("1. The bot is not a member of one of the channels")
-        print("2. The channel ID format is incorrect")
-        print("3. The channel doesn't exist")
-        print("4. You don't have permission to access the channel")
-        print("\nPlease restart the bot and enter valid channel IDs.")
-        return
-
-    # Listen for new messages in the source channel
+    # Message handler for forwarding
     @client.on(events.NewMessage(chats=int(SOURCE_CHANNEL)))
     async def forward_handler(event):
         try:
-            print(f"New message received in source channel: {SOURCE_CHANNEL}")
+            print(f"New message received in source channel")
 
-            # If we have text replacements and the message has text
-            if TEXT_REPLACEMENTS and event.message.text:
-                # Create a copy of the message to modify
-                modified_message = event.message.text
+            # Create a new message instead of forwarding
+            message_text = event.message.text if event.message.text else ""
 
-                # Apply all text replacements
+            # Apply text replacements if any
+            if TEXT_REPLACEMENTS and message_text:
                 for original, replacement in TEXT_REPLACEMENTS.items():
-                    modified_message = modified_message.replace(original, replacement)
+                    message_text = message_text.replace(original, replacement)
 
-                # Only send as a new message if text was actually changed
-                if modified_message != event.message.text:
-                    print("Applying text replacements and sending as new message")
+            # Handle media
+            media = None
+            if event.message.media:
+                print("Downloading media...")
+                media = await event.message.download_media()
 
-                    # Send the modified message text
-                    sent = await client.send_message(DESTINATION_CHANNEL, modified_message)
-
-                    # If the original message had media, download and send it with the new message
-                    if event.message.media:
-                        print("Message contains media, sending media with modified text")
-                        # Download the media
-                        downloaded_media = await event.message.download_media()
-                        # Send the media with the modified text
-                        await client.send_file(DESTINATION_CHANNEL, downloaded_media, caption=modified_message)
-                        # Remove the temporary file
-                        if os.path.exists(downloaded_media):
-                            os.remove(downloaded_media)
-
-                    message_preview = modified_message[:50] + "..." if len(modified_message) > 50 else modified_message
-                    print(f"✓ Modified message sent: {message_preview}")
-                    return
-
-            # If no text replacements or text didn't change, forward the original message
-            forwarded = await client.forward_messages(DESTINATION_CHANNEL, event.message)
-            if forwarded:
-                message_preview = event.message.text[:50] + "..." if event.message.text and len(event.message.text) > 50 else "Media or other content"
-                print(f"✓ Message forwarded: {message_preview}")
+            # Send as a new message
+            if media:
+                await client.send_file(
+                    DESTINATION_CHANNEL,
+                    media,
+                    caption=message_text,
+                    formatting_entities=event.message.entities
+                )
+                os.remove(media)  # Clean up
             else:
-                print("⚠️ Message forwarding failed for an unknown reason")
-        except ValueError as e:
-            print(f"❌ Error: Channel not found - {e}")
-            print("Please restart the bot and enter the correct channel ID")
+                await client.send_message(
+                    DESTINATION_CHANNEL,
+                    message_text,
+                    formatting_entities=event.message.entities
+                )
+
+            print("✓ Message sent as new")
+
         except Exception as e:
-            from telethon.errors.rpcerrorlist import FloodWaitError
-            if isinstance(e, FloodWaitError):
-                wait_time = e.seconds
-                print(f"⚠️ Rate limit hit: Need to wait {wait_time} seconds")
-                print(f"Sleeping for {wait_time} seconds and will retry after that")
-                await asyncio.sleep(wait_time)
-                print("Resuming after wait period")
-                try:
-                    # Try again after waiting
-                    forwarded = await client.forward_messages(DESTINATION_CHANNEL, event.message)
-                    if forwarded:
-                        print(f"✓ Message forwarded after waiting")
-                except Exception as retry_error:
-                    print(f"❌ Error on retry: {retry_error}")
-            else:
-                print(f"❌ Error forwarding message: {e}")
+            print(f"❌ Error processing message: {str(e)}")
 
-    # Add a message to confirm we're monitoring
-    print("\nMonitoring started. Bot is now running and watching for new messages.")
-    print(f"SOURCE_CHANNEL: {SOURCE_CHANNEL}")
-    print(f"DESTINATION_CHANNEL: {DESTINATION_CHANNEL}")
-    if TEXT_REPLACEMENTS:
-        print(f"TEXT_REPLACEMENTS: {TEXT_REPLACEMENTS}")
-
-    # Listen for private messages to control the bot
+    # Command handler for bot control
     @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
     async def command_handler(event):
         if event.raw_text.lower() == "/status":
-            status_msg = f"Bot is running.\nForwarding from {SOURCE_CHANNEL} to {DESTINATION_CHANNEL}"
+            status_msg = f"Bot is running\nForwarding from {SOURCE_CHANNEL} to {DESTINATION_CHANNEL}"
             if TEXT_REPLACEMENTS:
-                status_msg += "\nText replacements enabled:"
+                status_msg += "\nText replacements:"
                 for original, replacement in TEXT_REPLACEMENTS.items():
                     status_msg += f"\n- '{original}' → '{replacement}'"
             await event.respond(status_msg)
         elif event.raw_text.lower().startswith("/replace "):
-            # Command format: /replace original_text|replacement_text
             try:
                 parts = event.raw_text[9:].split('|', 1)
                 if len(parts) != 2:
                     await event.respond("Invalid format. Use: /replace original_text|replacement_text")
                     return
-
                 original, replacement = parts
                 TEXT_REPLACEMENTS[original] = replacement
                 await event.respond(f"✓ Added replacement: '{original}' → '{replacement}'")
@@ -300,27 +226,13 @@ async def main():
         else:
             await event.respond("I'm a channel forwarding bot. Use /help to see available commands.")
 
-    # Keep the script running
+    print("\nBot is running and monitoring for new messages.")
     await client.run_until_disconnected()
-
-
-# Add a delay between API calls to avoid rate limits
-async def delayed_api_call(coro, delay=0.5):
-    """Wrapper to add delay between API calls to avoid rate limits"""
-    await asyncio.sleep(delay)
-    return await coro
 
 if __name__ == "__main__":
     try:
-        # Run the main function
-        print("Starting bot with rate limit handling...")
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nBot stopped by user.")
     except Exception as e:
-        from telethon.errors.rpcerrorlist import FloodWaitError
-        if isinstance(e, FloodWaitError):
-            print(f"\nRate limit hit: Need to wait {e.seconds} seconds")
-            print(f"Please restart the bot after {e.seconds} seconds.")
-        else:
-            print(f"An unexpected error occurred: {e}")
+        print(f"An unexpected error occurred: {e}")
