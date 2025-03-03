@@ -146,42 +146,92 @@ async def main():
     @client.on(events.NewMessage(chats=int(SOURCE_CHANNEL)))
     async def forward_handler(event):
         try:
-            print(f"New message received in source channel")
+            print(f"\nNew message received in source channel")
+            print(f"Source channel ID: {SOURCE_CHANNEL}")
+            print(f"Destination channel ID: {DESTINATION_CHANNEL}")
 
-            # Create a new message instead of forwarding
-            message_text = event.message.text if event.message.text else ""
+            # Format destination channel ID correctly
+            try:
+                # First, remove any -100 prefix and clean the ID
+                clean_id = DESTINATION_CHANNEL.replace('-100', '').lstrip('-')
+                # Add the -100 prefix exactly once
+                formatted_dest = f"-100{clean_id}"
+                print(f"Formatted destination ID: {formatted_dest}")
 
-            # Apply text replacements if any
-            if TEXT_REPLACEMENTS and message_text:
-                for original, replacement in TEXT_REPLACEMENTS.items():
-                    message_text = message_text.replace(original, replacement)
+                try:
+                    # First get full entity to verify access
+                    print("Attempting to verify channel access...")
+                    channel = await client.get_entity(int(formatted_dest))
+                    print(f"✓ Channel access verified: {getattr(channel, 'title', 'Unknown')}")
 
-            # Handle media
-            media = None
-            if event.message.media:
-                print("Downloading media...")
-                media = await event.message.download_media()
+                    # Create a new message
+                    message_text = event.message.text if event.message.text else ""
 
-            # Send as a new message
-            if media:
-                await client.send_file(
-                    DESTINATION_CHANNEL,
-                    media,
-                    caption=message_text,
-                    formatting_entities=event.message.entities
-                )
-                os.remove(media)  # Clean up
-            else:
-                await client.send_message(
-                    DESTINATION_CHANNEL,
-                    message_text,
-                    formatting_entities=event.message.entities
-                )
+                    # Apply text replacements if any
+                    if TEXT_REPLACEMENTS and message_text:
+                        print("Applying text replacements...")
+                        original_text = message_text
+                        for original, replacement in TEXT_REPLACEMENTS.items():
+                            message_text = message_text.replace(original, replacement)
+                        if original_text != message_text:
+                            print("✓ Text replacements applied")
 
-            print("✓ Message sent as new")
+                    # Handle media
+                    media = None
+                    if event.message.media:
+                        print("Downloading media...")
+                        try:
+                            media = await event.message.download_media()
+                            print("✓ Media downloaded successfully")
+                        except Exception as e:
+                            print(f"❌ Error downloading media: {str(e)}")
+                            return
+
+                    # Send message
+                    try:
+                        if media:
+                            print("Sending message with media...")
+                            await client.send_file(
+                                channel,  # Use the verified channel entity
+                                media,
+                                caption=message_text,
+                                formatting_entities=event.message.entities
+                            )
+                            os.remove(media)  # Clean up
+                            print("✓ Message with media sent successfully")
+                        else:
+                            print("Sending text message...")
+                            await client.send_message(
+                                channel,  # Use the verified channel entity
+                                message_text,
+                                formatting_entities=event.message.entities
+                            )
+                            print("✓ Text message sent successfully")
+
+                    except Exception as e:
+                        print(f"❌ Error sending message: {str(e)}")
+                        if media and os.path.exists(media):
+                            os.remove(media)  # Clean up on error
+                        return
+
+                except ValueError as e:
+                    print("❌ Error: Could not access destination channel.")
+                    print("Please verify:")
+                    print("1. The bot/account is a member of the channel")
+                    print("2. The channel ID is correct")
+                    print("3. You have permission to post in the channel")
+                    print(f"Full error: {str(e)}")
+                    return
+
+            except Exception as e:
+                print(f"❌ Error with channel ID formatting: {str(e)}")
+                print(f"Raw destination ID: {DESTINATION_CHANNEL}")
+                return
 
         except Exception as e:
-            print(f"❌ Error processing message: {str(e)}")
+            print(f"❌ Error in message handler: {str(e)}")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Full error details: {str(e)}")
 
     # Command handler for bot control
     @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
