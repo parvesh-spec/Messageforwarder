@@ -4,6 +4,9 @@ import asyncio
 import os
 import re
 
+# Add message ID mapping dictionary
+MESSAGE_IDS = {}  # Will store source_msg_id: destination_msg_id mapping
+
 # These example values won't work. You must get your own api_id and
 # api_hash from https://my.telegram.org, under API Development.
 API_ID = int(os.getenv('API_ID', '27202142'))  # Replace with your API ID
@@ -187,11 +190,11 @@ async def main():
                             print(f"❌ Error downloading media: {str(e)}")
                             return
 
-                    # Send message
+                    # Send message and store IDs for edit tracking
                     try:
                         if media:
                             print("Sending message with media...")
-                            await client.send_file(
+                            sent_message = await client.send_file(
                                 channel,  # Use the verified channel entity
                                 media,
                                 caption=message_text,
@@ -201,12 +204,16 @@ async def main():
                             print("✓ Message with media sent successfully")
                         else:
                             print("Sending text message...")
-                            await client.send_message(
+                            sent_message = await client.send_message(
                                 channel,  # Use the verified channel entity
                                 message_text,
                                 formatting_entities=event.message.entities
                             )
                             print("✓ Text message sent successfully")
+
+                        # Store message IDs mapping
+                        MESSAGE_IDS[event.message.id] = sent_message.id
+                        print(f"✓ Message ID mapping stored: {event.message.id} → {sent_message.id}")
 
                     except Exception as e:
                         print(f"❌ Error sending message: {str(e)}")
@@ -230,6 +237,50 @@ async def main():
 
         except Exception as e:
             print(f"❌ Error in message handler: {str(e)}")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Full error details: {str(e)}")
+
+    # Add message edit handler
+    @client.on(events.MessageEdited(chats=int(SOURCE_CHANNEL)))
+    async def edit_handler(event):
+        try:
+            print(f"\nEdited message detected in source channel")
+            if event.message.id not in MESSAGE_IDS:
+                print("❌ Original message mapping not found")
+                return
+
+            dest_msg_id = MESSAGE_IDS[event.message.id]
+            print(f"Found destination message ID: {dest_msg_id}")
+
+            # Get the edited message content
+            message_text = event.message.text if event.message.text else ""
+
+            # Apply text replacements if any
+            if TEXT_REPLACEMENTS and message_text:
+                print("Applying text replacements to edited message...")
+                for original, replacement in TEXT_REPLACEMENTS.items():
+                    message_text = message_text.replace(original, replacement)
+
+            try:
+                # Get destination channel entity
+                channel = await client.get_entity(int(DESTINATION_CHANNEL))
+
+                # Edit the corresponding message
+                print("Updating message in destination channel...")
+                await client.edit_message(
+                    channel,
+                    dest_msg_id,
+                    text=message_text,
+                    formatting_entities=event.message.entities
+                )
+                print("✓ Message updated successfully")
+
+            except Exception as e:
+                print(f"❌ Error editing message: {str(e)}")
+                return
+
+        except Exception as e:
+            print(f"❌ Error in edit handler: {str(e)}")
             print(f"Error type: {type(e).__name__}")
             print(f"Full error details: {str(e)}")
 
@@ -276,7 +327,7 @@ async def main():
         else:
             await event.respond("I'm a channel forwarding bot. Use /help to see available commands.")
 
-    print("\nBot is running and monitoring for new messages.")
+    print("\nBot is running and monitoring for new messages and edits.")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
