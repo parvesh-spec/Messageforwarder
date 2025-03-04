@@ -96,9 +96,12 @@
                     showMessage('Please enter your 2FA password');
                 } else if (data.error) {
                     showMessage(data.error, true);
-                } else {
+                } else if (data.message === 'Login successful') {
                     window.location.href = '/dashboard';
                 }
+            })
+            .catch(error => {
+                showMessage('An error occurred. Please try again.', true);
             });
         }
 
@@ -116,9 +119,12 @@
             .then(data => {
                 if (data.error) {
                     showMessage(data.error, true);
-                } else {
+                } else if (data.message === 'Login successful') {
                     window.location.href = '/dashboard';
                 }
+            })
+            .catch(error => {
+                showMessage('An error occurred. Please try again.', true);
             });
         }
     </script>
