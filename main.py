@@ -5,6 +5,7 @@ import os
 from models import db, User, Channel, BotConfig
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
+from flask import Flask
 
 # Telegram API credentials
 API_ID = int(os.getenv('API_ID', '27202142'))
@@ -19,25 +20,29 @@ print("Initializing bot with database connection...")
 
 async def forward_messages():
     try:
+        print("\n--- Starting message forwarding loop ---")
         # Get all active bot configurations
         bot_configs = BotConfig.query.filter_by(is_active=True).all()
+        print(f"Found {len(bot_configs)} active bot configurations")
 
         for config in bot_configs:
-            print(f"Setting up forwarding for user {config.user_id}")
+            print(f"\nProcessing configuration for user {config.user_id}")
 
             # Get user's channels
             source_channels = Channel.query.filter_by(
                 user_id=config.user_id,
                 is_source=True
             ).all()
+            print(f"Found {len(source_channels)} source channels")
 
             destination_channels = Channel.query.filter_by(
                 user_id=config.user_id,
                 is_destination=True
             ).all()
+            print(f"Found {len(destination_channels)} destination channels")
 
             if not source_channels or not destination_channels:
-                print(f"No channels configured for user {config.user_id}")
+                print(f"No channel configuration found for user {config.user_id}")
                 continue
 
             # Get user's phone number for session
@@ -47,7 +52,7 @@ async def forward_messages():
                 continue
 
             try:
-                # Create client for this user
+                print(f"\nSetting up client for user {user.phone}")
                 client = TelegramClient(f"sessions/{user.phone}", API_ID, API_HASH)
                 await client.connect()
 
@@ -59,6 +64,8 @@ async def forward_messages():
 
                 # Set up message handler for each source channel
                 for source in source_channels:
+                    print(f"\nSetting up handler for source channel {source.telegram_channel_id}")
+
                     @client.on(events.NewMessage(chats=int(source.telegram_channel_id)))
                     async def forward_handler(event):
                         try:
@@ -66,67 +73,58 @@ async def forward_messages():
 
                             for dest in destination_channels:
                                 try:
+                                    print(f"Forwarding to destination channel {dest.telegram_channel_id}")
                                     # Forward the message
-                                    await client.forward_messages(
+                                    forwarded = await client.forward_messages(
                                         int(dest.telegram_channel_id),
                                         event.message
                                     )
-                                    print(f"Message forwarded to {dest.telegram_channel_id}")
+                                    if forwarded:
+                                        print(f"✓ Message successfully forwarded to {dest.telegram_channel_id}")
+                                    else:
+                                        print(f"! Message forwarding failed to {dest.telegram_channel_id}")
                                 except Exception as e:
-                                    print(f"Error forwarding to {dest.telegram_channel_id}: {e}")
+                                    print(f"Error forwarding to {dest.telegram_channel_id}: {str(e)}")
 
                         except Exception as e:
-                            print(f"Error in forward handler: {e}")
-
-                # Add message edit handler (from original code, adapted)
-                for source in source_channels:
-                    @client.on(events.MessageEdited(chats=int(source.telegram_channel_id)))
-                    async def edit_handler(event):
-                        try:
-                            print(f"\nEdited message detected in source channel")
-                            # Find corresponding message in destination
-                            #This section needs significant adaptation to the database model.  Cannot complete without database schema.
-                            pass
-                        except Exception as e:
-                            print(f"❌ Error in edit handler: {str(e)}")
-                            print(f"Error type: {type(e).__name__}")
-                            print(f"Full error details: {str(e)}")
+                            print(f"Error in forward handler: {str(e)}")
 
                 print(f"Message forwarding set up for user {user.phone}")
 
             except Exception as e:
-                print(f"Error setting up client for user {user.phone}: {e}")
+                print(f"Error setting up client for user {user.phone}: {str(e)}")
                 continue
 
+            # Keep the client running
+            try:
+                print(f"\nStarting client for user {user.phone}")
+                await client.run_until_disconnected()
+            except Exception as e:
+                print(f"Client disconnected for user {user.phone}: {str(e)}")
+
     except Exception as e:
-        print(f"Error in forward_messages: {e}")
+        print(f"Error in forward_messages: {str(e)}")
 
 async def main():
     print("Starting Telegram bot service...")
 
     # Initialize database connection
-    from flask import Flask
     app = Flask(__name__)
     app.config['SQLALCHEMY_DATABASE_URI'] = db_url
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     db.init_app(app)
 
     with app.app_context():
-        db.create_all() #Ensure tables exist.
+        db.create_all()  # Ensure tables exist
+
         while True:
             try:
                 await forward_messages()
-                print("Waiting for messages...")
-                await asyncio.sleep(60)  # Check for new configurations every minute
+                print("\nRestarting message forwarding loop...")
+                await asyncio.sleep(10)  # Short delay before retry
             except Exception as e:
-                print(f"Error in main loop: {e}")
-                await asyncio.sleep(10)  # Wait before retrying
-
-
-    # Command handler for bot control (from original code, adapted)
-    #This section needs adaptation to the database model. Cannot complete without database schema.
-    pass
-
+                print(f"Error in main loop: {str(e)}")
+                await asyncio.sleep(5)  # Wait before retrying
 
 if __name__ == "__main__":
     # Make sure sessions directory exists
@@ -138,4 +136,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nBot stopped by user.")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"An unexpected error occurred: {str(e)}")

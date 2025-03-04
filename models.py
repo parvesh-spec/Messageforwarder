@@ -39,7 +39,6 @@ class Channel(db.Model):
     is_source = db.Column(db.Boolean, default=False)
     is_destination = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
 
 class BotConfig(db.Model):
     __tablename__ = 'bot_configs'
@@ -49,4 +48,3 @@ class BotConfig(db.Model):
     is_active = db.Column(db.Boolean, default=False)
     text_replacement_enabled = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
