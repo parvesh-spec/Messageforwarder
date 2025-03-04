@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
 import asyncio
 import os
 import logging
@@ -17,12 +17,40 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.urandom(24)  # for session management
 
+# Store sessions in filesystem
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['SESSION_FILE_DIR'] = 'flask_sessions'
+
 # Telegram API credentials
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
-# Store OTPs temporarily (in production, use a proper database)
-otp_store = {}
+def cleanup_old_sessions():
+    """Remove old session files"""
+    try:
+        # Clean up Telegram sessions
+        sessions_dir = 'sessions'
+        if os.path.exists(sessions_dir):
+            for filename in os.listdir(sessions_dir):
+                filepath = os.path.join(sessions_dir, filename)
+                try:
+                    os.remove(filepath)
+                    logger.info(f"Removed old session file: {filename}")
+                except Exception as e:
+                    logger.error(f"Error removing session file {filename}: {e}")
+
+        # Clean up Flask sessions
+        flask_sessions_dir = 'flask_sessions'
+        if os.path.exists(flask_sessions_dir):
+            for filename in os.listdir(flask_sessions_dir):
+                filepath = os.path.join(flask_sessions_dir, filename)
+                try:
+                    os.remove(filepath)
+                    logger.info(f"Removed old Flask session file: {filename}")
+                except Exception as e:
+                    logger.error(f"Error removing Flask session file {filename}: {e}")
+    except Exception as e:
+        logger.error(f"Error in cleanup_old_sessions: {e}")
 
 def login_required(f):
     @wraps(f)
@@ -34,15 +62,19 @@ def login_required(f):
 
 @app.route('/')
 def login():
+    # Clean up old sessions
+    cleanup_old_sessions()
     return render_template('login.html')
 
 @app.route('/send-otp', methods=['POST'])
 def send_otp():
     phone = request.form.get('phone')
     if not phone:
+        logger.error("Phone number missing in request")
         return jsonify({'error': 'Phone number is required'}), 400
 
     if not phone.startswith('+91'):
+        logger.error(f"Invalid phone number format: {phone}")
         return jsonify({'error': 'Phone number must start with +91'}), 400
 
     try:
@@ -51,14 +83,34 @@ def send_otp():
 
         async def send_code():
             logger.info(f"Initializing Telegram client for phone: {phone}")
-            client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
+            session_file = f"sessions/{phone}"
 
+            # If session exists, check if it's valid
+            if os.path.exists(session_file):
+                try:
+                    client = TelegramClient(session_file, API_ID, API_HASH)
+                    await client.connect()
+                    if await client.is_user_authorized():
+                        logger.info(f"Found valid session for {phone}")
+                        session['user_phone'] = phone
+                        session['logged_in'] = True
+                        await client.disconnect()
+                        return {'message': 'Already authorized', 'already_authorized': True}
+                    else:
+                        logger.info(f"Session exists but not authorized for {phone}")
+                        os.remove(session_file)
+                except Exception as e:
+                    logger.error(f"Error checking existing session: {e}")
+                    if os.path.exists(session_file):
+                        os.remove(session_file)
+
+            # Create new session
+            client = TelegramClient(session_file, API_ID, API_HASH)
             try:
                 logger.info("Connecting to Telegram...")
                 await client.connect()
 
-                if not await client.is_user_authorized():
-                    logger.info("User not authorized, sending code request...")
+                try:
                     # Send code and get the phone_code_hash
                     sent = await client.send_code_request(phone)
                     session['user_phone'] = phone
@@ -66,17 +118,25 @@ def send_otp():
                     logger.info("Code request sent successfully")
                     await client.disconnect()
                     return {'message': 'OTP sent successfully'}
-                else:
-                    logger.info("User already authorized")
+                except PhoneNumberInvalidError:
+                    logger.error(f"Invalid phone number: {phone}")
                     await client.disconnect()
-                    return {'message': 'Already authorized'}
+                    if os.path.exists(session_file):
+                        os.remove(session_file)
+                    return {'error': 'Invalid phone number'}, 400
+
             except Exception as e:
                 logger.error(f"Error in send_code: {str(e)}")
                 if client and client.connected:
                     await client.disconnect()
+                if os.path.exists(session_file):
+                    os.remove(session_file)
                 raise e
 
-        return jsonify(asyncio.run(send_code()))
+        result = asyncio.run(send_code())
+        if isinstance(result, tuple):
+            return jsonify(result[0]), result[1]
+        return jsonify(result)
     except Exception as e:
         logger.error(f"Error in send_otp route: {str(e)}")
         return jsonify({'error': str(e)}), 500
@@ -88,14 +148,19 @@ def verify_otp():
     otp = request.form.get('otp')
     password = request.form.get('password')  # For 2FA
 
-    if not phone or not otp or not phone_code_hash:
-        logger.error("Missing required verification data")
-        return jsonify({'error': 'Phone, OTP and verification data are required'}), 400
+    if not phone or not phone_code_hash:
+        logger.error("Missing session data")
+        return jsonify({'error': 'Session expired. Please try again.'}), 400
+
+    if not otp:
+        logger.error("OTP missing in request")
+        return jsonify({'error': 'OTP is required'}), 400
 
     try:
         async def verify():
             logger.info(f"Verifying OTP for phone: {phone}")
-            client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
+            session_file = f"sessions/{phone}"
+            client = TelegramClient(session_file, API_ID, API_HASH)
 
             try:
                 await client.connect()
@@ -112,9 +177,14 @@ def verify_otp():
                         return {
                             'error': 'two_factor_needed',
                             'message': 'Two-factor authentication is required'
-                        }, 403
-                    await client.sign_in(password=password)
-                    logger.info("2FA verification successful")
+                        }
+                    try:
+                        await client.sign_in(password=password)
+                        logger.info("2FA verification successful")
+                    except Exception as e:
+                        logger.error(f"2FA verification failed: {e}")
+                        await client.disconnect()
+                        return {'error': 'Invalid 2FA password'}, 400
 
                 if await client.is_user_authorized():
                     session['logged_in'] = True
@@ -123,14 +193,17 @@ def verify_otp():
                 else:
                     await client.disconnect()
                     return {'error': 'Invalid OTP'}, 400
+
             except Exception as e:
                 logger.error(f"Error during verification: {str(e)}")
                 if client and client.connected:
                     await client.disconnect()
                 raise e
 
-        return jsonify(asyncio.run(verify()) if isinstance(asyncio.run(verify()), dict) else asyncio.run(verify())[0]), \
-                200 if isinstance(asyncio.run(verify()), dict) else asyncio.run(verify())[1]
+        result = asyncio.run(verify())
+        if isinstance(result, tuple):
+            return jsonify(result[0]), result[1]
+        return jsonify(result)
     except Exception as e:
         logger.error(f"Error in verify_otp route: {str(e)}")
         return jsonify({'error': str(e)}), 500
@@ -160,31 +233,32 @@ def dashboard():
                 await client.disconnect()
             raise e
 
-    return render_template('dashboard.html', channels=asyncio.run(get_channels()))
+    try:
+        channels = asyncio.run(get_channels())
+        return render_template('dashboard.html', channels=channels)
+    except Exception as e:
+        logger.error(f"Error in dashboard route: {str(e)}")
+        return redirect(url_for('login'))
 
-@app.route('/bot/toggle', methods=['POST'])
-@login_required
-def toggle_bot():
-    status = request.form.get('status') == 'true'
-    # Add bot start/stop logic here
-    return jsonify({'status': status})
-
-@app.route('/replace/toggle', methods=['POST'])
-@login_required
-def toggle_replace():
-    status = request.form.get('status') == 'true'
-    # Add text replacement toggle logic here
-    return jsonify({'status': status})
+@app.route('/logout')
+def logout():
+    try:
+        phone = session.get('user_phone')
+        if phone:
+            session_file = f"sessions/{phone}"
+            if os.path.exists(session_file):
+                os.remove(session_file)
+                logger.info(f"Removed session file for {phone}")
+        session.clear()
+        return redirect(url_for('login'))
+    except Exception as e:
+        logger.error(f"Error in logout route: {str(e)}")
+        return redirect(url_for('login'))
 
 if __name__ == '__main__':
     # Make sure sessions directory exists
     os.makedirs('sessions', exist_ok=True)
-    # Run with Hypercorn for better async support
-    import hypercorn.asyncio
-    from hypercorn.config import Config
+    os.makedirs('flask_sessions', exist_ok=True)
 
-    config = Config()
-    config.bind = ["0.0.0.0:5000"]
-    config.accesslog = logging.getLogger('hypercorn.access')
-    config.errorlog = logging.getLogger('hypercorn.error')
-    asyncio.run(hypercorn.asyncio.serve(app, config))
+    # Run with debug mode
+    app.run(host='0.0.0.0', port=5000, debug=True)

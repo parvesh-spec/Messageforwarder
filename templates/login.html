@@ -18,6 +18,7 @@
                 <input type="text" id="otp" placeholder="Enter OTP from Telegram" required>
             </div>
             <button onclick="verifyOTP()">Verify OTP</button>
+            <button onclick="resendOTP()" class="secondary">Resend OTP</button>
         </div>
         <div id="twofa-form" style="display: none;">
             <div class="input-group">
@@ -29,10 +30,20 @@
     </div>
 
     <script>
+        let currentPhone = '';
+
         function showMessage(message, isError = false) {
             const messageDiv = document.getElementById('message');
             messageDiv.innerHTML = message;
             messageDiv.style.color = isError ? 'red' : 'green';
+            console.log(`${isError ? 'Error' : 'Info'}: ${message}`);
+        }
+
+        function resetForms() {
+            document.getElementById('login-form').style.display = 'block';
+            document.getElementById('otp-form').style.display = 'none';
+            document.getElementById('twofa-form').style.display = 'none';
+            document.getElementById('message').innerHTML = '';
         }
 
         function sendOTP() {
@@ -41,6 +52,9 @@
                 showMessage('Phone number must start with +91', true);
                 return;
             }
+
+            currentPhone = phone;
+            console.log('Sending OTP request for:', phone);
 
             fetch('/send-otp', {
                 method: 'POST',
@@ -51,18 +65,37 @@
             })
             .then(response => response.json())
             .then(data => {
+                console.log('OTP request response:', data);
                 if (data.error) {
                     showMessage(data.error, true);
+                } else if (data.already_authorized) {
+                    console.log('Already authorized, redirecting to dashboard');
+                    window.location.href = '/dashboard';
                 } else {
                     document.getElementById('login-form').style.display = 'none';
                     document.getElementById('otp-form').style.display = 'block';
                     showMessage('OTP sent to your Telegram account');
                 }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showMessage('An error occurred. Please try again.', true);
             });
+        }
+
+        function resendOTP() {
+            if (currentPhone) {
+                sendOTP();
+            } else {
+                showMessage('Please enter your phone number first', true);
+                resetForms();
+            }
         }
 
         function verifyOTP() {
             const otp = document.getElementById('otp').value;
+            console.log('Verifying OTP');
+
             fetch('/verify-otp', {
                 method: 'POST',
                 headers: {
@@ -72,6 +105,7 @@
             })
             .then(response => response.json())
             .then(data => {
+                console.log('OTP verification response:', data);
                 if (data.error === 'two_factor_needed') {
                     document.getElementById('otp-form').style.display = 'none';
                     document.getElementById('twofa-form').style.display = 'block';
@@ -81,12 +115,18 @@
                 } else {
                     window.location.href = '/dashboard';
                 }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showMessage('An error occurred. Please try again.', true);
             });
         }
 
         function verify2FA() {
             const otp = document.getElementById('otp').value;
             const password = document.getElementById('password').value;
+            console.log('Verifying 2FA');
+
             fetch('/verify-otp', {
                 method: 'POST',
                 headers: {
@@ -96,13 +136,31 @@
             })
             .then(response => response.json())
             .then(data => {
+                console.log('2FA verification response:', data);
                 if (data.error) {
                     showMessage(data.error, true);
                 } else {
                     window.location.href = '/dashboard';
                 }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showMessage('An error occurred. Please try again.', true);
             });
         }
+
+        // Add event listeners for Enter key
+        document.getElementById('phone').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') sendOTP();
+        });
+
+        document.getElementById('otp').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') verifyOTP();
+        });
+
+        document.getElementById('password').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') verify2FA();
+        });
     </script>
 </body>
 </html>
