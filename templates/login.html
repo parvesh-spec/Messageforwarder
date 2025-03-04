@@ -18,7 +18,6 @@
                 <input type="text" id="otp" placeholder="Enter OTP from Telegram" required>
             </div>
             <button onclick="verifyOTP()">Verify OTP</button>
-            <button onclick="resendOTP()" class="secondary-button">Resend OTP</button>
         </div>
         <div id="twofa-form" style="display: none;">
             <div class="input-group">
@@ -30,120 +29,80 @@
     </div>
 
     <script>
-    function showMessage(message, isError = false) {
-        const messageDiv = document.getElementById('message');
-        messageDiv.innerHTML = message;
-        messageDiv.style.color = isError ? 'red' : 'green';
-    }
-
-    function sendOTP() {
-        const phone = document.getElementById('phone').value;
-        if (!phone.startsWith('+91')) {
-            showMessage('Phone number must start with +91', true);
-            return;
+        function showMessage(message, isError = false) {
+            const messageDiv = document.getElementById('message');
+            messageDiv.innerHTML = message;
+            messageDiv.style.color = isError ? 'red' : 'green';
         }
 
-        fetch('/send-otp', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: `phone=${encodeURIComponent(phone)}`
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.error) {
-                showMessage(data.error, true);
-            } else {
-                if (data.message === 'Already authorized. Redirecting to dashboard...') {
-                    showMessage('Already logged in, redirecting to dashboard...');
-                    setTimeout(() => {
-                        window.location.href = '/dashboard';
-                    }, 1000); // Small delay to show the message
+        function sendOTP() {
+            const phone = document.getElementById('phone').value;
+            if (!phone.startsWith('+91')) {
+                showMessage('Phone number must start with +91', true);
+                return;
+            }
+
+            fetch('/send-otp', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `phone=${encodeURIComponent(phone)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showMessage(data.error, true);
                 } else {
                     document.getElementById('login-form').style.display = 'none';
                     document.getElementById('otp-form').style.display = 'block';
                     showMessage('OTP sent to your Telegram account');
                 }
-            }
-        })
-        .catch(error => {
-            showMessage('An error occurred. Please try again.', true);
-        });
-    }
+            });
+        }
 
-    function resendOTP() {
-        fetch('/resend-otp', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            }
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.error) {
-                if (data.error === 'No phone number found in session. Please enter your phone number again.') {
+        function verifyOTP() {
+            const otp = document.getElementById('otp').value;
+            fetch('/verify-otp', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `otp=${encodeURIComponent(otp)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error === 'two_factor_needed') {
                     document.getElementById('otp-form').style.display = 'none';
-                    document.getElementById('login-form').style.display = 'block';
+                    document.getElementById('twofa-form').style.display = 'block';
+                    showMessage('Please enter your 2FA password');
+                } else if (data.error) {
+                    showMessage(data.error, true);
+                } else {
+                    window.location.href = '/dashboard';
                 }
-                showMessage(data.error, true);
-            } else {
-                showMessage('OTP resent to your Telegram account');
-            }
-        })
-        .catch(error => {
-            showMessage('An error occurred. Please try again.', true);
-        });
-    }
+            });
+        }
 
-    function verifyOTP() {
-        const otp = document.getElementById('otp').value;
-        fetch('/verify-otp', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: `otp=${encodeURIComponent(otp)}`
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.error === 'two_factor_needed') {
-                document.getElementById('otp-form').style.display = 'none';
-                document.getElementById('twofa-form').style.display = 'block';
-                showMessage('Please enter your 2FA password');
-            } else if (data.error) {
-                showMessage(data.error, true);
-            } else if (data.message === 'Login successful') {
-                window.location.href = '/dashboard';
-            }
-        })
-        .catch(error => {
-            showMessage('An error occurred. Please try again.', true);
-        });
-    }
-
-    function verify2FA() {
-        const otp = document.getElementById('otp').value;
-        const password = document.getElementById('password').value;
-        fetch('/verify-otp', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.error) {
-                showMessage(data.error, true);
-            } else if (data.message === 'Login successful') {
-                window.location.href = '/dashboard';
-            }
-        })
-        .catch(error => {
-            showMessage('An error occurred. Please try again.', true);
-        });
-    }
+        function verify2FA() {
+            const otp = document.getElementById('otp').value;
+            const password = document.getElementById('password').value;
+            fetch('/verify-otp', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showMessage(data.error, true);
+                } else {
+                    window.location.href = '/dashboard';
+                }
+            });
+        }
     </script>
 </body>
 </html>
