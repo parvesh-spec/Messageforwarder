@@ -46,6 +46,25 @@
             document.getElementById('message').innerHTML = '';
         }
 
+        function handleApiError(error, defaultMessage = 'An error occurred. Please try again.') {
+            console.error('API Error:', error);
+            let errorMessage = defaultMessage;
+
+            try {
+                if (error.response) {
+                    return error.response.json().then(data => {
+                        showMessage(data.error || defaultMessage, true);
+                    });
+                } else if (error.message) {
+                    errorMessage = error.message;
+                }
+            } catch (e) {
+                console.error('Error parsing error response:', e);
+            }
+
+            showMessage(errorMessage, true);
+        }
+
         function sendOTP() {
             const phone = document.getElementById('phone').value;
             if (!phone.startsWith('+91')) {
@@ -55,6 +74,7 @@
 
             currentPhone = phone;
             console.log('Sending OTP request for:', phone);
+            showMessage('Sending OTP request...');
 
             fetch('/send-otp', {
                 method: 'POST',
@@ -63,9 +83,12 @@
                 },
                 body: `phone=${encodeURIComponent(phone)}`
             })
-            .then(response => response.json())
-            .then(data => {
-                console.log('OTP request response:', data);
+            .then(response => {
+                console.log('OTP request response status:', response.status);
+                return response.json().then(data => ({status: response.status, data}));
+            })
+            .then(({status, data}) => {
+                console.log('OTP request response data:', data);
                 if (data.error) {
                     showMessage(data.error, true);
                 } else if (data.already_authorized) {
@@ -77,10 +100,7 @@
                     showMessage('OTP sent to your Telegram account');
                 }
             })
-            .catch(error => {
-                console.error('Error:', error);
-                showMessage('An error occurred. Please try again.', true);
-            });
+            .catch(error => handleApiError(error));
         }
 
         function resendOTP() {
@@ -95,6 +115,7 @@
         function verifyOTP() {
             const otp = document.getElementById('otp').value;
             console.log('Verifying OTP');
+            showMessage('Verifying OTP...');
 
             fetch('/verify-otp', {
                 method: 'POST',
@@ -103,8 +124,11 @@
                 },
                 body: `otp=${encodeURIComponent(otp)}`
             })
-            .then(response => response.json())
-            .then(data => {
+            .then(response => {
+                console.log('OTP verification response status:', response.status);
+                return response.json().then(data => ({status: response.status, data}));
+            })
+            .then(({status, data}) => {
                 console.log('OTP verification response:', data);
                 if (data.error === 'two_factor_needed') {
                     document.getElementById('otp-form').style.display = 'none';
@@ -116,16 +140,14 @@
                     window.location.href = '/dashboard';
                 }
             })
-            .catch(error => {
-                console.error('Error:', error);
-                showMessage('An error occurred. Please try again.', true);
-            });
+            .catch(error => handleApiError(error));
         }
 
         function verify2FA() {
             const otp = document.getElementById('otp').value;
             const password = document.getElementById('password').value;
             console.log('Verifying 2FA');
+            showMessage('Verifying 2FA...');
 
             fetch('/verify-otp', {
                 method: 'POST',
@@ -134,8 +156,11 @@
                 },
                 body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
             })
-            .then(response => response.json())
-            .then(data => {
+            .then(response => {
+                console.log('2FA verification response status:', response.status);
+                return response.json().then(data => ({status: response.status, data}));
+            })
+            .then(({status, data}) => {
                 console.log('2FA verification response:', data);
                 if (data.error) {
                     showMessage(data.error, true);
@@ -143,10 +168,7 @@
                     window.location.href = '/dashboard';
                 }
             })
-            .catch(error => {
-                console.error('Error:', error);
-                showMessage('An error occurred. Please try again.', true);
-            });
+            .catch(error => handleApiError(error));
         }
 
         // Add event listeners for Enter key

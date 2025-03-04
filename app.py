@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-# Configure SQLAlchemy with proper connection handling
+# Update the session configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
@@ -33,21 +33,29 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 }
 db = SQLAlchemy(app)
 
-# Configure Flask-Session
+# Configure Flask-Session with SQLAlchemy
+class FlaskSession(db.Model):
+    __tablename__ = 'session'
+
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.String(255), unique=True, nullable=False)
+    data = db.Column(db.LargeBinary)
+    expiry = db.Column(db.DateTime)
+
 app.config['SESSION_TYPE'] = 'sqlalchemy'
 app.config['SESSION_SQLALCHEMY'] = db
-app.config['SESSION_SQLALCHEMY_TABLE'] = 'session'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['SESSION_PERMANENT'] = True
 Session(app)
 
-# Database connection for raw queries
+# Database connection with better connection handling
 def get_db():
     if 'db' not in g:
         g.db = psycopg2.connect(
             os.getenv('DATABASE_URL'),
             application_name='telegram_bot_web'
         )
+        g.db.autocommit = True  # Prevent transaction locks
     return g.db
 
 @app.teardown_appcontext
@@ -451,4 +459,5 @@ def toggle_bot():
 
 if __name__ == '__main__':
     os.makedirs('sessions', exist_ok=True)
+    # ALWAYS serve the app on port 5000
     app.run(host='0.0.0.0', port=5000, debug=True)

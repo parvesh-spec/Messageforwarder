@@ -80,10 +80,14 @@ def load_user_replacements(user_id):
 
 def config_monitor():
     while True:
-        load_channel_config()
-        if CURRENT_USER_ID:
-            load_user_replacements(CURRENT_USER_ID)
-        time.sleep(5)  # Check every 5 seconds
+        try:
+            load_channel_config()
+            if CURRENT_USER_ID:
+                load_user_replacements(CURRENT_USER_ID)
+            time.sleep(5)  # Check every 5 seconds
+        except Exception as e:
+            logger.error(f"Error in config monitor: {str(e)}")
+            time.sleep(1)  # Wait a bit before retrying on error
 
 async def main():
     try:
