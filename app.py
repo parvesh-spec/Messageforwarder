@@ -54,12 +54,7 @@ def send_otp():
             else:
                 return {'message': 'Already authorized'}
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(send_code())
-        loop.close()
-
-        return jsonify(result)
+        return jsonify(asyncio.run(send_code()))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -95,13 +90,8 @@ def verify_otp():
             else:
                 return {'error': 'Invalid OTP'}, 400
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(verify())
-        loop.close()
-
-        return jsonify(result if isinstance(result, dict) else result[0]), \
-               200 if isinstance(result, dict) else result[1]
+        return jsonify(asyncio.run(verify()) if isinstance(asyncio.run(verify()), dict) else asyncio.run(verify())[0]), \
+               200 if isinstance(asyncio.run(verify()), dict) else asyncio.run(verify())[1]
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -122,12 +112,7 @@ def dashboard():
                 })
         return channels
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    channels = loop.run_until_complete(get_channels())
-    loop.close()
-
-    return render_template('dashboard.html', channels=channels)
+    return render_template('dashboard.html', channels=asyncio.run(get_channels()))
 
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
@@ -146,5 +131,10 @@ def toggle_replace():
 if __name__ == '__main__':
     # Make sure sessions directory exists
     os.makedirs('sessions', exist_ok=True)
-    # Always serve on port 5000
-    app.run(host='0.0.0.0', port=5000)
+    # Run with Hypercorn for better async support
+    import hypercorn.asyncio
+    from hypercorn.config import Config
+
+    config = Config()
+    config.bind = ["0.0.0.0:5000"]
+    asyncio.run(hypercorn.asyncio.serve(app, config))
