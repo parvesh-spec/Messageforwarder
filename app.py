@@ -1,11 +1,17 @@
-from flask import Flask, render_template, request, session, redirect, url_for, jsonify
+import os
+import logging
+from flask import Flask, render_template, request, session, redirect, url_for, jsonify, g
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
 import asyncio
-import os
-import logging
 from functools import wraps
 from asgiref.sync import async_to_sync
+import psycopg2
+from psycopg2.extras import DictCursor
+import json
+from flask_session import Session
+from datetime import timedelta
+from flask_sqlalchemy import SQLAlchemy
 
 # Set up logging
 logging.basicConfig(
@@ -15,42 +21,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)  # for session management
+app.secret_key = os.urandom(24)
 
-# Store sessions in filesystem
-app.config['SESSION_TYPE'] = 'filesystem'
-app.config['SESSION_FILE_DIR'] = 'flask_sessions'
+# Configure SQLAlchemy
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
+# Configure Flask-Session
+app.config['SESSION_TYPE'] = 'sqlalchemy'
+app.config['SESSION_SQLALCHEMY'] = db
+app.config['SESSION_SQLALCHEMY_TABLE'] = 'session'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+app.config['SESSION_PERMANENT'] = True
+Session(app)
+
+# Database connection for raw queries
+def get_db():
+    if 'db' not in g:
+        g.db = psycopg2.connect(os.getenv('DATABASE_URL'))
+    return g.db
+
+@app.teardown_appcontext
+def close_db(e=None):
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
 
 # Telegram API credentials
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
-
-def cleanup_old_sessions():
-    """Remove old session files"""
-    try:
-        # Clean up Telegram sessions
-        sessions_dir = 'sessions'
-        if os.path.exists(sessions_dir):
-            for filename in os.listdir(sessions_dir):
-                filepath = os.path.join(sessions_dir, filename)
-                try:
-                    os.remove(filepath)
-                    logger.info(f"Removed old session file: {filename}")
-                except Exception as e:
-                    logger.error(f"Error removing session file {filename}: {e}")
-
-        # Clean up Flask sessions
-        flask_sessions_dir = 'flask_sessions'
-        if os.path.exists(flask_sessions_dir):
-            for filename in os.listdir(flask_sessions_dir):
-                filepath = os.path.join(flask_sessions_dir, filename)
-                try:
-                    os.remove(filepath)
-                    logger.info(f"Removed old Flask session file: {filename}")
-                except Exception as e:
-                    logger.error(f"Error removing Flask session file {filename}: {e}")
-    except Exception as e:
-        logger.error(f"Error in cleanup_old_sessions: {e}")
 
 def login_required(f):
     @wraps(f)
@@ -60,10 +60,19 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def get_user_id(phone):
+    db = get_db()
+    with db.cursor() as cur:
+        cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
+        result = cur.fetchone()
+        if result:
+            return result[0]
+        cur.execute("INSERT INTO users (phone) VALUES (%s) RETURNING id", (phone,))
+        db.commit()
+        return cur.fetchone()[0]
+
 @app.route('/')
 def login():
-    # Clean up old sessions
-    cleanup_old_sessions()
     return render_template('login.html')
 
 @app.route('/send-otp', methods=['POST'])
@@ -210,7 +219,6 @@ def verify_otp():
 def dashboard():
     async def get_channels():
         phone = session.get('user_phone')
-        logger.info(f"Fetching channels for phone: {phone}")
         client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
 
         try:
@@ -237,6 +245,92 @@ def dashboard():
         logger.error(f"Error in dashboard route: {str(e)}")
         return redirect(url_for('login'))
 
+@app.route('/add-replacement', methods=['POST'])
+@login_required
+def add_replacement():
+    try:
+        original = request.form.get('original')
+        replacement = request.form.get('replacement')
+        user_phone = session.get('user_phone')
+
+        if not original or not replacement:
+            return jsonify({'error': 'Both original and replacement text are required'}), 400
+
+        user_id = get_user_id(user_phone)
+
+        db = get_db()
+        with db.cursor() as cur:
+            cur.execute("""
+                INSERT INTO text_replacements (user_id, original_text, replacement_text)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id, original_text) 
+                DO UPDATE SET replacement_text = EXCLUDED.replacement_text
+            """, (user_id, original, replacement))
+            db.commit()
+
+        # Update TEXT_REPLACEMENTS in main.py
+        import main
+        main.load_user_replacements(user_id)
+
+        return jsonify({'message': 'Replacement added successfully'})
+    except Exception as e:
+        logger.error(f"Error adding replacement: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/get-replacements')
+@login_required
+def get_replacements():
+    try:
+        user_phone = session.get('user_phone')
+        user_id = get_user_id(user_phone)
+
+        db = get_db()
+        with db.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT original_text, replacement_text 
+                FROM text_replacements 
+                WHERE user_id = %s
+            """, (user_id,))
+            replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
+
+        return jsonify(replacements)
+    except Exception as e:
+        logger.error(f"Error getting replacements: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/remove-replacement', methods=['POST'])
+@login_required
+def remove_replacement():
+    try:
+        original = request.form.get('original')
+        user_phone = session.get('user_phone')
+
+        if not original:
+            return jsonify({'error': 'Original text is required'}), 400
+
+        user_id = get_user_id(user_phone)
+
+        db = get_db()
+        with db.cursor() as cur:
+            cur.execute("""
+                DELETE FROM text_replacements 
+                WHERE user_id = %s AND original_text = %s
+            """, (user_id, original))
+            deleted = cur.rowcount > 0
+            db.commit()
+
+        if deleted:
+            # Update TEXT_REPLACEMENTS in main.py
+            import main
+            main.load_user_replacements(user_id)
+            return jsonify({'message': 'Replacement removed successfully'})
+        else:
+            return jsonify({'error': 'Replacement not found'}), 404
+
+    except Exception as e:
+        logger.error(f"Error removing replacement: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/logout')
 def logout():
     try:
@@ -251,6 +345,7 @@ def logout():
     except Exception as e:
         logger.error(f"Error in logout route: {str(e)}")
         return redirect(url_for('login'))
+
 
 @app.route('/update-channels', methods=['POST'])
 @login_required
@@ -295,90 +390,19 @@ def update_channels():
         logger.error(f"Error updating channels: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/add-replacement', methods=['POST'])
-@login_required
-def add_replacement():
-    try:
-        original = request.form.get('original')
-        replacement = request.form.get('replacement')
-
-        logger.debug(f"Received add replacement request - Original: '{original}', Replacement: '{replacement}'")
-
-        if not original or not replacement:
-            logger.error("Missing required fields for text replacement")
-            return jsonify({'error': 'Both original and replacement text are required'}), 400
-
-        # Update TEXT_REPLACEMENTS
-        import main
-        main.TEXT_REPLACEMENTS[original] = replacement
-        logger.info(f"Added text replacement: '{original}' → '{replacement}'")
-        logger.debug(f"Current TEXT_REPLACEMENTS state: {main.TEXT_REPLACEMENTS}")
-
-        # Save replacements to file for persistence
-        try:
-            with open('text_replacements.json', 'w') as f:
-                import json
-                json.dump(main.TEXT_REPLACEMENTS, f)
-            logger.info("Saved text replacements to file")
-            logger.debug(f"Content written to text_replacements.json: {main.TEXT_REPLACEMENTS}")
-        except Exception as e:
-            logger.error(f"Error saving text replacements: {e}")
-
-        # Force reload text replacements in main.py
-        main.load_text_replacements()
-
-        return jsonify({'message': 'Replacement added successfully'})
-    except Exception as e:
-        logger.error(f"Error adding replacement: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/get-replacements')
-@login_required
-def get_replacements():
-    try:
-        import main
-        logger.debug(f"Current TEXT_REPLACEMENTS state: {main.TEXT_REPLACEMENTS}")
-        return jsonify(main.TEXT_REPLACEMENTS)
-    except Exception as e:
-        logger.error(f"Error getting replacements: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/remove-replacement', methods=['POST'])
-@login_required
-def remove_replacement():
-    try:
-        original = request.form.get('original')
-        if not original:
-            return jsonify({'error': 'Original text is required'}), 400
-
-        import main
-        if original in main.TEXT_REPLACEMENTS:
-            del main.TEXT_REPLACEMENTS[original]
-
-            # Update the saved replacements
-            try:
-                with open('text_replacements.json', 'w') as f:
-                    import json
-                    json.dump(main.TEXT_REPLACEMENTS, f)
-                logger.info("Updated text replacements file after removal")
-            except Exception as e:
-                logger.error(f"Error updating text replacements file: {e}")
-
-            logger.info(f"Removed text replacement for '{original}'")
-            return jsonify({'message': 'Replacement removed successfully'})
-        else:
-            return jsonify({'error': 'Replacement not found'}), 404
-    except Exception as e:
-        logger.error(f"Error removing replacement: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
 @app.route('/clear-replacements', methods=['POST'])
 @login_required
 def clear_replacements():
     try:
-        import main
-        main.TEXT_REPLACEMENTS.clear()
-        logger.info("Cleared all text replacements")
+        user_phone = session.get('user_phone')
+        user_id = get_user_id(user_phone)
+
+        db = get_db()
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM text_replacements WHERE user_id = %s", (user_id,))
+            db.commit()
+
+        logger.info("Cleared all text replacements for user")
         return jsonify({'message': 'All replacements cleared'})
     except Exception as e:
         logger.error(f"Error clearing replacements: {str(e)}")
@@ -418,9 +442,5 @@ def toggle_bot():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    # Make sure sessions directory exists
     os.makedirs('sessions', exist_ok=True)
-    os.makedirs('flask_sessions', exist_ok=True)
-
-    # Run with debug mode
     app.run(host='0.0.0.0', port=5000, debug=True)

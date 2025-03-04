@@ -3,6 +3,9 @@ import logging
 import json
 import time
 from threading import Thread
+import psycopg2
+from psycopg2.extras import DictCursor
+import os
 
 # Add stream handler to output logs to console
 handler = logging.StreamHandler(sys.stdout)
@@ -17,7 +20,6 @@ logger.setLevel(logging.DEBUG)
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
 import asyncio
-import os
 
 # Message ID mapping dictionary
 MESSAGE_IDS = {}  # Will store source_msg_id: destination_msg_id mapping
@@ -30,8 +32,15 @@ API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 SOURCE_CHANNEL = None
 DESTINATION_CHANNEL = None
 
-# Define text replacement dictionary
+# Text replacement dictionary - now per user
 TEXT_REPLACEMENTS = {}
+CURRENT_USER_ID = None
+
+# Database connection
+DATABASE_URL = os.getenv('DATABASE_URL')
+
+def get_db():
+    return psycopg2.connect(DATABASE_URL)
 
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
@@ -46,32 +55,32 @@ def load_channel_config():
     except Exception as e:
         logger.error(f"Error loading channel configuration: {str(e)}")
 
-def load_text_replacements():
-    global TEXT_REPLACEMENTS
+def load_user_replacements(user_id):
+    global TEXT_REPLACEMENTS, CURRENT_USER_ID
     try:
-        with open('text_replacements.json', 'r') as f:
-            TEXT_REPLACEMENTS = json.load(f)
-            logger.info(f"Loaded text replacements from file: {TEXT_REPLACEMENTS}")
-    except FileNotFoundError:
-        logger.warning("No text replacements file found")
-        TEXT_REPLACEMENTS = {}
+        CURRENT_USER_ID = user_id
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT original_text, replacement_text 
+                    FROM text_replacements 
+                    WHERE user_id = %s
+                """, (user_id,))
+                TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
+                logger.info(f"Loaded text replacements for user {user_id}: {TEXT_REPLACEMENTS}")
     except Exception as e:
-        logger.error(f"Error loading text replacements: {str(e)}")
+        logger.error(f"Error loading text replacements for user {user_id}: {str(e)}")
         TEXT_REPLACEMENTS = {}
-    finally:
-        logger.info(f"Current TEXT_REPLACEMENTS state: {TEXT_REPLACEMENTS}")
 
 def config_monitor():
     while True:
         load_channel_config()
-        load_text_replacements()  # Also monitor text replacements
+        if CURRENT_USER_ID:
+            load_user_replacements(CURRENT_USER_ID)
         time.sleep(5)  # Check every 5 seconds
 
 async def main():
     try:
-        # Load text replacements
-        load_text_replacements()
-
         # Start config monitoring in background
         Thread(target=config_monitor, daemon=True).start()
         logger.info("Started channel configuration monitor")
@@ -217,8 +226,6 @@ async def main():
             try:
                 global SOURCE_CHANNEL, DESTINATION_CHANNEL
                 logger.debug(f"Edit event received for message ID: {event.message.id}")
-                logger.debug(f"Current SOURCE_CHANNEL: {SOURCE_CHANNEL}")
-                logger.debug(f"Current DESTINATION_CHANNEL: {DESTINATION_CHANNEL}")
 
                 # Skip if channels not configured
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
@@ -253,8 +260,9 @@ async def main():
                 if TEXT_REPLACEMENTS and message_text:
                     logger.debug("Applying text replacements to edited message...")
                     for original, replacement in TEXT_REPLACEMENTS.items():
-                        message_text = message_text.replace(original, replacement)
-                    logger.debug(f"Modified message text: {message_text}")
+                        if original in message_text:
+                            message_text = message_text.replace(original, replacement)
+                            logger.info(f"Replaced '{original}' with '{replacement}' in edited message")
 
                 try:
                     # Format destination channel ID
