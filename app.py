@@ -98,26 +98,39 @@ def login_required(f):
 
 @app.route('/')
 def login():
-    # If user is already logged in, redirect to dashboard
-    if 'logged_in' in session and session['logged_in']:
-        return redirect(url_for('dashboard'))
+    try:
+        with app.app_context():
+            # Check if user has valid session
+            if 'session_id' in session:
+                user_session = UserSession.query.filter_by(
+                    session_id=session.get('session_id'),
+                    is_active=True
+                ).first()
+                if user_session and user_session.expires_at > datetime.utcnow():
+                    return redirect(url_for('dashboard'))
+    except Exception as e:
+        print(f"Error checking session: {e}")
     return render_template('login.html')
 
 @app.route('/send-otp', methods=['POST'])
 def send_otp():
-    # Check if user is already logged in
-    if 'logged_in' in session and session['logged_in']:
-        return jsonify({'message': 'Already logged in. Redirecting to dashboard...'}), 200
-
-    phone = request.form.get('phone')
-    if not phone:
-        return jsonify({'error': 'Phone number is required'}), 400
-
-    if not phone.startswith('+91'):
-        return jsonify({'error': 'Phone number must start with +91'}), 400
-
     try:
-        os.makedirs('sessions', exist_ok=True)
+        # Check if user has valid session first
+        if 'session_id' in session:
+            with app.app_context():
+                user_session = UserSession.query.filter_by(
+                    session_id=session.get('session_id'),
+                    is_active=True
+                ).first()
+                if user_session and user_session.expires_at > datetime.utcnow():
+                    return jsonify({'message': 'Already authorized. Redirecting to dashboard...'}), 200
+
+        phone = request.form.get('phone')
+        if not phone:
+            return jsonify({'error': 'Phone number is required'}), 400
+
+        if not phone.startswith('+91'):
+            return jsonify({'error': 'Phone number must start with +91'}), 400
 
         async def send_code():
             client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)

@@ -57,7 +57,9 @@
             } else {
                 if (data.message === 'Already authorized. Redirecting to dashboard...') {
                     showMessage('Already logged in, redirecting to dashboard...');
-                    window.location.href = '/dashboard';
+                    setTimeout(() => {
+                        window.location.href = '/dashboard';
+                    }, 1000); // Small delay to show the message
                 } else {
                     document.getElementById('login-form').style.display = 'none';
                     document.getElementById('otp-form').style.display = 'block';
