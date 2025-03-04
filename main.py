@@ -51,13 +51,15 @@ def load_text_replacements():
     try:
         with open('text_replacements.json', 'r') as f:
             TEXT_REPLACEMENTS = json.load(f)
-            logger.info(f"Loaded text replacements: {TEXT_REPLACEMENTS}")
+            logger.info(f"Loaded text replacements from file: {TEXT_REPLACEMENTS}")
     except FileNotFoundError:
         logger.warning("No text replacements file found")
         TEXT_REPLACEMENTS = {}
     except Exception as e:
         logger.error(f"Error loading text replacements: {str(e)}")
         TEXT_REPLACEMENTS = {}
+    finally:
+        logger.info(f"Current TEXT_REPLACEMENTS state: {TEXT_REPLACEMENTS}")
 
 def config_monitor():
     while True:
@@ -138,14 +140,27 @@ async def main():
 
                     # Apply text replacements if any
                     if TEXT_REPLACEMENTS and message_text:
-                        logger.debug("Applying text replacements...")
-                        logger.debug(f"Current replacements: {TEXT_REPLACEMENTS}")
-                        logger.debug(f"Original text: {message_text}")
+                        logger.debug("Starting text replacement process...")
+                        logger.debug(f"Current TEXT_REPLACEMENTS dictionary: {TEXT_REPLACEMENTS}")
+                        logger.debug(f"Original text before replacements: {message_text}")
+
                         for original, replacement in TEXT_REPLACEMENTS.items():
+                            logger.debug(f"Checking replacement: '{original}' -> '{replacement}'")
                             if original in message_text:
+                                old_text = message_text
                                 message_text = message_text.replace(original, replacement)
                                 logger.info(f"Replaced '{original}' with '{replacement}'")
-                        logger.debug(f"Modified text: {message_text}")
+                                logger.debug(f"Text changed from '{old_text}' to '{message_text}'")
+                            else:
+                                logger.debug(f"Text '{original}' not found in message")
+
+                        logger.debug(f"Final text after all replacements: {message_text}")
+                    else:
+                        logger.debug("No text replacements to apply")
+                        if not TEXT_REPLACEMENTS:
+                            logger.debug("TEXT_REPLACEMENTS dictionary is empty")
+                        if not message_text:
+                            logger.debug("No message text to process")
 
                     # Handle media
                     media = None

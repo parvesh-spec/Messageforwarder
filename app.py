@@ -302,13 +302,17 @@ def add_replacement():
         original = request.form.get('original')
         replacement = request.form.get('replacement')
 
+        logger.debug(f"Received add replacement request - Original: '{original}', Replacement: '{replacement}'")
+
         if not original or not replacement:
+            logger.error("Missing required fields for text replacement")
             return jsonify({'error': 'Both original and replacement text are required'}), 400
 
         # Update TEXT_REPLACEMENTS
         import main
         main.TEXT_REPLACEMENTS[original] = replacement
         logger.info(f"Added text replacement: '{original}' → '{replacement}'")
+        logger.debug(f"Current TEXT_REPLACEMENTS state: {main.TEXT_REPLACEMENTS}")
 
         # Save replacements to file for persistence
         try:
@@ -316,6 +320,7 @@ def add_replacement():
                 import json
                 json.dump(main.TEXT_REPLACEMENTS, f)
             logger.info("Saved text replacements to file")
+            logger.debug(f"Content written to text_replacements.json: {main.TEXT_REPLACEMENTS}")
         except Exception as e:
             logger.error(f"Error saving text replacements: {e}")
 
@@ -329,6 +334,7 @@ def add_replacement():
 def get_replacements():
     try:
         import main
+        logger.debug(f"Current TEXT_REPLACEMENTS state: {main.TEXT_REPLACEMENTS}")
         return jsonify(main.TEXT_REPLACEMENTS)
     except Exception as e:
         logger.error(f"Error getting replacements: {str(e)}")
