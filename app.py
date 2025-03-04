@@ -2,7 +2,6 @@ from flask import Flask, render_template, request, session, redirect, url_for, j
 from telethon import TelegramClient, events, sync, Button
 from telethon.errors import SessionPasswordNeededError
 from functools import wraps
-import asyncio
 import os
 import re
 
@@ -14,14 +13,6 @@ API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')  # Replace 
 # Store client instances and states
 clients = {}
 client_states = {}
-
-def get_event_loop():
-    try:
-        return asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)  # for session management
@@ -50,20 +41,15 @@ def send_otp():
         # Initialize client and state
         if phone not in clients:
             print(f"Creating new client for {phone}")
-            client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH, connection_retries=5, timeout=30)
-
-            # Start the client in the event loop
-            loop = get_event_loop()
-            loop.run_until_complete(client.connect())
-
+            client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
+            client.start()
             clients[phone] = client
             client_states[phone] = {'authorized': False, 'phone': phone}
 
         client = clients[phone]
 
         # Check if already authorized
-        loop = get_event_loop()
-        if loop.run_until_complete(client.is_user_authorized()):
+        if client.is_user_authorized():
             print(f"User {phone} is already authorized")
             session['user_phone'] = phone
             client_states[phone]['authorized'] = True
@@ -71,7 +57,7 @@ def send_otp():
 
         # Send code request
         print(f"Sending code request to {phone}")
-        loop.run_until_complete(client.send_code_request(phone))
+        client.send_code_request(phone)
         session['user_phone'] = phone
 
         return jsonify({'message': 'OTP sent successfully'})
@@ -98,11 +84,9 @@ def verify_otp():
         try:
             # Sign in with the code
             print(f"Attempting to sign in with OTP for {phone}")
-            loop = get_event_loop()
-            loop.run_until_complete(client.sign_in(phone, otp))
+            client.sign_in(phone, otp)
 
-            # Check if two-factor auth is enabled
-            if loop.run_until_complete(client.is_user_authorized()):
+            if client.is_user_authorized():
                 client_states[phone]['authorized'] = True
                 print(f"User {phone} successfully signed in")
                 return jsonify({'message': 'Login successful', 'redirect': '/dashboard'})
@@ -141,10 +125,9 @@ def verify_2fa():
 
         try:
             print(f"Attempting 2FA verification for {phone}")
-            loop = get_event_loop()
-            loop.run_until_complete(client.sign_in(password=password))
+            client.sign_in(password=password)
 
-            if loop.run_until_complete(client.is_user_authorized()):
+            if client.is_user_authorized():
                 client_states[phone]['authorized'] = True
                 print(f"2FA verification successful for {phone}")
                 return jsonify({'message': 'Login successful', 'redirect': '/dashboard'})
@@ -173,8 +156,7 @@ def dashboard():
         print(f"Fetching channels for {phone}")
         channels = []
         try:
-            loop = get_event_loop()
-            dialogs = loop.run_until_complete(client.get_dialogs())
+            dialogs = client.get_dialogs()
             for dialog in dialogs:
                 if dialog.is_channel:
                     channels.append({
