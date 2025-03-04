@@ -36,11 +36,14 @@ DESTINATION_CHANNEL = None
 TEXT_REPLACEMENTS = {}
 CURRENT_USER_ID = None
 
-# Database connection
-DATABASE_URL = os.getenv('DATABASE_URL')
-
+# Database connection with better connection handling
 def get_db():
-    return psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(
+        os.getenv('DATABASE_URL'),
+        application_name='telegram_bot_main'
+    )
+    conn.autocommit = True  # Prevent transaction locks
+    return conn
 
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
@@ -59,7 +62,8 @@ def load_user_replacements(user_id):
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
     try:
         CURRENT_USER_ID = user_id
-        with get_db() as conn:
+        conn = get_db()
+        try:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute("""
                     SELECT original_text, replacement_text 
@@ -68,6 +72,8 @@ def load_user_replacements(user_id):
                 """, (user_id,))
                 TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
                 logger.info(f"Loaded text replacements for user {user_id}: {TEXT_REPLACEMENTS}")
+        finally:
+            conn.close()
     except Exception as e:
         logger.error(f"Error loading text replacements for user {user_id}: {str(e)}")
         TEXT_REPLACEMENTS = {}

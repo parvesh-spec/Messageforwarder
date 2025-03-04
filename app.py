@@ -23,9 +23,14 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-# Configure SQLAlchemy
+# Configure SQLAlchemy with proper connection handling
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_size': 10,
+    'pool_timeout': 30,
+    'pool_recycle': 1800,
+}
 db = SQLAlchemy(app)
 
 # Configure Flask-Session
@@ -39,7 +44,10 @@ Session(app)
 # Database connection for raw queries
 def get_db():
     if 'db' not in g:
-        g.db = psycopg2.connect(os.getenv('DATABASE_URL'))
+        g.db = psycopg2.connect(
+            os.getenv('DATABASE_URL'),
+            application_name='telegram_bot_web'
+        )
     return g.db
 
 @app.teardown_appcontext
