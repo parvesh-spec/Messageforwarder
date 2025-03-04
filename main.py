@@ -46,6 +46,19 @@ def load_channel_config():
     except Exception as e:
         logger.error(f"Error loading channel configuration: {str(e)}")
 
+def load_text_replacements():
+    global TEXT_REPLACEMENTS
+    try:
+        with open('text_replacements.json', 'r') as f:
+            TEXT_REPLACEMENTS = json.load(f)
+            logger.info(f"Loaded text replacements: {TEXT_REPLACEMENTS}")
+    except FileNotFoundError:
+        logger.warning("No text replacements file found")
+        TEXT_REPLACEMENTS = {}
+    except Exception as e:
+        logger.error(f"Error loading text replacements: {str(e)}")
+        TEXT_REPLACEMENTS = {}
+
 def config_monitor():
     while True:
         load_channel_config()
@@ -53,6 +66,9 @@ def config_monitor():
 
 async def main():
     try:
+        # Load text replacements
+        load_text_replacements()
+
         # Start config monitoring in background
         Thread(target=config_monitor, daemon=True).start()
         logger.info("Started channel configuration monitor")
@@ -123,9 +139,13 @@ async def main():
                     # Apply text replacements if any
                     if TEXT_REPLACEMENTS and message_text:
                         logger.debug("Applying text replacements...")
+                        logger.debug(f"Current replacements: {TEXT_REPLACEMENTS}")
+                        logger.debug(f"Original text: {message_text}")
                         for original, replacement in TEXT_REPLACEMENTS.items():
-                            message_text = message_text.replace(original, replacement)
-                        logger.debug(f"Modified message text: {message_text}")
+                            if original in message_text:
+                                message_text = message_text.replace(original, replacement)
+                                logger.info(f"Replaced '{original}' with '{replacement}'")
+                        logger.debug(f"Modified text: {message_text}")
 
                     # Handle media
                     media = None

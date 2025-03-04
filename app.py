@@ -305,10 +305,19 @@ def add_replacement():
         if not original or not replacement:
             return jsonify({'error': 'Both original and replacement text are required'}), 400
 
-        # Update main.py's replacements
+        # Update TEXT_REPLACEMENTS
         import main
         main.TEXT_REPLACEMENTS[original] = replacement
         logger.info(f"Added text replacement: '{original}' → '{replacement}'")
+
+        # Save replacements to file for persistence
+        try:
+            with open('text_replacements.json', 'w') as f:
+                import json
+                json.dump(main.TEXT_REPLACEMENTS, f)
+            logger.info("Saved text replacements to file")
+        except Exception as e:
+            logger.error(f"Error saving text replacements: {e}")
 
         return jsonify({'message': 'Replacement added successfully'})
     except Exception as e:
@@ -336,6 +345,16 @@ def remove_replacement():
         import main
         if original in main.TEXT_REPLACEMENTS:
             del main.TEXT_REPLACEMENTS[original]
+
+            # Update the saved replacements
+            try:
+                with open('text_replacements.json', 'w') as f:
+                    import json
+                    json.dump(main.TEXT_REPLACEMENTS, f)
+                logger.info("Updated text replacements file after removal")
+            except Exception as e:
+                logger.error(f"Error updating text replacements file: {e}")
+
             logger.info(f"Removed text replacement for '{original}'")
             return jsonify({'message': 'Replacement removed successfully'})
         else:
