@@ -30,6 +30,19 @@
             </div>
         </div>
 
+        <div class="text-replacement-section">
+            <h3>Text Replacements</h3>
+            <div class="replacement-form">
+                <input type="text" id="original-text" placeholder="Original text">
+                <input type="text" id="replacement-text" placeholder="Replacement text">
+                <button onclick="addReplacement()">Add Replacement</button>
+            </div>
+            <div id="replacements-list">
+                <!-- Replacements will be listed here -->
+            </div>
+            <button onclick="clearReplacements()" class="secondary">Clear All Replacements</button>
+        </div>
+
         <div class="controls-section">
             <div class="control-group">
                 <label>Bot Status:</label>
@@ -59,6 +72,11 @@
                 return;
             }
 
+            if (sourceChannel === destChannel) {
+                showMessage('Source and destination channels cannot be the same', true);
+                return;
+            }
+
             console.log('Updating channel configuration...');
             fetch('/update-channels', {
                 method: 'POST',
@@ -79,6 +97,91 @@
             .catch(error => {
                 console.error('Error:', error);
                 showMessage('An error occurred while updating channels', true);
+            });
+        }
+
+        function addReplacement() {
+            const originalText = document.getElementById('original-text').value;
+            const replacementText = document.getElementById('replacement-text').value;
+
+            if (!originalText || !replacementText) {
+                showMessage('Please enter both original and replacement text', true);
+                return;
+            }
+
+            fetch('/add-replacement', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `original=${encodeURIComponent(originalText)}&replacement=${encodeURIComponent(replacementText)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showMessage(data.error, true);
+                } else {
+                    showMessage('Text replacement added successfully');
+                    document.getElementById('original-text').value = '';
+                    document.getElementById('replacement-text').value = '';
+                    loadReplacements();
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showMessage('An error occurred while adding replacement', true);
+            });
+        }
+
+        function loadReplacements() {
+            fetch('/get-replacements')
+            .then(response => response.json())
+            .then(data => {
+                const replacementsList = document.getElementById('replacements-list');
+                replacementsList.innerHTML = '';
+                for (const [original, replacement] of Object.entries(data)) {
+                    const div = document.createElement('div');
+                    div.className = 'replacement-item';
+                    div.innerHTML = `
+                        <span>'${original}' → '${replacement}'</span>
+                        <button onclick="removeReplacement('${original}')" class="remove-btn">×</button>
+                    `;
+                    replacementsList.appendChild(div);
+                }
+            });
+        }
+
+        function removeReplacement(original) {
+            fetch('/remove-replacement', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `original=${encodeURIComponent(original)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showMessage(data.error, true);
+                } else {
+                    loadReplacements();
+                    showMessage('Replacement removed successfully');
+                }
+            });
+        }
+
+        function clearReplacements() {
+            fetch('/clear-replacements', {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showMessage(data.error, true);
+                } else {
+                    loadReplacements();
+                    showMessage('All replacements cleared');
+                }
             });
         }
 
@@ -114,6 +217,9 @@
                 element.checked = !element.checked;
             });
         }
+
+        // Load replacements when page loads
+        document.addEventListener('DOMContentLoaded', loadReplacements);
     </script>
 </body>
 </html>

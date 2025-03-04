@@ -272,9 +272,75 @@ def update_channels():
         session['dest_channel'] = destination
         logger.info(f"Updated channel configuration - Source: {source}, Destination: {destination}")
 
+        # Update main.py's channel IDs
+        import main
+        main.SOURCE_CHANNEL = source
+        main.DESTINATION_CHANNEL = destination
+
         return jsonify({'message': 'Channel configuration updated successfully'})
     except Exception as e:
         logger.error(f"Error updating channels: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/add-replacement', methods=['POST'])
+@login_required
+def add_replacement():
+    try:
+        original = request.form.get('original')
+        replacement = request.form.get('replacement')
+
+        if not original or not replacement:
+            return jsonify({'error': 'Both original and replacement text are required'}), 400
+
+        # Update main.py's replacements
+        import main
+        main.TEXT_REPLACEMENTS[original] = replacement
+        logger.info(f"Added text replacement: '{original}' → '{replacement}'")
+
+        return jsonify({'message': 'Replacement added successfully'})
+    except Exception as e:
+        logger.error(f"Error adding replacement: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/get-replacements')
+@login_required
+def get_replacements():
+    try:
+        import main
+        return jsonify(main.TEXT_REPLACEMENTS)
+    except Exception as e:
+        logger.error(f"Error getting replacements: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/remove-replacement', methods=['POST'])
+@login_required
+def remove_replacement():
+    try:
+        original = request.form.get('original')
+        if not original:
+            return jsonify({'error': 'Original text is required'}), 400
+
+        import main
+        if original in main.TEXT_REPLACEMENTS:
+            del main.TEXT_REPLACEMENTS[original]
+            logger.info(f"Removed text replacement for '{original}'")
+            return jsonify({'message': 'Replacement removed successfully'})
+        else:
+            return jsonify({'error': 'Replacement not found'}), 404
+    except Exception as e:
+        logger.error(f"Error removing replacement: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/clear-replacements', methods=['POST'])
+@login_required
+def clear_replacements():
+    try:
+        import main
+        main.TEXT_REPLACEMENTS.clear()
+        logger.info("Cleared all text replacements")
+        return jsonify({'message': 'All replacements cleared'})
+    except Exception as e:
+        logger.error(f"Error clearing replacements: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/bot/toggle', methods=['POST'])

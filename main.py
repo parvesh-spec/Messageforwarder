@@ -20,9 +20,9 @@ MESSAGE_IDS = {}  # Will store source_msg_id: destination_msg_id mapping
 API_ID = int(os.getenv('API_ID', '27202142'))  # Replace with your API ID
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')  # Replace with your API hash
 
-# Load channel IDs from environment variables or use defaults
-SOURCE_CHANNEL = os.getenv('SOURCE_CHANNEL', '-1001234567890')  # Default source channel
-DESTINATION_CHANNEL = os.getenv('DESTINATION_CHANNEL', '-1001234567891')  # Default destination channel
+# Define source and destination channels - will be set by app.py
+SOURCE_CHANNEL = None
+DESTINATION_CHANNEL = None
 
 # Define text replacement dictionary
 TEXT_REPLACEMENTS = {}  # Will be populated during runtime
@@ -44,90 +44,85 @@ async def main():
         logger.info(f"Successfully logged in as {me.first_name} (ID: {me.id})")
 
         # Message handler for forwarding
-        @client.on(events.NewMessage(chats=SOURCE_CHANNEL))
+        @client.on(events.NewMessage())
         async def forward_handler(event):
             try:
+                # Skip if channels not configured
+                if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
+                    logger.info("Channels not configured yet")
+                    return
+
+                # Check if message is from source channel
+                if str(event.chat_id) != str(SOURCE_CHANNEL):
+                    return
+
                 logger.info(f"\nNew message received in source channel")
                 logger.info(f"Source channel ID: {SOURCE_CHANNEL}")
                 logger.info(f"Destination channel ID: {DESTINATION_CHANNEL}")
 
-                # Format destination channel ID correctly
                 try:
-                    # First, remove any -100 prefix and clean the ID
-                    clean_id = DESTINATION_CHANNEL.replace('-100', '').lstrip('-')
-                    # Add the -100 prefix exactly once
-                    formatted_dest = f"-100{clean_id}"
-                    logger.info(f"Formatted destination ID: {formatted_dest}")
+                    # Get destination channel entity
+                    channel = await client.get_entity(int(DESTINATION_CHANNEL))
+                    logger.info(f"✓ Channel access verified: {getattr(channel, 'title', 'Unknown')}")
 
-                    try:
-                        # First get full entity to verify access
-                        logger.info("Attempting to verify channel access...")
-                        channel = await client.get_entity(int(formatted_dest))
-                        logger.info(f"✓ Channel access verified: {getattr(channel, 'title', 'Unknown')}")
+                    # Create a new message
+                    message_text = event.message.text if event.message.text else ""
 
-                        # Create a new message
-                        message_text = event.message.text if event.message.text else ""
+                    # Apply text replacements if any
+                    if TEXT_REPLACEMENTS and message_text:
+                        logger.info("Applying text replacements...")
+                        for original, replacement in TEXT_REPLACEMENTS.items():
+                            message_text = message_text.replace(original, replacement)
 
-                        # Apply text replacements if any
-                        if TEXT_REPLACEMENTS and message_text:
-                            logger.info("Applying text replacements...")
-                            for original, replacement in TEXT_REPLACEMENTS.items():
-                                message_text = message_text.replace(original, replacement)
-
-                        # Handle media
-                        media = None
-                        if event.message.media:
-                            logger.info("Downloading media...")
-                            try:
-                                media = await event.message.download_media()
-                                logger.info("✓ Media downloaded successfully")
-                            except Exception as e:
-                                logger.error(f"❌ Error downloading media: {str(e)}")
-                                return
-
-                        # Send message
+                    # Handle media
+                    media = None
+                    if event.message.media:
+                        logger.info("Downloading media...")
                         try:
-                            if media:
-                                logger.info("Sending message with media...")
-                                sent_message = await client.send_file(
-                                    channel,
-                                    media,
-                                    caption=message_text,
-                                    formatting_entities=event.message.entities
-                                )
-                                os.remove(media)  # Clean up
-                                logger.info("✓ Message with media sent successfully")
-                            else:
-                                logger.info("Sending text message...")
-                                sent_message = await client.send_message(
-                                    channel,
-                                    message_text,
-                                    formatting_entities=event.message.entities
-                                )
-                                logger.info("✓ Text message sent successfully")
-
-                            # Store message IDs mapping
-                            MESSAGE_IDS[event.message.id] = sent_message.id
-                            logger.info(f"✓ Message ID mapping stored: {event.message.id} → {sent_message.id}")
-
+                            media = await event.message.download_media()
+                            logger.info("✓ Media downloaded successfully")
                         except Exception as e:
-                            logger.error(f"❌ Error sending message: {str(e)}")
-                            if media and os.path.exists(media):
-                                os.remove(media)  # Clean up on error
+                            logger.error(f"❌ Error downloading media: {str(e)}")
                             return
 
-                    except ValueError as e:
-                        logger.error("❌ Error: Could not access destination channel.")
-                        logger.error("Please verify:")
-                        logger.error("1. The bot/account is a member of the channel")
-                        logger.error("2. The channel ID is correct")
-                        logger.error("3. You have permission to post in the channel")
-                        logger.error(f"Full error: {str(e)}")
+                    # Send message
+                    try:
+                        if media:
+                            logger.info("Sending message with media...")
+                            sent_message = await client.send_file(
+                                channel,
+                                media,
+                                caption=message_text,
+                                formatting_entities=event.message.entities
+                            )
+                            os.remove(media)  # Clean up
+                            logger.info("✓ Message with media sent successfully")
+                        else:
+                            logger.info("Sending text message...")
+                            sent_message = await client.send_message(
+                                channel,
+                                message_text,
+                                formatting_entities=event.message.entities
+                            )
+                            logger.info("✓ Text message sent successfully")
+
+                        # Store message IDs mapping
+                        MESSAGE_IDS[event.message.id] = sent_message.id
+                        logger.info(f"✓ Message ID mapping stored: {event.message.id} → {sent_message.id}")
+
+                    except Exception as e:
+                        logger.error(f"❌ Error sending message: {str(e)}")
+                        if media and os.path.exists(media):
+                            os.remove(media)  # Clean up on error
                         return
 
-                except Exception as e:
-                    logger.error(f"❌ Error with channel ID formatting: {str(e)}")
-                    logger.error(f"Raw destination ID: {DESTINATION_CHANNEL}")
+                except ValueError as e:
+                    logger.error("❌ Error: Could not access destination channel.")
+                    logger.error("Please verify:")
+                    logger.error("1. The bot/account is a member of the channel")
+                    logger.error("2. The channel ID is correct")
+                    logger.error("3. You have permission to post in the channel")
+                    logger.error(f"Full error: {str(e)}")
                     return
 
             except Exception as e:
@@ -136,9 +131,17 @@ async def main():
                 logger.error(f"Full error details: {str(e)}")
 
         # Add message edit handler
-        @client.on(events.MessageEdited(chats=SOURCE_CHANNEL))
+        @client.on(events.MessageEdited())
         async def edit_handler(event):
             try:
+                # Skip if channels not configured
+                if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
+                    return
+
+                # Check if message is from source channel
+                if str(event.chat_id) != str(SOURCE_CHANNEL):
+                    return
+
                 logger.info(f"\nEdited message detected in source channel")
                 if event.message.id not in MESSAGE_IDS:
                     logger.info("❌ Original message mapping not found")
@@ -178,7 +181,7 @@ async def main():
                 logger.error(f"Error type: {type(e).__name__}")
                 logger.error(f"Full error details: {str(e)}")
 
-        # Command handler for bot control
+        # Command handler for bot control and text replacements
         @client.on(events.NewMessage(pattern=r'/start|/help'))
         async def command_handler(event):
             logger.info(f"Received command: {event.raw_text}")
