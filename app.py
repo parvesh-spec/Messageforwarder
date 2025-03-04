@@ -120,16 +120,6 @@ def login():
 @app.route('/send-otp', methods=['POST'])
 def send_otp():
     try:
-        # Check if user has valid session first
-        if 'session_id' in session:
-            with app.app_context():
-                user_session = UserSession.query.filter_by(
-                    session_id=session.get('session_id'),
-                    is_active=True
-                ).first()
-                if user_session and user_session.expires_at > datetime.utcnow():
-                    return jsonify({'message': 'Already authorized. Redirecting to dashboard...'}), 200
-
         phone = request.form.get('phone')
         if not phone:
             return jsonify({'error': 'Phone number is required'}), 400
@@ -141,32 +131,31 @@ def send_otp():
             client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
             await client.connect()
 
-            if not await client.is_user_authorized():
+            try:
+                if await client.is_user_authorized():
+                    # Create session for already authorized users
+                    me = await client.get_me()
+                    await client.disconnect()
+
+                    # Store user and session info
+                    session_id = os.urandom(24).hex()
+                    session['session_id'] = session_id
+                    session['logged_in'] = True
+                    session['user_phone'] = phone
+
+                    return {'message': 'Already authorized. Redirecting to dashboard...'}, 200
+
+                # For new users, send OTP
                 print(f"Sending OTP for phone: {phone}")
                 sent = await client.send_code_request(phone)
                 session['user_phone'] = phone
                 session['phone_code_hash'] = sent.phone_code_hash
                 await client.disconnect()
-
-                try:
-                    with app.app_context():
-                        print(f"Creating/updating user for phone: {phone}")
-                        user = User.query.filter_by(phone=phone).first()
-                        if not user:
-                            user = User(phone=phone)
-                            db.session.add(user)
-                        db.session.commit()
-                        print(f"User saved with ID: {user.id}")
-                except Exception as db_error:
-                    print(f"Database error in send_otp: {db_error}")
-                    if 'db' in locals():
-                        db.session.rollback()
-                    return {'error': 'Database error occurred'}, 500
-
                 return {'message': 'OTP sent successfully'}
-            else:
+
+            except Exception as e:
                 await client.disconnect()
-                return {'message': 'Already authorized. Redirecting to dashboard...'}, 200
+                raise e
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -175,6 +164,7 @@ def send_otp():
 
         return jsonify(result if isinstance(result, dict) else result[0]), \
                200 if isinstance(result, dict) else result[1]
+
     except Exception as e:
         print(f"Error in send_otp: {str(e)}")
         return jsonify({'error': str(e)}), 500
@@ -264,6 +254,9 @@ def verify_otp():
 def dashboard():
     async def get_channels():
         phone = session.get('user_phone')
+        if not phone:
+            return []
+
         client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
         await client.connect()
 
@@ -272,92 +265,85 @@ def dashboard():
             if dialog.is_channel:
                 channels.append({
                     'id': dialog.id,
-                    'name': dialog.name
+                    'name': dialog.name,
+                    'username': dialog.entity.username if hasattr(dialog.entity, 'username') else None
                 })
-
-                # Store channel in database if not exists
-                try:
-                    with app.app_context():
-                        user = User.query.filter_by(phone=phone).first()
-                        existing_channel = Channel.query.filter_by(
-                            user_id=user.id,
-                            telegram_channel_id=dialog.id
-                        ).first()
-
-                        if not existing_channel:
-                            channel = Channel(
-                                user_id=user.id,
-                                telegram_channel_id=dialog.id,
-                                channel_name=dialog.name
-                            )
-                            db.session.add(channel)
-                            db.session.commit()
-                except Exception as db_error:
-                    print(f"Database error in get_channels: {db_error}")
-                    if 'db' in locals():
-                        db.session.rollback()
 
         await client.disconnect()
         return channels
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    channels = loop.run_until_complete(get_channels())
-    loop.close()
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        channels = loop.run_until_complete(get_channels())
+        loop.close()
 
-    return render_template('dashboard.html', channels=channels)
+        return render_template('dashboard.html', channels=channels)
+    except Exception as e:
+        print(f"Error fetching channels: {e}")
+        return render_template('dashboard.html', channels=[])
 
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
 def toggle_bot():
-    status = request.form.get('status') == 'true'
-    phone = session.get('user_phone')
-    user = User.query.filter_by(phone=phone).first()
-
-    # Update bot configuration
     try:
-        with app.app_context():
-            bot_config = BotConfig.query.filter_by(user_id=user.id).first()
-            if not bot_config:
-                bot_config = BotConfig(user_id=user.id)
-                db.session.add(bot_config)
+        status = request.form.get('status') == 'true'
+        session['bot_active'] = status
 
-            bot_config.is_active = status
-            bot_config.updated_at = datetime.utcnow()
-            db.session.commit()
+        if status:
+            # Start message forwarding
+            source = session.get('source_channel')
+            dest = session.get('destination_channel')
+            phone = session.get('user_phone')
+
+            if source and dest and phone:
+                asyncio.run(forward_messages(source, dest, phone))
+
+        return jsonify({'status': status})
+
     except Exception as e:
-        print(f"Database error in toggle_bot: {e}")
-        if 'db' in locals():
-            db.session.rollback()
-        return jsonify({'error': 'Database error'}), 500
+        print(f"Error toggling bot: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
-    return jsonify({'status': status})
-
-@app.route('/replace/toggle', methods=['POST'])
+@app.route('/update-channel', methods=['POST'])
 @login_required
-def toggle_replace():
-    status = request.form.get('status') == 'true'
-    phone = session.get('user_phone')
-    user = User.query.filter_by(phone=phone).first()
-
-    # Update text replacement configuration
+def update_channel():
     try:
-        with app.app_context():
-            bot_config = BotConfig.query.filter_by(user_id=user.id).first()
-            if not bot_config:
-                bot_config = BotConfig(user_id=user.id)
-                db.session.add(bot_config)
+        channel_id = request.form.get('channel_id')
+        is_source = request.form.get('is_source') == 'true'
+        is_destination = request.form.get('is_destination') == 'true'
 
-            bot_config.text_replacement_enabled = status
-            bot_config.updated_at = datetime.utcnow()
-            db.session.commit()
+        if not channel_id:
+            return jsonify({'error': 'Channel ID is required'}), 400
+
+        # Store selected channels in session
+        if is_source:
+            session['source_channel'] = channel_id
+        if is_destination:
+            session['destination_channel'] = channel_id
+
+        return jsonify({
+            'status': 'success',
+            'message': 'Channel updated successfully'
+        })
+
     except Exception as e:
-        print(f"Database error in toggle_replace: {e}")
-        if 'db' in locals():
-            db.session.rollback()
-        return jsonify({'error': 'Database error'}), 500
+        print(f"Error updating channel: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
-    return jsonify({'status': status})
+@app.route('/channel-status')
+@login_required
+def channel_status():
+    try:
+        return jsonify({
+            'source_channel': session.get('source_channel'),
+            'destination_channel': session.get('destination_channel'),
+            'bot_active': session.get('bot_active', False)
+        })
+
+    except Exception as e:
+        print(f"Error getting channel status: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/logout')
 @login_required
@@ -437,90 +423,25 @@ def resend_otp():
         print(f"Error in resend_otp: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+
+async def forward_messages(source_channel_id, destination_channel_id, phone):
+    client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
+    await client.connect()
+    try:
+        source_channel = await client.get_entity(source_channel_id)
+        destination_channel = await client.get_entity(destination_channel_id)
+
+        async for message in client.iter_messages(source_channel):
+            await client.send_message(destination_channel, message)
+
+    except Exception as e:
+        print(f"Error forwarding messages: {e}")
+    finally:
+        await client.disconnect()
+
+
 # Add these new routes after the existing routes
 
-@app.route('/update-channel', methods=['POST'])
-@login_required
-def update_channel():
-    try:
-        channel_id = request.form.get('channel_id')
-        is_source = request.form.get('is_source') == 'true'
-        is_destination = request.form.get('is_destination') == 'true'
-
-        if not channel_id:
-            return jsonify({'error': 'Channel ID is required'}), 400
-
-        with app.app_context():
-            # Get current user
-            phone = session.get('user_phone')
-            user = User.query.filter_by(phone=phone).first()
-
-            # Update channel configuration
-            channel = Channel.query.filter_by(
-                user_id=user.id,
-                telegram_channel_id=channel_id
-            ).first()
-
-            if channel:
-                # If setting as source, clear other source channels
-                if is_source:
-                    Channel.query.filter_by(
-                        user_id=user.id,
-                        is_source=True
-                    ).update({'is_source': False})
-
-                # If setting as destination, clear other destination channels
-                if is_destination:
-                    Channel.query.filter_by(
-                        user_id=user.id,
-                        is_destination=True
-                    ).update({'is_destination': False})
-
-                channel.is_source = is_source
-                channel.is_destination = is_destination
-                channel.updated_at = datetime.utcnow()
-                db.session.commit()
-
-                return jsonify({
-                    'status': 'success',
-                    'message': 'Channel updated successfully'
-                })
-
-            return jsonify({'error': 'Channel not found'}), 404
-
-    except Exception as e:
-        print(f"Error updating channel: {e}")
-        return jsonify({'error': 'Internal server error'}), 500
-
-@app.route('/channel-status')
-@login_required
-def channel_status():
-    try:
-        with app.app_context():
-            phone = session.get('user_phone')
-            user = User.query.filter_by(phone=phone).first()
-
-            source_channel = Channel.query.filter_by(
-                user_id=user.id,
-                is_source=True
-            ).first()
-
-            destination_channel = Channel.query.filter_by(
-                user_id=user.id,
-                is_destination=True
-            ).first()
-
-            bot_config = BotConfig.query.filter_by(user_id=user.id).first()
-
-            return jsonify({
-                'source_channel': source_channel.telegram_channel_id if source_channel else None,
-                'destination_channel': destination_channel.telegram_channel_id if destination_channel else None,
-                'bot_active': bot_config.is_active if bot_config else False
-            })
-
-    except Exception as e:
-        print(f"Error getting channel status: {e}")
-        return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
     # Make sure sessions directory exists
