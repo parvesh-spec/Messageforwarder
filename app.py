@@ -8,7 +8,6 @@ from functools import wraps
 from asgiref.sync import async_to_sync
 import psycopg2
 from psycopg2.extras import DictCursor
-import json
 from flask_session import Session
 from datetime import timedelta
 from flask_sqlalchemy import SQLAlchemy
@@ -105,29 +104,8 @@ def send_otp():
     try:
         async def send_code():
             logger.info(f"Initializing Telegram client for phone: {phone}")
-            session_file = f"sessions/{phone}"
+            client = TelegramClient(None, API_ID, API_HASH)  # Using memory session
 
-            # If session exists, check if it's valid
-            if os.path.exists(session_file):
-                try:
-                    client = TelegramClient(session_file, API_ID, API_HASH)
-                    await client.connect()
-                    if await client.is_user_authorized():
-                        logger.info(f"Found valid session for {phone}")
-                        session['user_phone'] = phone
-                        session['logged_in'] = True
-                        await client.disconnect()
-                        return {'message': 'Already authorized', 'already_authorized': True}
-                    else:
-                        logger.info(f"Session exists but not authorized for {phone}")
-                        os.remove(session_file)
-                except Exception as e:
-                    logger.error(f"Error checking existing session: {e}")
-                    if os.path.exists(session_file):
-                        os.remove(session_file)
-
-            # Create new session
-            client = TelegramClient(session_file, API_ID, API_HASH)
             try:
                 logger.info("Connecting to Telegram...")
                 await client.connect()
@@ -143,16 +121,12 @@ def send_otp():
                 except PhoneNumberInvalidError:
                     logger.error(f"Invalid phone number: {phone}")
                     await client.disconnect()
-                    if os.path.exists(session_file):
-                        os.remove(session_file)
                     return {'error': 'Invalid phone number'}, 400
 
             except Exception as e:
                 logger.error(f"Error in send_code: {str(e)}")
                 if client and client.connected:
                     await client.disconnect()
-                if os.path.exists(session_file):
-                    os.remove(session_file)
                 raise e
 
         result = asyncio.run(send_code())
@@ -181,8 +155,7 @@ def verify_otp():
     try:
         async def verify():
             logger.info(f"Verifying OTP for phone: {phone}")
-            session_file = f"sessions/{phone}"
-            client = TelegramClient(session_file, API_ID, API_HASH)
+            client = TelegramClient(None, API_ID, API_HASH)  # Using memory session
 
             try:
                 await client.connect()
@@ -235,7 +208,7 @@ def verify_otp():
 def dashboard():
     async def get_channels():
         phone = session.get('user_phone')
-        client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
+        client = TelegramClient(None, API_ID, API_HASH) #removed session file
 
         try:
             await client.connect()
@@ -360,18 +333,8 @@ def remove_replacement():
 
 @app.route('/logout')
 def logout():
-    try:
-        phone = session.get('user_phone')
-        if phone:
-            session_file = f"sessions/{phone}"
-            if os.path.exists(session_file):
-                os.remove(session_file)
-                logger.info(f"Removed session file for {phone}")
-        session.clear()
-        return redirect(url_for('login'))
-    except Exception as e:
-        logger.error(f"Error in logout route: {str(e)}")
-        return redirect(url_for('login'))
+    session.clear()
+    return redirect(url_for('login'))
 
 
 @app.route('/update-channels', methods=['POST'])
@@ -494,6 +457,5 @@ def toggle_bot():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    os.makedirs('sessions', exist_ok=True)
     # ALWAYS serve the app on port 5000
     app.run(host='0.0.0.0', port=5000, debug=True)

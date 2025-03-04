@@ -1,6 +1,5 @@
 import sys
 import logging
-import json
 import time
 from threading import Thread
 import psycopg2
@@ -125,9 +124,9 @@ async def main():
         Thread(target=config_monitor, daemon=True).start()
         logger.info("Started channel configuration monitor")
 
-        # Start the client
+        # Start the client with memory session
         logger.debug("Starting Telegram client...")
-        client = TelegramClient('anon', API_ID, API_HASH)
+        client = TelegramClient(None, API_ID, API_HASH)
         await client.start()
 
         # Check if already authorized
@@ -227,7 +226,7 @@ async def main():
                                 caption=message_text,
                                 formatting_entities=event.message.entities
                             )
-                            os.remove(media)  # Clean up
+                            #os.remove(media)  # Clean up - Removed to prevent errors if media is not a file
                             logger.info("Message with media sent successfully")
                         else:
                             logger.info("Sending text message...")
@@ -244,8 +243,8 @@ async def main():
 
                     except Exception as e:
                         logger.error(f"Failed to send message: {str(e)}")
-                        if media and os.path.exists(media):
-                            os.remove(media)
+                        #if media and os.path.exists(media):
+                        #    os.remove(media) # Removed to prevent errors if media is not a file
                         return
 
                 except ValueError as e:
