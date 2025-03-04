@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
-    "flask>=3.1.0",
+    "flask[async]>=3.1.0",
     "flask-login>=0.6.3",
     "flask-session>=0.8.0",
+    "hypercorn>=0.17.3",
     "telethon>=1.39.0",
+    "asgiref>=3.8.1",
 ]
