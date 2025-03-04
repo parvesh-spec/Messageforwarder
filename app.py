@@ -98,10 +98,17 @@ def login_required(f):
 
 @app.route('/')
 def login():
+    # If user is already logged in, redirect to dashboard
+    if 'logged_in' in session and session['logged_in']:
+        return redirect(url_for('dashboard'))
     return render_template('login.html')
 
 @app.route('/send-otp', methods=['POST'])
 def send_otp():
+    # Check if user is already logged in
+    if 'logged_in' in session and session['logged_in']:
+        return jsonify({'message': 'Already logged in. Redirecting to dashboard...'}), 200
+
     phone = request.form.get('phone')
     if not phone:
         return jsonify({'error': 'Phone number is required'}), 400
@@ -141,7 +148,7 @@ def send_otp():
                 return {'message': 'OTP sent successfully'}
             else:
                 await client.disconnect()
-                return {'message': 'Already authorized. Please logout first.'}, 400
+                return {'message': 'Already authorized. Redirecting to dashboard...'}, 200
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -210,7 +217,7 @@ def verify_otp():
 
                         # Store session ID in Flask session
                         session['session_id'] = session_id
-                        session['logged_in'] = True
+                        session['logged_in'] = True #Added this line
 
                         return {'message': 'Login successful'}
                 except Exception as db_error:

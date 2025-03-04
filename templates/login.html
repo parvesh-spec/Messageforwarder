@@ -55,8 +55,9 @@
             if (data.error) {
                 showMessage(data.error, true);
             } else {
-                if (data.message === 'Already authorized. Please logout first.') {
-                    showMessage(data.message, true);
+                if (data.message === 'Already authorized. Redirecting to dashboard...') {
+                    showMessage('Already logged in, redirecting to dashboard...');
+                    window.location.href = '/dashboard';
                 } else {
                     document.getElementById('login-form').style.display = 'none';
                     document.getElementById('otp-form').style.display = 'block';
