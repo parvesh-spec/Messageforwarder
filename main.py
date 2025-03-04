@@ -64,6 +64,7 @@ def load_text_replacements():
 def config_monitor():
     while True:
         load_channel_config()
+        load_text_replacements()  # Also monitor text replacements
         time.sleep(5)  # Check every 5 seconds
 
 async def main():
@@ -93,8 +94,6 @@ async def main():
         async def forward_handler(event):
             try:
                 global SOURCE_CHANNEL, DESTINATION_CHANNEL
-
-                # Add debug logging for received message
                 logger.debug(f"Received message in channel: {event.chat_id}")
                 logger.debug(f"SOURCE_CHANNEL configured as: {SOURCE_CHANNEL}")
                 logger.debug(f"DESTINATION_CHANNEL configured as: {DESTINATION_CHANNEL}")

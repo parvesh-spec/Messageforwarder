@@ -324,6 +324,9 @@ def add_replacement():
         except Exception as e:
             logger.error(f"Error saving text replacements: {e}")
 
+        # Force reload text replacements in main.py
+        main.load_text_replacements()
+
         return jsonify({'message': 'Replacement added successfully'})
     except Exception as e:
         logger.error(f"Error adding replacement: {str(e)}")
