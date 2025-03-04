@@ -107,7 +107,7 @@ async def main():
 
         # Start the client
         logger.debug("Starting Telegram client...")
-        client = TelegramClient('anon', API_ID, API_HASH, connection_retries=5, timeout=30)
+        client = TelegramClient('anon', API_ID, API_HASH)
         await client.start()
 
         # Check if already authorized
@@ -122,11 +122,6 @@ async def main():
         @client.on(events.NewMessage())
         async def forward_handler(event):
             try:
-                global SOURCE_CHANNEL, DESTINATION_CHANNEL
-                logger.debug(f"Received message in channel: {event.chat_id}")
-                logger.debug(f"SOURCE_CHANNEL configured as: {SOURCE_CHANNEL}")
-                logger.debug(f"DESTINATION_CHANNEL configured as: {DESTINATION_CHANNEL}")
-
                 # Skip if channels not configured
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
                     logger.warning("Channels not configured yet")
@@ -235,7 +230,6 @@ async def main():
 
                 except ValueError as e:
                     logger.error(f"Failed to access destination channel: {str(e)}")
-                    logger.error(f"Destination channel ID: {dest_id}")
                     return
 
             except Exception as e:
@@ -245,9 +239,6 @@ async def main():
         @client.on(events.MessageEdited())
         async def edit_handler(event):
             try:
-                global SOURCE_CHANNEL, DESTINATION_CHANNEL
-                logger.debug(f"Edit event received for message ID: {event.message.id}")
-
                 # Skip if channels not configured
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
                     logger.warning("Channels not configured yet")
@@ -268,7 +259,7 @@ async def main():
                     return
 
                 if event.message.id not in MESSAGE_IDS:
-                    logger.info("❌ Original message mapping not found")
+                    logger.info("Original message mapping not found")
                     return
 
                 dest_msg_id = MESSAGE_IDS[event.message.id]
@@ -280,7 +271,7 @@ async def main():
                 # Apply text replacements if any
                 if TEXT_REPLACEMENTS and message_text:
                     logger.debug("Applying text replacements to edited message...")
-                    for original, replacement in TEXT_REPLACEMENTS.items():
+                    for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
                         if original in message_text:
                             message_text = message_text.replace(original, replacement)
                             logger.info(f"Replaced '{original}' with '{replacement}' in edited message")
@@ -302,14 +293,14 @@ async def main():
                         text=message_text,
                         formatting_entities=event.message.entities
                     )
-                    logger.info("✓ Message updated successfully")
+                    logger.info("Message updated successfully")
 
                 except Exception as e:
-                    logger.error(f"❌ Error editing message: {str(e)}")
+                    logger.error(f"Error editing message: {str(e)}")
                     return
 
             except Exception as e:
-                logger.error(f"❌ Error in edit handler: {str(e)}")
+                logger.error(f"Error in edit handler: {str(e)}")
                 logger.error(f"Error type: {type(e).__name__}")
 
         logger.info("\nBot is running and monitoring for new messages and edits.")
