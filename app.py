@@ -449,6 +449,11 @@ def clear_replacements():
             cur.execute("DELETE FROM text_replacements WHERE user_id = %s", (user_id,))
             db.commit()
 
+        # Update TEXT_REPLACEMENTS in main.py
+        import main
+        main.TEXT_REPLACEMENTS = {}  # Clear the in-memory cache immediately
+        main.load_user_replacements(user_id)  # Reload from database
+
         logger.info("Cleared all text replacements for user")
         return jsonify({'message': 'All replacements cleared'})
     except Exception as e:

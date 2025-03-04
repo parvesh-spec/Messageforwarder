@@ -87,17 +87,20 @@ def load_user_replacements(user_id):
                     ORDER BY LENGTH(original_text) DESC
                 """, (user_id,))
 
+                # Clear existing replacements first
                 TEXT_REPLACEMENTS = {}
-                for row in cur.fetchall():
+                rows = cur.fetchall()
+                logger.info(f"Found {len(rows)} replacements for user {user_id}")
+
+                for row in rows:
                     TEXT_REPLACEMENTS[row['original_text']] = row['replacement_text']
+                    logger.debug(f"Loaded replacement: '{row['original_text']}' -> '{row['replacement_text']}'")
 
                 # Verify data was loaded
                 if not TEXT_REPLACEMENTS:
                     logger.warning(f"No text replacements found for user {user_id}")
                 else:
                     logger.info(f"Successfully loaded {len(TEXT_REPLACEMENTS)} replacements")
-                    for original, replacement in TEXT_REPLACEMENTS.items():
-                        logger.debug(f"Loaded replacement: '{original}' -> '{replacement}'")
         finally:
             conn.close()
     except Exception as e:
