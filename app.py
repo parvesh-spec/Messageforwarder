@@ -8,9 +8,7 @@ from functools import wraps
 from asgiref.sync import async_to_sync
 import psycopg2
 from psycopg2.extras import DictCursor
-from flask_session import Session
 from datetime import timedelta
-from flask_sqlalchemy import SQLAlchemy
 import tempfile
 from telethon.sessions import StringSession
 
@@ -22,41 +20,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Strong secret key for session encryption
 app.secret_key = os.urandom(24)
 
-# Configure session with SQLAlchemy
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_size': 10,
-    'pool_timeout': 30,
-    'pool_recycle': 1800,
-}
-db = SQLAlchemy(app)
-
-# Configure Flask-Session with SQLAlchemy
-class FlaskSession(db.Model):
-    __tablename__ = 'session'
-
-    id = db.Column(db.Integer, primary_key=True)
-    session_id = db.Column(db.String(255), unique=True, nullable=False)
-    data = db.Column(db.LargeBinary)
-    expiry = db.Column(db.DateTime)
-
-app.config['SESSION_TYPE'] = 'sqlalchemy'
-app.config['SESSION_SQLALCHEMY'] = db
+# Configure session
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-app.config['SESSION_PERMANENT'] = True
-Session(app)
+app.config['SESSION_TYPE'] = 'filesystem'
 
-# Database connection with better connection handling
+# Telegram API credentials
+API_ID = int(os.getenv('API_ID', '27202142'))
+API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
+
 def get_db():
     if 'db' not in g:
         g.db = psycopg2.connect(
             os.getenv('DATABASE_URL'),
             application_name='telegram_bot_web'
         )
-        g.db.autocommit = True  # Prevent transaction locks
+        g.db.autocommit = True
     return g.db
 
 @app.teardown_appcontext
@@ -69,7 +51,8 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in') or not session.get('user_phone'):
-            logger.warning("User not logged in, redirecting to login page")
+            logger.warning("Session invalid, redirecting to login")
+            session.clear()
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
@@ -87,7 +70,6 @@ def get_user_id(phone):
 
 @app.route('/')
 def login():
-    # Check if user is already logged in
     if session.get('logged_in') and session.get('user_phone'):
         logger.info(f"User {session.get('user_phone')} already logged in, redirecting to dashboard")
         return redirect(url_for('dashboard'))
@@ -116,7 +98,6 @@ def send_otp():
             client = TelegramClient(session_path, API_ID, API_HASH)
 
             try:
-                logger.info("Connecting to Telegram...")
                 await client.connect()
 
                 try:
@@ -124,6 +105,7 @@ def send_otp():
                     session['user_phone'] = phone
                     session['phone_code_hash'] = sent.phone_code_hash
                     session['temp_session_path'] = session_path
+                    session.permanent = True
                     logger.info("Code request sent successfully")
 
                     if client.is_connected():
@@ -164,7 +146,7 @@ def verify_otp():
     phone_code_hash = session.get('phone_code_hash')
     temp_session_path = session.get('temp_session_path')
     otp = request.form.get('otp')
-    password = request.form.get('password')  # For 2FA
+    password = request.form.get('password')
 
     if not phone or not phone_code_hash or not temp_session_path:
         logger.error("Missing session data")
@@ -180,7 +162,6 @@ def verify_otp():
             client = TelegramClient(temp_session_path, API_ID, API_HASH)
 
             try:
-                logger.info("Connecting to Telegram...")
                 await client.connect()
                 logger.info("Connected to Telegram")
 
@@ -220,7 +201,7 @@ def verify_otp():
                             db.commit()
                             logger.info("Saved session string to database")
 
-                    session.clear()  # Clear any old session data
+                    session.clear()
                     session['logged_in'] = True
                     session['user_phone'] = phone
                     session['user_id'] = user_id
@@ -238,7 +219,7 @@ def verify_otp():
                     return {'error': 'Invalid OTP'}, 400
 
             except Exception as e:
-                logger.error(f"Error during verification: {str(e)}")
+                logger.error(f"Error in verification: {str(e)}")
                 if client.is_connected():
                     await client.disconnect()
                 raise e
@@ -253,18 +234,9 @@ def verify_otp():
             os.remove(temp_session_path)
         return jsonify({'error': str(e)}), 500
 
-# Telegram API credentials
-API_ID = int(os.getenv('API_ID', '27202142'))
-API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
-
-
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    if not session.get('logged_in') or not session.get('user_phone'):
-        logger.warning("User not properly logged in, redirecting to login")
-        return redirect(url_for('login'))
-
     try:
         channels = asyncio.run(get_channels())
         return render_template('dashboard.html', channels=channels)

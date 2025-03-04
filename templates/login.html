@@ -50,16 +50,12 @@
             console.error('API Error:', error);
             let errorMessage = defaultMessage;
 
-            try {
-                if (error.response) {
-                    return error.response.json().then(data => {
-                        showMessage(data.error || defaultMessage, true);
-                    });
-                } else if (error.message) {
-                    errorMessage = error.message;
-                }
-            } catch (e) {
-                console.error('Error parsing error response:', e);
+            if (error.response) {
+                return error.response.json().then(data => {
+                    showMessage(data.error || defaultMessage, true);
+                });
+            } else if (error.message) {
+                errorMessage = error.message;
             }
 
             showMessage(errorMessage, true);
@@ -73,7 +69,6 @@
             }
 
             currentPhone = phone;
-            console.log('Sending OTP request for:', phone);
             showMessage('Sending OTP request...');
 
             fetch('/send-otp', {
@@ -83,17 +78,10 @@
                 },
                 body: `phone=${encodeURIComponent(phone)}`
             })
-            .then(response => {
-                console.log('OTP request response status:', response.status);
-                return response.json().then(data => ({status: response.status, data}));
-            })
-            .then(({status, data}) => {
-                console.log('OTP request response data:', data);
+            .then(response => response.json())
+            .then(data => {
                 if (data.error) {
                     showMessage(data.error, true);
-                } else if (data.already_authorized) {
-                    console.log('Already authorized, redirecting to dashboard');
-                    window.location.href = '/dashboard';
                 } else {
                     document.getElementById('login-form').style.display = 'none';
                     document.getElementById('otp-form').style.display = 'block';
@@ -103,18 +91,8 @@
             .catch(error => handleApiError(error));
         }
 
-        function resendOTP() {
-            if (currentPhone) {
-                sendOTP();
-            } else {
-                showMessage('Please enter your phone number first', true);
-                resetForms();
-            }
-        }
-
         function verifyOTP() {
             const otp = document.getElementById('otp').value;
-            console.log('Verifying OTP');
             showMessage('Verifying OTP...');
 
             fetch('/verify-otp', {
@@ -124,12 +102,8 @@
                 },
                 body: `otp=${encodeURIComponent(otp)}`
             })
-            .then(response => {
-                console.log('OTP verification response status:', response.status);
-                return response.json().then(data => ({status: response.status, data}));
-            })
-            .then(({status, data}) => {
-                console.log('OTP verification response:', data);
+            .then(response => response.json())
+            .then(data => {
                 if (data.error === 'two_factor_needed') {
                     document.getElementById('otp-form').style.display = 'none';
                     document.getElementById('twofa-form').style.display = 'block';
@@ -138,9 +112,8 @@
                     showMessage(data.error, true);
                 } else if (data.message === 'Login successful') {
                     showMessage('Login successful! Redirecting to dashboard...');
-                    setTimeout(() => {
-                        window.location.href = '/dashboard';
-                    }, 1000);
+                    // Force redirect to dashboard after successful login
+                    window.location.replace('/dashboard');
                 }
             })
             .catch(error => handleApiError(error));
@@ -149,7 +122,6 @@
         function verify2FA() {
             const otp = document.getElementById('otp').value;
             const password = document.getElementById('password').value;
-            console.log('Verifying 2FA');
             showMessage('Verifying 2FA...');
 
             fetch('/verify-otp', {
@@ -159,16 +131,14 @@
                 },
                 body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
             })
-            .then(response => {
-                console.log('2FA verification response status:', response.status);
-                return response.json().then(data => ({status: response.status, data}));
-            })
-            .then(({status, data}) => {
-                console.log('2FA verification response:', data);
+            .then(response => response.json())
+            .then(data => {
                 if (data.error) {
                     showMessage(data.error, true);
-                } else {
-                    window.location.href = '/dashboard';
+                } else if (data.message === 'Login successful') {
+                    showMessage('Login successful! Redirecting to dashboard...');
+                    // Force redirect to dashboard after successful login
+                    window.location.replace('/dashboard');
                 }
             })
             .catch(error => handleApiError(error));
