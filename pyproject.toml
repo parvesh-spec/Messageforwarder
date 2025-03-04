@@ -8,4 +8,5 @@ dependencies = [
     "flask-login>=0.6.3",
     "flask-session>=0.8.0",
     "telethon>=1.39.0",
+    "twilio>=9.4.6",
 ]
