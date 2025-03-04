@@ -6,7 +6,10 @@
 </head>
 <body>
     <div class="dashboard-container">
-        <h2>Bot Control Panel</h2>
+        <div class="header">
+            <h2>Bot Control Panel</h2>
+            <a href="/logout" class="logout-btn">Logout</a>
+        </div>
 
         <div class="channel-section">
             <div class="channel-select">
@@ -109,6 +112,7 @@
                 return;
             }
 
+            console.log('Adding replacement:', { original: originalText, replacement: replacementText });
             fetch('/add-replacement', {
                 method: 'POST',
                 headers: {
@@ -134,9 +138,11 @@
         }
 
         function loadReplacements() {
+            console.log('Loading replacements...');
             fetch('/get-replacements')
             .then(response => response.json())
             .then(data => {
+                console.log('Loaded replacements:', data);
                 const replacementsList = document.getElementById('replacements-list');
                 replacementsList.innerHTML = '';
                 for (const [original, replacement] of Object.entries(data)) {
@@ -148,10 +154,15 @@
                     `;
                     replacementsList.appendChild(div);
                 }
+            })
+            .catch(error => {
+                console.error('Error loading replacements:', error);
+                showMessage('Failed to load replacements', true);
             });
         }
 
         function removeReplacement(original) {
+            console.log('Removing replacement:', original);
             fetch('/remove-replacement', {
                 method: 'POST',
                 headers: {
@@ -167,10 +178,15 @@
                     loadReplacements();
                     showMessage('Replacement removed successfully');
                 }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showMessage('Failed to remove replacement', true);
             });
         }
 
         function clearReplacements() {
+            console.log('Clearing all replacements');
             fetch('/clear-replacements', {
                 method: 'POST'
             })
@@ -182,6 +198,10 @@
                     loadReplacements();
                     showMessage('All replacements cleared');
                 }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showMessage('Failed to clear replacements', true);
             });
         }
 
@@ -221,5 +241,23 @@
         // Load replacements when page loads
         document.addEventListener('DOMContentLoaded', loadReplacements);
     </script>
+    <style>
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .logout-btn {
+            padding: 8px 16px;
+            background-color: #dc3545;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+        }
+        .logout-btn:hover {
+            background-color: #c82333;
+        }
+    </style>
 </body>
 </html>

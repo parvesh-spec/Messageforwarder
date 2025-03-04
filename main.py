@@ -69,13 +69,23 @@ def load_user_replacements(user_id):
                     SELECT original_text, replacement_text 
                     FROM text_replacements 
                     WHERE user_id = %s
+                    ORDER BY LENGTH(original_text) DESC
                 """, (user_id,))
                 TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
                 logger.info(f"Loaded text replacements for user {user_id}: {TEXT_REPLACEMENTS}")
+
+                # Verify data was loaded
+                if not TEXT_REPLACEMENTS:
+                    logger.warning(f"No text replacements found for user {user_id}")
+                else:
+                    logger.info(f"Successfully loaded {len(TEXT_REPLACEMENTS)} replacements")
+                    for original, replacement in TEXT_REPLACEMENTS.items():
+                        logger.debug(f"Loaded replacement: '{original}' -> '{replacement}'")
         finally:
             conn.close()
     except Exception as e:
         logger.error(f"Error loading text replacements for user {user_id}: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
         TEXT_REPLACEMENTS = {}
 
 def config_monitor():
@@ -319,3 +329,11 @@ if __name__ == "__main__":
         logger.info("\nBot stopped by user.")
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
+
+# Clean up old files if they exist
+if os.path.exists('text_replacements.json'):
+    try:
+        os.remove('text_replacements.json')
+        logger.info("Removed old text_replacements.json file")
+    except Exception as e:
+        logger.error(f"Error removing text_replacements.json: {str(e)}")
