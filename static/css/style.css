@@ -43,13 +43,14 @@ button {
     border-radius: 4px;
     cursor: pointer;
     width: 100%;
+    transition: background-color 0.3s ease;  /* Added transition */
 }
 
 button:hover {
     background-color: #006699;
 }
 
-/* Adding styles for secondary button */
+/* Secondary Button */
 .secondary-button {
     background-color: #666;
     color: white;
@@ -59,10 +60,12 @@ button:hover {
     cursor: pointer;
     width: 100%;
     margin-top: 0.5rem;
+    transition: background-color 0.3s ease;  /* Added transition */
 }
 
 .secondary-button:hover {
     background-color: #555;
+    opacity: 0.9;  /* Added opacity effect */
 }
 
 /* Toggle Switch */
