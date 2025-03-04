@@ -162,7 +162,8 @@ async def main():
                         logger.debug(f"Current TEXT_REPLACEMENTS dictionary: {TEXT_REPLACEMENTS}")
                         logger.debug(f"Original text before replacements: {message_text}")
 
-                        for original, replacement in TEXT_REPLACEMENTS.items():
+                        # Sort replacements by length (longest first) to handle overlapping patterns
+                        for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
                             logger.debug(f"Checking replacement: '{original}' -> '{replacement}'")
                             if original in message_text:
                                 old_text = message_text
