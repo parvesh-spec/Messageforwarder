@@ -2,7 +2,6 @@ from flask import Flask, render_template, request, session, redirect, url_for, j
 from telethon import TelegramClient, events, sync, Button
 from telethon.errors import SessionPasswordNeededError
 from functools import wraps
-import asyncio
 import threading
 import os
 import re
@@ -12,24 +11,11 @@ import re
 API_ID = int(os.getenv('API_ID', '27202142'))  # Replace with your API ID
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')  # Replace with your API hash
 
-# Store client instances and states
-clients = {}
+# Store client states
 client_states = {}
 
 # Thread-local storage for event loops
 thread_local = threading.local()
-
-def get_event_loop():
-    if not hasattr(thread_local, "loop"):
-        # Create new event loop for current thread
-        loop = asyncio.new_event_loop()
-        thread_local.loop = loop
-        asyncio.set_event_loop(loop)
-    return thread_local.loop
-
-def run_async(coro):
-    loop = get_event_loop()
-    return loop.run_until_complete(coro)
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)  # for session management
@@ -55,29 +41,25 @@ def send_otp():
 
         print(f"\nProcessing OTP request for phone: {phone}")
 
-        # Initialize client and state
-        if phone not in clients:
-            print(f"Creating new client for {phone}")
-            client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH, connection_retries=5, timeout=30)
-            run_async(client.connect())
-            clients[phone] = client
-            client_states[phone] = {'authorized': False, 'phone': phone}
+        # Initialize client state
+        client_states[phone] = {'authorized': False, 'phone': phone}
 
-        client = clients[phone]
+        # Create a new client for this request
+        with TelegramClient(f"sessions/{phone}", API_ID, API_HASH) as client:
+            print(f"Created client for {phone}")
 
-        # Check if already authorized
-        if run_async(client.is_user_authorized()):
-            print(f"User {phone} is already authorized")
+            # Check if already authorized
+            if client.is_user_authorized():
+                print(f"User {phone} is already authorized")
+                session['user_phone'] = phone
+                client_states[phone]['authorized'] = True
+                return jsonify({'message': 'Already authorized', 'redirect': '/dashboard'})
+
+            # Send code request
+            print(f"Sending code request to {phone}")
+            client.send_code_request(phone)
             session['user_phone'] = phone
-            client_states[phone]['authorized'] = True
-            return jsonify({'message': 'Already authorized', 'redirect': '/dashboard'})
-
-        # Send code request
-        print(f"Sending code request to {phone}")
-        run_async(client.send_code_request(phone))
-        session['user_phone'] = phone
-
-        return jsonify({'message': 'OTP sent successfully'})
+            return jsonify({'message': 'OTP sent successfully'})
 
     except Exception as e:
         print(f"Error in send_otp: {str(e)}")
@@ -94,32 +76,26 @@ def verify_otp():
         if not phone or not otp:
             return jsonify({'error': 'Phone and OTP are required'}), 400
 
-        client = clients.get(phone)
-        if not client:
-            return jsonify({'error': 'Session expired. Please try again.'}), 400
+        # Sign in with the code
+        with TelegramClient(f"sessions/{phone}", API_ID, API_HASH) as client:
+            try:
+                print(f"Attempting to sign in with OTP for {phone}")
+                client.sign_in(phone, otp)
 
-        try:
-            # Sign in with the code
-            print(f"Attempting to sign in with OTP for {phone}")
-            run_async(client.sign_in(phone, otp))
+                if client.is_user_authorized():
+                    client_states[phone]['authorized'] = True
+                    print(f"User {phone} successfully signed in")
+                    return jsonify({'message': 'Login successful', 'redirect': '/dashboard'})
+                else:
+                    print(f"Authorization failed for {phone}")
+                    return jsonify({'error': 'Authorization failed. Please try again.'}), 400
 
-            if run_async(client.is_user_authorized()):
-                client_states[phone]['authorized'] = True
-                print(f"User {phone} successfully signed in")
-                return jsonify({'message': 'Login successful', 'redirect': '/dashboard'})
-            else:
-                print(f"Authorization failed for {phone}")
-                return jsonify({'error': 'Authorization failed. Please try again.'}), 400
-
-        except SessionPasswordNeededError:
-            print(f"2FA required for {phone}")
-            return jsonify({
-                'error': 'Two-factor authentication is enabled. Please enter your password.',
-                'needs_2fa': True
-            }), 400
-        except Exception as e:
-            print(f"Error in sign_in: {str(e)}")
-            return jsonify({'error': str(e)}), 400
+            except SessionPasswordNeededError:
+                print(f"2FA required for {phone}")
+                return jsonify({
+                    'error': 'Two-factor authentication is enabled. Please enter your password.',
+                    'needs_2fa': True
+                }), 400
 
     except Exception as e:
         print(f"Error in verify_otp: {str(e)}")
@@ -136,24 +112,22 @@ def verify_2fa():
         if not phone or not password:
             return jsonify({'error': 'Phone and password are required'}), 400
 
-        client = clients.get(phone)
-        if not client:
-            return jsonify({'error': 'Session expired. Please try again.'}), 400
+        with TelegramClient(f"sessions/{phone}", API_ID, API_HASH) as client:
+            try:
+                print(f"Attempting 2FA verification for {phone}")
+                client.sign_in(password=password)
 
-        try:
-            print(f"Attempting 2FA verification for {phone}")
-            run_async(client.sign_in(password=password))
+                if client.is_user_authorized():
+                    client_states[phone]['authorized'] = True
+                    print(f"2FA verification successful for {phone}")
+                    return jsonify({'message': 'Login successful', 'redirect': '/dashboard'})
+                else:
+                    print(f"2FA verification failed for {phone}")
+                    return jsonify({'error': 'Invalid password. Please try again.'}), 400
 
-            if run_async(client.is_user_authorized()):
-                client_states[phone]['authorized'] = True
-                print(f"2FA verification successful for {phone}")
-                return jsonify({'message': 'Login successful', 'redirect': '/dashboard'})
-            else:
-                print(f"2FA verification failed for {phone}")
-                return jsonify({'error': 'Invalid password. Please try again.'}), 400
-        except Exception as e:
-            print(f"Error in 2FA: {str(e)}")
-            return jsonify({'error': str(e)}), 400
+            except Exception as e:
+                print(f"Error in 2FA: {str(e)}")
+                return jsonify({'error': str(e)}), 400
 
     except Exception as e:
         print(f"Error in verify_2fa: {str(e)}")
@@ -164,28 +138,28 @@ def verify_2fa():
 def dashboard():
     try:
         phone = session.get('user_phone')
-        client = clients.get(phone)
-
-        if not client or not client_states.get(phone, {}).get('authorized', False):
+        if not client_states.get(phone, {}).get('authorized', False):
             return redirect(url_for('login'))
 
-        # Get user's channels
         print(f"Fetching channels for {phone}")
         channels = []
-        try:
-            dialogs = run_async(client.get_dialogs())
-            for dialog in dialogs:
-                if dialog.is_channel:
-                    channels.append({
-                        'id': dialog.id,
-                        'name': dialog.name
-                    })
-            print(f"Found {len(channels)} channels")
-        except Exception as e:
-            print(f"Error fetching channels: {str(e)}")
-            return redirect(url_for('login'))
 
-        return render_template('dashboard.html', channels=channels)
+        with TelegramClient(f"sessions/{phone}", API_ID, API_HASH) as client:
+            try:
+                dialogs = client.get_dialogs()
+                for dialog in dialogs:
+                    if dialog.is_channel:
+                        channels.append({
+                            'id': dialog.id,
+                            'name': dialog.name
+                        })
+                print(f"Found {len(channels)} channels")
+                return render_template('dashboard.html', channels=channels)
+
+            except Exception as e:
+                print(f"Error fetching channels: {str(e)}")
+                return redirect(url_for('login'))
+
     except Exception as e:
         print(f"Error in dashboard: {str(e)}")
         return redirect(url_for('login'))
