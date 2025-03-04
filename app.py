@@ -345,13 +345,14 @@ def resend_otp():
             await client.connect()
 
             if not await client.is_user_authorized():
+                print(f"Resending OTP for phone: {phone}")
                 sent = await client.send_code_request(phone)
                 session['phone_code_hash'] = sent.phone_code_hash
                 await client.disconnect()
 
                 try:
                     with app.app_context():
-                        print(f"Resending OTP for phone: {phone}")
+                        print(f"Updating user last login for phone: {phone}")
                         user = User.query.filter_by(phone=phone).first()
                         if user:
                             user.last_login = datetime.utcnow()
@@ -366,7 +367,7 @@ def resend_otp():
                 return {'message': 'OTP resent successfully'}
             else:
                 await client.disconnect()
-                return {'error': 'Already authorized'}, 400
+                return {'message': 'Already authorized'}
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
