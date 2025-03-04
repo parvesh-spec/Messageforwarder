@@ -437,6 +437,91 @@ def resend_otp():
         print(f"Error in resend_otp: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+# Add these new routes after the existing routes
+
+@app.route('/update-channel', methods=['POST'])
+@login_required
+def update_channel():
+    try:
+        channel_id = request.form.get('channel_id')
+        is_source = request.form.get('is_source') == 'true'
+        is_destination = request.form.get('is_destination') == 'true'
+
+        if not channel_id:
+            return jsonify({'error': 'Channel ID is required'}), 400
+
+        with app.app_context():
+            # Get current user
+            phone = session.get('user_phone')
+            user = User.query.filter_by(phone=phone).first()
+
+            # Update channel configuration
+            channel = Channel.query.filter_by(
+                user_id=user.id,
+                telegram_channel_id=channel_id
+            ).first()
+
+            if channel:
+                # If setting as source, clear other source channels
+                if is_source:
+                    Channel.query.filter_by(
+                        user_id=user.id,
+                        is_source=True
+                    ).update({'is_source': False})
+
+                # If setting as destination, clear other destination channels
+                if is_destination:
+                    Channel.query.filter_by(
+                        user_id=user.id,
+                        is_destination=True
+                    ).update({'is_destination': False})
+
+                channel.is_source = is_source
+                channel.is_destination = is_destination
+                channel.updated_at = datetime.utcnow()
+                db.session.commit()
+
+                return jsonify({
+                    'status': 'success',
+                    'message': 'Channel updated successfully'
+                })
+
+            return jsonify({'error': 'Channel not found'}), 404
+
+    except Exception as e:
+        print(f"Error updating channel: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/channel-status')
+@login_required
+def channel_status():
+    try:
+        with app.app_context():
+            phone = session.get('user_phone')
+            user = User.query.filter_by(phone=phone).first()
+
+            source_channel = Channel.query.filter_by(
+                user_id=user.id,
+                is_source=True
+            ).first()
+
+            destination_channel = Channel.query.filter_by(
+                user_id=user.id,
+                is_destination=True
+            ).first()
+
+            bot_config = BotConfig.query.filter_by(user_id=user.id).first()
+
+            return jsonify({
+                'source_channel': source_channel.telegram_channel_id if source_channel else None,
+                'destination_channel': destination_channel.telegram_channel_id if destination_channel else None,
+                'bot_active': bot_config.is_active if bot_config else False
+            })
+
+    except Exception as e:
+        print(f"Error getting channel status: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
 if __name__ == '__main__':
     # Make sure sessions directory exists
     os.makedirs('sessions', exist_ok=True)
