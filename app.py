@@ -273,16 +273,22 @@ def update_channels():
         if not destination.startswith('-100'):
             destination = f"-100{destination.lstrip('-')}"
 
-        # Store channel IDs in session
+        # Store channel IDs in session and file
         session['source_channel'] = source
         session['dest_channel'] = destination
-        logger.info(f"Updated channel configuration - Source: {source}, Destination: {destination}")
 
-        # Update main.py's channel IDs
-        import main
-        main.SOURCE_CHANNEL = source
-        main.DESTINATION_CHANNEL = destination
-        logger.info(f"Updated main.py channel IDs - Source: {main.SOURCE_CHANNEL}, Destination: {main.DESTINATION_CHANNEL}")
+        # Save to configuration file
+        config = {
+            'source_channel': source,
+            'destination_channel': destination
+        }
+
+        with open('channel_config.json', 'w') as f:
+            import json
+            json.dump(config, f)
+
+        logger.info(f"Updated channel configuration - Source: {source}, Destination: {destination}")
+        logger.info("Configuration saved to channel_config.json")
 
         return jsonify({'message': 'Channel configuration updated successfully'})
     except Exception as e:

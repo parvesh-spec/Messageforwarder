@@ -1,5 +1,8 @@
 import sys
 import logging
+import json
+import time
+from threading import Thread
 
 # Add stream handler to output logs to console
 handler = logging.StreamHandler(sys.stdout)
@@ -30,8 +33,30 @@ DESTINATION_CHANNEL = None
 # Define text replacement dictionary
 TEXT_REPLACEMENTS = {}
 
+def load_channel_config():
+    global SOURCE_CHANNEL, DESTINATION_CHANNEL
+    try:
+        with open('channel_config.json', 'r') as f:
+            config = json.load(f)
+            SOURCE_CHANNEL = config.get('source_channel')
+            DESTINATION_CHANNEL = config.get('destination_channel')
+            logger.info(f"Loaded channel configuration - Source: {SOURCE_CHANNEL}, Destination: {DESTINATION_CHANNEL}")
+    except FileNotFoundError:
+        logger.warning("No channel configuration file found")
+    except Exception as e:
+        logger.error(f"Error loading channel configuration: {str(e)}")
+
+def config_monitor():
+    while True:
+        load_channel_config()
+        time.sleep(5)  # Check every 5 seconds
+
 async def main():
     try:
+        # Start config monitoring in background
+        Thread(target=config_monitor, daemon=True).start()
+        logger.info("Started channel configuration monitor")
+
         # Start the client
         logger.debug("Starting Telegram client...")
         client = TelegramClient('anon', API_ID, API_HASH, connection_retries=5, timeout=30)
