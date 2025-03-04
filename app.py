@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 from telethon import TelegramClient, events
+from telethon.errors import SessionPasswordNeededError
 import asyncio
 import os
 from functools import wraps
@@ -35,7 +36,7 @@ async def send_otp():
     try:
         client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
         await client.connect()
-        
+
         if not await client.is_user_authorized():
             await client.send_code_request(phone)
             session['user_phone'] = phone
@@ -49,16 +50,25 @@ async def send_otp():
 async def verify_otp():
     phone = session.get('user_phone')
     otp = request.form.get('otp')
-    
+    password = request.form.get('password')  # For 2FA
+
     if not phone or not otp:
         return jsonify({'error': 'Phone and OTP are required'}), 400
 
     try:
         client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
         await client.connect()
-        
-        await client.sign_in(phone, otp)
-        
+
+        try:
+            await client.sign_in(phone, otp)
+        except SessionPasswordNeededError:
+            if not password:
+                return jsonify({
+                    'error': 'two_factor_needed',
+                    'message': 'Two-factor authentication is required'
+                }), 403
+            await client.sign_in(password=password)
+
         if await client.is_user_authorized():
             session['logged_in'] = True
             return jsonify({'message': 'Login successful'})
@@ -73,7 +83,7 @@ async def dashboard():
     phone = session.get('user_phone')
     client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
     await client.connect()
-    
+
     # Get user's channels
     channels = []
     async for dialog in client.iter_dialogs():
@@ -82,7 +92,7 @@ async def dashboard():
                 'id': dialog.id,
                 'name': dialog.name
             })
-    
+
     return render_template('dashboard.html', channels=channels)
 
 @app.route('/bot/toggle', methods=['POST'])

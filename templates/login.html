@@ -19,12 +19,29 @@
             </div>
             <button onclick="verifyOTP()">Verify OTP</button>
         </div>
+        <div id="twofa-form" style="display: none;">
+            <div class="input-group">
+                <input type="password" id="password" placeholder="Enter your 2FA password" required>
+            </div>
+            <button onclick="verify2FA()">Submit 2FA Password</button>
+        </div>
         <div id="message"></div>
     </div>
 
     <script>
+        function showMessage(message, isError = false) {
+            const messageDiv = document.getElementById('message');
+            messageDiv.innerHTML = message;
+            messageDiv.style.color = isError ? 'red' : 'green';
+        }
+
         function sendOTP() {
             const phone = document.getElementById('phone').value;
+            if (!phone.startsWith('+91')) {
+                showMessage('Phone number must start with +91', true);
+                return;
+            }
+
             fetch('/send-otp', {
                 method: 'POST',
                 headers: {
@@ -35,11 +52,11 @@
             .then(response => response.json())
             .then(data => {
                 if (data.error) {
-                    document.getElementById('message').innerHTML = data.error;
+                    showMessage(data.error, true);
                 } else {
                     document.getElementById('login-form').style.display = 'none';
                     document.getElementById('otp-form').style.display = 'block';
-                    document.getElementById('message').innerHTML = 'OTP sent to your Telegram account';
+                    showMessage('OTP sent to your Telegram account');
                 }
             });
         }
@@ -55,8 +72,32 @@
             })
             .then(response => response.json())
             .then(data => {
+                if (data.error === 'two_factor_needed') {
+                    document.getElementById('otp-form').style.display = 'none';
+                    document.getElementById('twofa-form').style.display = 'block';
+                    showMessage('Please enter your 2FA password');
+                } else if (data.error) {
+                    showMessage(data.error, true);
+                } else {
+                    window.location.href = '/dashboard';
+                }
+            });
+        }
+
+        function verify2FA() {
+            const otp = document.getElementById('otp').value;
+            const password = document.getElementById('password').value;
+            fetch('/verify-otp', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
+            })
+            .then(response => response.json())
+            .then(data => {
                 if (data.error) {
-                    document.getElementById('message').innerHTML = data.error;
+                    showMessage(data.error, true);
                 } else {
                     window.location.href = '/dashboard';
                 }
