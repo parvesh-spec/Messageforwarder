@@ -136,8 +136,11 @@
                     showMessage('Please enter your 2FA password');
                 } else if (data.error) {
                     showMessage(data.error, true);
-                } else {
-                    window.location.href = '/dashboard';
+                } else if (data.message === 'Login successful') {
+                    showMessage('Login successful! Redirecting to dashboard...');
+                    setTimeout(() => {
+                        window.location.href = '/dashboard';
+                    }, 1000);
                 }
             })
             .catch(error => handleApiError(error));

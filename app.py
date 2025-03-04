@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-# Update the session configuration
+# Configure session with SQLAlchemy
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
@@ -65,14 +65,11 @@ def close_db(e=None):
     if db is not None:
         db.close()
 
-# Telegram API credentials
-API_ID = int(os.getenv('API_ID', '27202142'))
-API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
-
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'user_phone' not in session:
+        if not session.get('logged_in') or not session.get('user_phone'):
+            logger.warning("User not logged in, redirecting to login page")
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
@@ -90,14 +87,13 @@ def get_user_id(phone):
 
 @app.route('/')
 def login():
-    # If user is already logged in, redirect to dashboard
+    # Check if user is already logged in
     if session.get('logged_in') and session.get('user_phone'):
-        logger.info("User already logged in, redirecting to dashboard")
+        logger.info(f"User {session.get('user_phone')} already logged in, redirecting to dashboard")
         return redirect(url_for('dashboard'))
     return render_template('login.html')
 
 def get_temp_session_path(phone):
-    # Create a temporary session file that will be deleted after successful login
     temp_dir = tempfile.gettempdir()
     return os.path.join(temp_dir, f"telegram_session_{phone}")
 
@@ -116,7 +112,6 @@ def send_otp():
         async def send_code():
             logger.info(f"Initializing Telegram client for phone: {phone}")
 
-            # Use temporary session file
             session_path = get_temp_session_path(phone)
             client = TelegramClient(session_path, API_ID, API_HASH)
 
@@ -125,7 +120,6 @@ def send_otp():
                 await client.connect()
 
                 try:
-                    # Send code and get the phone_code_hash
                     sent = await client.send_code_request(phone)
                     session['user_phone'] = phone
                     session['phone_code_hash'] = sent.phone_code_hash
@@ -160,7 +154,6 @@ def send_otp():
         return jsonify({'error': str(e)}), 500
 
 async def get_session_string(client):
-    """Get session string from a connected client"""
     if client.is_connected() and await client.is_user_authorized():
         return StringSession.save(client.session)
     return None
@@ -192,7 +185,6 @@ def verify_otp():
                 logger.info("Connected to Telegram")
 
                 try:
-                    # Sign in with phone code hash
                     await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
                     logger.info("Sign in successful")
                 except SessionPasswordNeededError:
@@ -214,10 +206,8 @@ def verify_otp():
                         return {'error': 'Invalid 2FA password'}, 400
 
                 if await client.is_user_authorized():
-                    # Get session string before disconnecting
                     session_string = await get_session_string(client)
                     if session_string:
-                        # Store session string in database
                         user_id = get_user_id(phone)
                         db = get_db()
                         with db.cursor() as cur:
@@ -230,15 +220,15 @@ def verify_otp():
                             db.commit()
                             logger.info("Saved session string to database")
 
-                    # Set all required session variables
+                    session.clear()  # Clear any old session data
                     session['logged_in'] = True
                     session['user_phone'] = phone
+                    session['user_id'] = user_id
                     session.permanent = True
-                    logger.info(f"Set session variables - logged_in: {session.get('logged_in')}, user_phone: {session.get('user_phone')}")
+                    logger.info(f"Session variables set - user_phone: {phone}, user_id: {user_id}")
 
                     if client.is_connected():
                         await client.disconnect()
-                    # Clean up temporary session file
                     if os.path.exists(temp_session_path):
                         os.remove(temp_session_path)
                     return {'message': 'Login successful'}
@@ -259,15 +249,18 @@ def verify_otp():
         return jsonify(result)
     except Exception as e:
         logger.error(f"Error in verify_otp route: {str(e)}")
-        # Clean up temporary session file on error
         if temp_session_path and os.path.exists(temp_session_path):
             os.remove(temp_session_path)
         return jsonify({'error': str(e)}), 500
 
+# Telegram API credentials
+API_ID = int(os.getenv('API_ID', '27202142'))
+API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
+
+
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    # Double check session status
     if not session.get('logged_in') or not session.get('user_phone'):
         logger.warning("User not properly logged in, redirecting to login")
         return redirect(url_for('login'))
@@ -277,7 +270,6 @@ def dashboard():
         return render_template('dashboard.html', channels=channels)
     except Exception as e:
         logger.error(f"Error in dashboard route: {str(e)}")
-        # If there's an error, log the user out and redirect to login
         session.clear()
         return redirect(url_for('login'))
 
@@ -304,7 +296,6 @@ def add_replacement():
             """, (user_id, original, replacement))
             db.commit()
 
-        # Update TEXT_REPLACEMENTS in main.py
         import main
         main.load_user_replacements(user_id)
 
@@ -356,7 +347,6 @@ def remove_replacement():
             db.commit()
 
         if deleted:
-            # Update TEXT_REPLACEMENTS in main.py
             import main
             main.load_user_replacements(user_id)
             return jsonify({'message': 'Replacement removed successfully'})
@@ -388,20 +378,16 @@ def update_channels():
             logger.error("Source and destination channels cannot be the same")
             return jsonify({'error': 'Source and destination channels must be different'}), 400
 
-        # Format channel IDs properly
         if not source.startswith('-100'):
             source = f"-100{source.lstrip('-')}"
         if not destination.startswith('-100'):
             destination = f"-100{destination.lstrip('-')}"
 
-        # Get user_id
         user_phone = session.get('user_phone')
         user_id = get_user_id(user_phone)
 
-        # Save to database
         save_user_channel_config(user_id, source, destination)
 
-        # Store in session for current request
         session['source_channel'] = source
         session['dest_channel'] = destination
 
@@ -435,7 +421,6 @@ def save_user_channel_config(user_id, source_channel, destination_channel):
         """, (user_id, source_channel, destination_channel))
         db.commit()
 
-
 @app.route('/clear-replacements', methods=['POST'])
 @login_required
 def clear_replacements():
@@ -448,10 +433,9 @@ def clear_replacements():
             cur.execute("DELETE FROM text_replacements WHERE user_id = %s", (user_id,))
             db.commit()
 
-        # Update TEXT_REPLACEMENTS in main.py
         import main
-        main.TEXT_REPLACEMENTS = {}  # Clear the in-memory cache immediately
-        main.load_user_replacements(user_id)  # Reload from database
+        main.TEXT_REPLACEMENTS = {}  
+        main.load_user_replacements(user_id)  
 
         logger.info("Cleared all text replacements for user")
         return jsonify({'message': 'All replacements cleared'})
@@ -471,7 +455,6 @@ def toggle_bot():
             logger.error("Channel configuration missing")
             return jsonify({'error': 'Please configure source and destination channels first'}), 400
 
-        # Configure bot channels
         try:
             import main
             main.SOURCE_CHANNEL = source
@@ -494,7 +477,7 @@ def toggle_bot():
 
 async def get_channels():
     phone = session.get('user_phone')
-    client = TelegramClient(None, API_ID, API_HASH) #removed session file
+    client = TelegramClient(None, API_ID, API_HASH) 
 
     try:
         await client.connect()
@@ -507,7 +490,6 @@ async def get_channels():
                 })
         await client.disconnect()
 
-        # Get saved channel configuration
         user_id = get_user_id(phone)
         config = get_user_channel_config(user_id)
         if config:
@@ -525,5 +507,4 @@ async def get_channels():
         raise e
 
 if __name__ == '__main__':
-    # ALWAYS serve the app on port 5000
     app.run(host='0.0.0.0', port=5000, debug=True)
