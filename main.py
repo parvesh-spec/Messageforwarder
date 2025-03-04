@@ -23,12 +23,12 @@ MESSAGE_IDS = {}  # Will store source_msg_id: destination_msg_id mapping
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
-# Define source and destination channels - will be set by app.py
+# Define source and destination channels
 SOURCE_CHANNEL = None
 DESTINATION_CHANNEL = None
 
 # Define text replacement dictionary
-TEXT_REPLACEMENTS = {}  # Will be populated during runtime
+TEXT_REPLACEMENTS = {}
 
 async def main():
     try:
@@ -51,26 +51,44 @@ async def main():
             try:
                 global SOURCE_CHANNEL, DESTINATION_CHANNEL
 
-                # Add debug logging for channel IDs and message
-                logger.debug(f"Message received - chat_id: {event.chat_id}")
-                logger.debug(f"Current SOURCE_CHANNEL: {SOURCE_CHANNEL}")
-                logger.debug(f"Current DESTINATION_CHANNEL: {DESTINATION_CHANNEL}")
+                # Add debug logging for received message
+                logger.debug(f"Received message in channel: {event.chat_id}")
+                logger.debug(f"SOURCE_CHANNEL configured as: {SOURCE_CHANNEL}")
+                logger.debug(f"DESTINATION_CHANNEL configured as: {DESTINATION_CHANNEL}")
 
                 # Skip if channels not configured
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
                     logger.warning("Channels not configured yet")
                     return
 
+                # Format source channel ID for comparison
+                source_id = str(SOURCE_CHANNEL)
+                if not source_id.startswith('-100'):
+                    source_id = f"-100{source_id.lstrip('-')}"
+
+                # Format event chat ID for comparison
+                chat_id = str(event.chat_id)
+                if not chat_id.startswith('-100'):
+                    chat_id = f"-100{chat_id.lstrip('-')}"
+
+                logger.debug(f"Comparing chat_id: {chat_id} with source_id: {source_id}")
+
                 # Check if message is from source channel
-                if str(event.chat_id) != str(SOURCE_CHANNEL):
-                    logger.debug(f"Message not from source channel. Got: {event.chat_id}, Expected: {SOURCE_CHANNEL}")
+                if chat_id != source_id:
+                    logger.debug(f"Message not from source channel. Got: {chat_id}, Expected: {source_id}")
                     return
 
-                logger.info(f"Processing message from source channel {SOURCE_CHANNEL}")
+                logger.info(f"Processing message from source channel {source_id}")
 
                 try:
+                    # Format destination channel ID
+                    dest_id = str(DESTINATION_CHANNEL)
+                    if not dest_id.startswith('-100'):
+                        dest_id = f"-100{dest_id.lstrip('-')}"
+
                     # Get destination channel entity
-                    dest_channel = await client.get_entity(int(DESTINATION_CHANNEL))
+                    logger.debug(f"Getting entity for destination channel: {dest_id}")
+                    dest_channel = await client.get_entity(int(dest_id))
                     logger.info(f"Destination channel found: {getattr(dest_channel, 'title', 'Unknown')}")
 
                     # Create a new message
@@ -128,7 +146,7 @@ async def main():
 
                 except ValueError as e:
                     logger.error(f"Failed to access destination channel: {str(e)}")
-                    logger.error(f"Destination channel ID: {DESTINATION_CHANNEL}")
+                    logger.error(f"Destination channel ID: {dest_id}")
                     return
 
             except Exception as e:
@@ -138,15 +156,30 @@ async def main():
         @client.on(events.MessageEdited())
         async def edit_handler(event):
             try:
+                global SOURCE_CHANNEL, DESTINATION_CHANNEL
+                logger.debug(f"Edit event received for message ID: {event.message.id}")
+                logger.debug(f"Current SOURCE_CHANNEL: {SOURCE_CHANNEL}")
+                logger.debug(f"Current DESTINATION_CHANNEL: {DESTINATION_CHANNEL}")
+
                 # Skip if channels not configured
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
+                    logger.warning("Channels not configured yet")
                     return
+
+                # Format IDs for comparison
+                source_id = str(SOURCE_CHANNEL)
+                if not source_id.startswith('-100'):
+                    source_id = f"-100{source_id.lstrip('-')}"
+
+                chat_id = str(event.chat_id)
+                if not chat_id.startswith('-100'):
+                    chat_id = f"-100{chat_id.lstrip('-')}"
 
                 # Check if message is from source channel
-                if str(event.chat_id) != str(SOURCE_CHANNEL):
+                if chat_id != source_id:
+                    logger.debug(f"Edit not from source channel. Got: {chat_id}, Expected: {source_id}")
                     return
 
-                logger.info(f"\nEdited message detected in source channel")
                 if event.message.id not in MESSAGE_IDS:
                     logger.info("❌ Original message mapping not found")
                     return
@@ -159,13 +192,20 @@ async def main():
 
                 # Apply text replacements if any
                 if TEXT_REPLACEMENTS and message_text:
-                    logger.info("Applying text replacements to edited message...")
+                    logger.debug("Applying text replacements to edited message...")
                     for original, replacement in TEXT_REPLACEMENTS.items():
                         message_text = message_text.replace(original, replacement)
+                    logger.debug(f"Modified message text: {message_text}")
 
                 try:
+                    # Format destination channel ID
+                    dest_id = str(DESTINATION_CHANNEL)
+                    if not dest_id.startswith('-100'):
+                        dest_id = f"-100{dest_id.lstrip('-')}"
+
                     # Get destination channel entity
-                    channel = await client.get_entity(int(DESTINATION_CHANNEL))
+                    channel = await client.get_entity(int(dest_id))
+
                     # Edit the corresponding message
                     logger.info("Updating message in destination channel...")
                     await client.edit_message(
@@ -183,55 +223,6 @@ async def main():
             except Exception as e:
                 logger.error(f"❌ Error in edit handler: {str(e)}")
                 logger.error(f"Error type: {type(e).__name__}")
-                logger.error(f"Full error details: {str(e)}")
-
-        @client.on(events.NewMessage(pattern=r'/start|/help'))
-        async def command_handler(event):
-            logger.info(f"Received command: {event.raw_text}")
-            help_msg = "Available commands:\n"
-            help_msg += "/status - Check bot status\n"
-            help_msg += "/replace text|replacement - Add text replacement\n"
-            help_msg += "/replacements - List text replacements\n"
-            help_msg += "/clearreplacements - Clear all replacements"
-            await event.respond(help_msg)
-
-        @client.on(events.NewMessage(pattern=r'/status'))
-        async def status_handler(event):
-            logger.info("Status command received")
-            status_msg = f"Bot is running\nForwarding from {SOURCE_CHANNEL} to {DESTINATION_CHANNEL}"
-            if TEXT_REPLACEMENTS:
-                status_msg += "\nActive replacements:"
-                for original, replacement in TEXT_REPLACEMENTS.items():
-                    status_msg += f"\n- '{original}' → '{replacement}'"
-            await event.respond(status_msg)
-
-        @client.on(events.NewMessage(pattern=r'/replace\s+([^|]+)\|(.+)'))
-        async def replace_handler(event):
-            try:
-                original = event.pattern_match.group(1).strip()
-                replacement = event.pattern_match.group(2).strip()
-                TEXT_REPLACEMENTS[original] = replacement
-                logger.info(f"Added replacement: '{original}' → '{replacement}'")
-                await event.respond(f"✓ Added replacement: '{original}' → '{replacement}'")
-            except Exception as e:
-                logger.error(f"Error in replace handler: {e}")
-                await event.respond("❌ Error: Use format /replace original|replacement")
-
-        @client.on(events.NewMessage(pattern=r'/replacements'))
-        async def list_replacements_handler(event):
-            if not TEXT_REPLACEMENTS:
-                await event.respond("No active replacements")
-            else:
-                msg = "Active replacements:"
-                for original, replacement in TEXT_REPLACEMENTS.items():
-                    msg += f"\n- '{original}' → '{replacement}'"
-                await event.respond(msg)
-
-        @client.on(events.NewMessage(pattern=r'/clearreplacements'))
-        async def clear_replacements_handler(event):
-            TEXT_REPLACEMENTS.clear()
-            logger.info("Cleared all text replacements")
-            await event.respond("✓ All replacements cleared")
 
         logger.info("\nBot is running and monitoring for new messages and edits.")
         logger.info(f"Source channel: {SOURCE_CHANNEL}")
