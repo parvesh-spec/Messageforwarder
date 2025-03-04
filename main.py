@@ -46,34 +46,9 @@ def load_channel_config():
     except Exception as e:
         logger.error(f"Error loading channel configuration: {str(e)}")
 
-def load_replacements():
-    """Load text replacements from file"""
-    global TEXT_REPLACEMENTS
-    try:
-        with open('text_replacements.json', 'r') as f:
-            TEXT_REPLACEMENTS = json.load(f)
-            logger.info(f"Loaded text replacements: {TEXT_REPLACEMENTS}")
-    except FileNotFoundError:
-        logger.warning("No text replacements file found")
-        TEXT_REPLACEMENTS = {}
-    except Exception as e:
-        logger.error(f"Error loading text replacements: {str(e)}")
-        TEXT_REPLACEMENTS = {}
-
-def save_replacements():
-    """Save text replacements to file"""
-    try:
-        with open('text_replacements.json', 'w') as f:
-            json.dump(TEXT_REPLACEMENTS, f)
-            logger.info(f"Saved text replacements: {TEXT_REPLACEMENTS}")
-    except Exception as e:
-        logger.error(f"Error saving text replacements: {str(e)}")
-
 def config_monitor():
     while True:
         load_channel_config()
-        load_replacements()
-        save_replacements() #Save after loading in case of changes
         time.sleep(5)  # Check every 5 seconds
 
 async def main():
@@ -105,7 +80,6 @@ async def main():
                 logger.debug(f"Received message in channel: {event.chat_id}")
                 logger.debug(f"SOURCE_CHANNEL configured as: {SOURCE_CHANNEL}")
                 logger.debug(f"DESTINATION_CHANNEL configured as: {DESTINATION_CHANNEL}")
-                logger.debug(f"Current TEXT_REPLACEMENTS: {TEXT_REPLACEMENTS}")
 
                 # Skip if channels not configured
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
@@ -149,16 +123,9 @@ async def main():
                     # Apply text replacements if any
                     if TEXT_REPLACEMENTS and message_text:
                         logger.debug("Applying text replacements...")
-                        original_text = message_text
                         for original, replacement in TEXT_REPLACEMENTS.items():
-                            if original in message_text:
-                                message_text = message_text.replace(original, replacement)
-                                logger.debug(f"Replaced '{original}' with '{replacement}'")
-                        if original_text != message_text:
-                            logger.info(f"Text modified from: '{original_text}' to: '{message_text}'")
-                        else:
-                            logger.debug("No replacements were applied to the text")
-
+                            message_text = message_text.replace(original, replacement)
+                        logger.debug(f"Modified message text: {message_text}")
 
                     # Handle media
                     media = None
