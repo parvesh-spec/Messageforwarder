@@ -118,8 +118,27 @@ def config_monitor():
             logger.error(f"Error in config monitor: {str(e)}")
             time.sleep(1)  # Wait a bit before retrying on error
 
+async def get_user_id_from_db():
+    """Get first user ID from database to use for initial configuration"""
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users LIMIT 1")
+            result = cur.fetchone()
+            if result:
+                return result[0]
+    except Exception as e:
+        logger.error(f"Error getting initial user ID: {str(e)}")
+    return None
+
 async def main():
     try:
+        # Get initial user ID for configuration
+        global CURRENT_USER_ID
+        CURRENT_USER_ID = await get_user_id_from_db()
+        if not CURRENT_USER_ID:
+            logger.warning("No users found in database")
+
         # Start config monitoring in background
         Thread(target=config_monitor, daemon=True).start()
         logger.info("Started channel configuration monitor")
@@ -127,7 +146,12 @@ async def main():
         # Start the client with memory session
         logger.debug("Starting Telegram client...")
         client = TelegramClient(None, API_ID, API_HASH)
-        await client.start()
+
+        try:
+            await client.start()
+        except Exception as e:
+            logger.error(f"Failed to start client: {str(e)}")
+            return
 
         # Check if already authorized
         if not await client.is_user_authorized():
@@ -146,21 +170,17 @@ async def main():
                     logger.warning("Channels not configured yet")
                     return
 
-                # Format source channel ID for comparison
+                # Format IDs for comparison
                 source_id = str(SOURCE_CHANNEL)
                 if not source_id.startswith('-100'):
                     source_id = f"-100{source_id.lstrip('-')}"
 
-                # Format event chat ID for comparison
                 chat_id = str(event.chat_id)
                 if not chat_id.startswith('-100'):
                     chat_id = f"-100{chat_id.lstrip('-')}"
 
-                logger.debug(f"Comparing chat_id: {chat_id} with source_id: {source_id}")
-
                 # Check if message is from source channel
                 if chat_id != source_id:
-                    logger.debug(f"Message not from source channel. Got: {chat_id}, Expected: {source_id}")
                     return
 
                 logger.info(f"Processing message from source channel {source_id}")
@@ -172,13 +192,10 @@ async def main():
                         dest_id = f"-100{dest_id.lstrip('-')}"
 
                     # Get destination channel entity
-                    logger.debug(f"Getting entity for destination channel: {dest_id}")
                     dest_channel = await client.get_entity(int(dest_id))
-                    logger.info(f"Destination channel found: {getattr(dest_channel, 'title', 'Unknown')}")
 
                     # Create a new message
                     message_text = event.message.text if event.message.text else ""
-                    logger.debug(f"Original message text: {message_text}")
 
                     # Apply text replacements if any
                     if TEXT_REPLACEMENTS and message_text:
@@ -194,16 +211,6 @@ async def main():
                                 message_text = message_text.replace(original, replacement)
                                 logger.info(f"Replaced '{original}' with '{replacement}'")
                                 logger.debug(f"Text changed from '{old_text}' to '{message_text}'")
-                            else:
-                                logger.debug(f"Text '{original}' not found in message")
-
-                        logger.debug(f"Final text after all replacements: {message_text}")
-                    else:
-                        logger.debug("No text replacements to apply")
-                        if not TEXT_REPLACEMENTS:
-                            logger.debug("TEXT_REPLACEMENTS dictionary is empty")
-                        if not message_text:
-                            logger.debug("No message text to process")
 
                     # Handle media
                     media = None
@@ -226,7 +233,6 @@ async def main():
                                 caption=message_text,
                                 formatting_entities=event.message.entities
                             )
-                            #os.remove(media)  # Clean up - Removed to prevent errors if media is not a file
                             logger.info("Message with media sent successfully")
                         else:
                             logger.info("Sending text message...")
@@ -243,8 +249,6 @@ async def main():
 
                     except Exception as e:
                         logger.error(f"Failed to send message: {str(e)}")
-                        #if media and os.path.exists(media):
-                        #    os.remove(media) # Removed to prevent errors if media is not a file
                         return
 
                 except ValueError as e:
@@ -274,7 +278,6 @@ async def main():
 
                 # Check if message is from source channel
                 if chat_id != source_id:
-                    logger.debug(f"Edit not from source channel. Got: {chat_id}, Expected: {source_id}")
                     return
 
                 if event.message.id not in MESSAGE_IDS:
