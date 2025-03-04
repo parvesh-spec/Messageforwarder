@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
-from telethon import TelegramClient, events
+from telethon import TelegramClient, sync
+from telethon.errors import SessionPasswordNeededError
 import os
 from functools import wraps
 
@@ -10,13 +11,14 @@ app.secret_key = os.urandom(24)  # for session management
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
-# Store client instances
+# Store client instances and states
 clients = {}
+client_states = {}
 
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'user_phone' not in session:
+        if 'user_phone' not in session or not client_states.get(session['user_phone'], {}).get('authorized', False):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
@@ -32,28 +34,43 @@ def send_otp():
         if not phone:
             return jsonify({'error': 'Phone number is required'}), 400
 
-        # Create new client instance
-        client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
-        client.connect()
+        print(f"\nProcessing OTP request for phone: {phone}")
 
-        if not client.is_user_authorized():
-            client.send_code_request(phone)
-            session['user_phone'] = phone
+        # Initialize client and state
+        if phone not in clients:
+            print(f"Creating new client for {phone}")
+            client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH, connection_retries=5, timeout=30)
+            client.connect()
             clients[phone] = client
-            return jsonify({'message': 'OTP sent successfully'})
-        else:
+            client_states[phone] = {'authorized': False, 'phone': phone}
+
+        client = clients[phone]
+
+        # Check if already authorized
+        if client.is_user_authorized():
+            print(f"User {phone} is already authorized")
             session['user_phone'] = phone
-            clients[phone] = client
-            return jsonify({'message': 'Already authorized'})
+            client_states[phone]['authorized'] = True
+            return jsonify({'message': 'Already authorized', 'redirect': '/dashboard'})
+
+        # Send code request
+        print(f"Sending code request to {phone}")
+        client.send_code_request(phone)
+        session['user_phone'] = phone
+
+        return jsonify({'message': 'OTP sent successfully'})
+
     except Exception as e:
         print(f"Error in send_otp: {str(e)}")
-        return jsonify({'error': 'Failed to send OTP. Please try again.'}), 500
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/verify-otp', methods=['POST'])
 def verify_otp():
     try:
         phone = session.get('user_phone')
         otp = request.form.get('otp')
+
+        print(f"\nVerifying OTP for phone: {phone}")
 
         if not phone or not otp:
             return jsonify({'error': 'Phone and OTP are required'}), 400
@@ -63,20 +80,65 @@ def verify_otp():
             return jsonify({'error': 'Session expired. Please try again.'}), 400
 
         try:
+            # Sign in with the code
+            print(f"Attempting to sign in with OTP for {phone}")
             client.sign_in(phone, otp)
 
+            # Check if two-factor auth is enabled
             if client.is_user_authorized():
-                session['logged_in'] = True
-                return jsonify({'message': 'Login successful'})
+                client_states[phone]['authorized'] = True
+                print(f"User {phone} successfully signed in")
+                return jsonify({'message': 'Login successful', 'redirect': '/dashboard'})
             else:
-                return jsonify({'error': 'Invalid OTP'}), 400
+                print(f"Authorization failed for {phone}")
+                return jsonify({'error': 'Authorization failed. Please try again.'}), 400
+
+        except SessionPasswordNeededError:
+            print(f"2FA required for {phone}")
+            return jsonify({
+                'error': 'Two-factor authentication is enabled. Please enter your password.',
+                'needs_2fa': True
+            }), 400
         except Exception as e:
             print(f"Error in sign_in: {str(e)}")
             return jsonify({'error': str(e)}), 400
 
     except Exception as e:
         print(f"Error in verify_otp: {str(e)}")
-        return jsonify({'error': 'Failed to verify OTP. Please try again.'}), 500
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/verify-2fa', methods=['POST'])
+def verify_2fa():
+    try:
+        phone = session.get('user_phone')
+        password = request.form.get('password')
+
+        print(f"\nVerifying 2FA for phone: {phone}")
+
+        if not phone or not password:
+            return jsonify({'error': 'Phone and password are required'}), 400
+
+        client = clients.get(phone)
+        if not client:
+            return jsonify({'error': 'Session expired. Please try again.'}), 400
+
+        try:
+            print(f"Attempting 2FA verification for {phone}")
+            client.sign_in(password=password)
+            if client.is_user_authorized():
+                client_states[phone]['authorized'] = True
+                print(f"2FA verification successful for {phone}")
+                return jsonify({'message': 'Login successful', 'redirect': '/dashboard'})
+            else:
+                print(f"2FA verification failed for {phone}")
+                return jsonify({'error': 'Invalid password. Please try again.'}), 400
+        except Exception as e:
+            print(f"Error in 2FA: {str(e)}")
+            return jsonify({'error': str(e)}), 400
+
+    except Exception as e:
+        print(f"Error in verify_2fa: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/dashboard')
 @login_required
@@ -85,17 +147,24 @@ def dashboard():
         phone = session.get('user_phone')
         client = clients.get(phone)
 
-        if not client:
+        if not client or not client_states.get(phone, {}).get('authorized', False):
             return redirect(url_for('login'))
 
         # Get user's channels
+        print(f"Fetching channels for {phone}")
         channels = []
-        for dialog in client.iter_dialogs():
-            if dialog.is_channel:
-                channels.append({
-                    'id': dialog.id,
-                    'name': dialog.name
-                })
+        try:
+            dialogs = client.get_dialogs()
+            for dialog in dialogs:
+                if dialog.is_channel:
+                    channels.append({
+                        'id': dialog.id,
+                        'name': dialog.name
+                    })
+            print(f"Found {len(channels)} channels")
+        except Exception as e:
+            print(f"Error fetching channels: {str(e)}")
+            return redirect(url_for('login'))
 
         return render_template('dashboard.html', channels=channels)
     except Exception as e:

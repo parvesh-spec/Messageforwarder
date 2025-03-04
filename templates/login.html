@@ -24,6 +24,15 @@
             <button onclick="verifyOTP()">Verify OTP</button>
             <button onclick="resendOTP()" class="secondary">Resend OTP</button>
         </div>
+        <div id="twofa-form" style="display: none;">
+            <div class="input-group">
+                <label for="password">Two-Factor Authentication Password</label>
+                <input type="password" id="password" placeholder="Enter your 2FA password" required>
+                <small>Enter your Telegram 2FA password</small>
+            </div>
+            <button onclick="verify2FA()">Verify Password</button>
+            <button onclick="resendOTP()" class="secondary">Start Over</button>
+        </div>
         <div id="message"></div>
         <div id="loading" style="display: none;">
             Please wait...
@@ -39,6 +48,13 @@
 
         function showLoading(show) {
             document.getElementById('loading').style.display = show ? 'block' : 'none';
+        }
+
+        function showForm(formId) {
+            document.getElementById('login-form').style.display = 'none';
+            document.getElementById('otp-form').style.display = 'none';
+            document.getElementById('twofa-form').style.display = 'none';
+            document.getElementById(formId).style.display = 'block';
         }
 
         function sendOTP() {
@@ -62,9 +78,12 @@
                 if (data.error) {
                     showMessage(data.error, true);
                 } else {
-                    document.getElementById('login-form').style.display = 'none';
-                    document.getElementById('otp-form').style.display = 'block';
-                    showMessage('OTP sent to your Telegram account. Please check your messages.');
+                    if (data.redirect) {
+                        window.location.href = data.redirect;
+                    } else {
+                        showForm('otp-form');
+                        showMessage('OTP sent to your Telegram account. Please check your messages.');
+                    }
                 }
             })
             .catch(error => {
@@ -93,10 +112,15 @@
             .then(data => {
                 showLoading(false);
                 if (data.error) {
-                    showMessage(data.error, true);
+                    if (data.needs_2fa) {
+                        showForm('twofa-form');
+                        showMessage('Please enter your Two-Factor Authentication password.');
+                    } else {
+                        showMessage(data.error, true);
+                    }
                 } else {
                     showMessage('Login successful! Redirecting...');
-                    window.location.href = '/dashboard';
+                    window.location.href = data.redirect;
                 }
             })
             .catch(error => {
@@ -106,9 +130,40 @@
             });
         }
 
+        function verify2FA() {
+            const password = document.getElementById('password').value.trim();
+            if (!password) {
+                showMessage('Please enter your 2FA password', true);
+                return;
+            }
+
+            showLoading(true);
+            fetch('/verify-2fa', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `password=${encodeURIComponent(password)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                showLoading(false);
+                if (data.error) {
+                    showMessage(data.error, true);
+                } else {
+                    showMessage('Login successful! Redirecting...');
+                    window.location.href = data.redirect;
+                }
+            })
+            .catch(error => {
+                showLoading(false);
+                showMessage('Failed to verify 2FA password. Please try again.', true);
+                console.error('Error:', error);
+            });
+        }
+
         function resendOTP() {
-            document.getElementById('otp-form').style.display = 'none';
-            document.getElementById('login-form').style.display = 'block';
+            showForm('login-form');
             showMessage('Please enter your phone number again to receive a new OTP.');
         }
     </script>
