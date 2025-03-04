@@ -1,19 +1,30 @@
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
-from telethon import TelegramClient, sync
+from telethon import TelegramClient, events, sync, Button
 from telethon.errors import SessionPasswordNeededError
-import os
 from functools import wraps
+import asyncio
+import os
+import re
 
-app = Flask(__name__)
-app.secret_key = os.urandom(24)  # for session management
-
-# Telegram API credentials
-API_ID = int(os.getenv('API_ID', '27202142'))
-API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
+# These example values won't work. You must get your own api_id and
+# api_hash from https://my.telegram.org, under API Development.
+API_ID = int(os.getenv('API_ID', '27202142'))  # Replace with your API ID
+API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')  # Replace with your API hash
 
 # Store client instances and states
 clients = {}
 client_states = {}
+
+def get_event_loop():
+    try:
+        return asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+
+app = Flask(__name__)
+app.secret_key = os.urandom(24)  # for session management
 
 def login_required(f):
     @wraps(f)
@@ -40,14 +51,19 @@ def send_otp():
         if phone not in clients:
             print(f"Creating new client for {phone}")
             client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH, connection_retries=5, timeout=30)
-            client.connect()
+
+            # Start the client in the event loop
+            loop = get_event_loop()
+            loop.run_until_complete(client.connect())
+
             clients[phone] = client
             client_states[phone] = {'authorized': False, 'phone': phone}
 
         client = clients[phone]
 
         # Check if already authorized
-        if client.is_user_authorized():
+        loop = get_event_loop()
+        if loop.run_until_complete(client.is_user_authorized()):
             print(f"User {phone} is already authorized")
             session['user_phone'] = phone
             client_states[phone]['authorized'] = True
@@ -55,7 +71,7 @@ def send_otp():
 
         # Send code request
         print(f"Sending code request to {phone}")
-        client.send_code_request(phone)
+        loop.run_until_complete(client.send_code_request(phone))
         session['user_phone'] = phone
 
         return jsonify({'message': 'OTP sent successfully'})
@@ -82,10 +98,11 @@ def verify_otp():
         try:
             # Sign in with the code
             print(f"Attempting to sign in with OTP for {phone}")
-            client.sign_in(phone, otp)
+            loop = get_event_loop()
+            loop.run_until_complete(client.sign_in(phone, otp))
 
             # Check if two-factor auth is enabled
-            if client.is_user_authorized():
+            if loop.run_until_complete(client.is_user_authorized()):
                 client_states[phone]['authorized'] = True
                 print(f"User {phone} successfully signed in")
                 return jsonify({'message': 'Login successful', 'redirect': '/dashboard'})
@@ -124,8 +141,10 @@ def verify_2fa():
 
         try:
             print(f"Attempting 2FA verification for {phone}")
-            client.sign_in(password=password)
-            if client.is_user_authorized():
+            loop = get_event_loop()
+            loop.run_until_complete(client.sign_in(password=password))
+
+            if loop.run_until_complete(client.is_user_authorized()):
                 client_states[phone]['authorized'] = True
                 print(f"2FA verification successful for {phone}")
                 return jsonify({'message': 'Login successful', 'redirect': '/dashboard'})
@@ -154,7 +173,8 @@ def dashboard():
         print(f"Fetching channels for {phone}")
         channels = []
         try:
-            dialogs = client.get_dialogs()
+            loop = get_event_loop()
+            dialogs = loop.run_until_complete(client.get_dialogs())
             for dialog in dialogs:
                 if dialog.is_channel:
                     channels.append({
