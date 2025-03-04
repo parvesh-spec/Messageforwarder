@@ -117,13 +117,13 @@ def send_otp():
             await client.connect()
 
             if not await client.is_user_authorized():
+                print(f"Sending OTP for phone: {phone}")
                 sent = await client.send_code_request(phone)
                 session['user_phone'] = phone
                 session['phone_code_hash'] = sent.phone_code_hash
                 await client.disconnect()
 
                 try:
-                    # Store or update user in database
                     with app.app_context():
                         print(f"Creating/updating user for phone: {phone}")
                         user = User.query.filter_by(phone=phone).first()
@@ -141,7 +141,7 @@ def send_otp():
                 return {'message': 'OTP sent successfully'}
             else:
                 await client.disconnect()
-                return {'message': 'Already authorized'}
+                return {'message': 'Already authorized. Please logout first.'}, 400
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
