@@ -90,6 +90,10 @@ def get_user_id(phone):
 
 @app.route('/')
 def login():
+    # If user is already logged in, redirect to dashboard
+    if session.get('logged_in') and session.get('user_phone'):
+        logger.info("User already logged in, redirecting to dashboard")
+        return redirect(url_for('dashboard'))
     return render_template('login.html')
 
 def get_temp_session_path(phone):
@@ -226,7 +230,12 @@ def verify_otp():
                             db.commit()
                             logger.info("Saved session string to database")
 
+                    # Set all required session variables
                     session['logged_in'] = True
+                    session['user_phone'] = phone
+                    session.permanent = True
+                    logger.info(f"Set session variables - logged_in: {session.get('logged_in')}, user_phone: {session.get('user_phone')}")
+
                     if client.is_connected():
                         await client.disconnect()
                     # Clean up temporary session file
@@ -258,43 +267,18 @@ def verify_otp():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    async def get_channels():
-        phone = session.get('user_phone')
-        client = TelegramClient(None, API_ID, API_HASH) #removed session file
-
-        try:
-            await client.connect()
-            channels = []
-            async for dialog in client.iter_dialogs():
-                if dialog.is_channel:
-                    channels.append({
-                        'id': dialog.id,
-                        'name': dialog.name
-                    })
-            await client.disconnect()
-
-            # Get saved channel configuration
-            user_id = get_user_id(phone)
-            config = get_user_channel_config(user_id)
-            if config:
-                for channel in channels:
-                    if str(channel['id']) == config['source_channel']:
-                        channel['is_source'] = True
-                    if str(channel['id']) == config['destination_channel']:
-                        channel['is_destination'] = True
-
-            return channels
-        except Exception as e:
-            logger.error(f"Error fetching channels: {str(e)}")
-            if client and client.connected:
-                await client.disconnect()
-            raise e
+    # Double check session status
+    if not session.get('logged_in') or not session.get('user_phone'):
+        logger.warning("User not properly logged in, redirecting to login")
+        return redirect(url_for('login'))
 
     try:
         channels = asyncio.run(get_channels())
         return render_template('dashboard.html', channels=channels)
     except Exception as e:
         logger.error(f"Error in dashboard route: {str(e)}")
+        # If there's an error, log the user out and redirect to login
+        session.clear()
         return redirect(url_for('login'))
 
 @app.route('/add-replacement', methods=['POST'])
@@ -507,6 +491,38 @@ def toggle_bot():
     except Exception as e:
         logger.error(f"Error toggling bot: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+async def get_channels():
+    phone = session.get('user_phone')
+    client = TelegramClient(None, API_ID, API_HASH) #removed session file
+
+    try:
+        await client.connect()
+        channels = []
+        async for dialog in client.iter_dialogs():
+            if dialog.is_channel:
+                channels.append({
+                    'id': dialog.id,
+                    'name': dialog.name
+                })
+        await client.disconnect()
+
+        # Get saved channel configuration
+        user_id = get_user_id(phone)
+        config = get_user_channel_config(user_id)
+        if config:
+            for channel in channels:
+                if str(channel['id']) == config['source_channel']:
+                    channel['is_source'] = True
+                if str(channel['id']) == config['destination_channel']:
+                    channel['is_destination'] = True
+
+        return channels
+    except Exception as e:
+        logger.error(f"Error fetching channels: {str(e)}")
+        if client and client.connected:
+            await client.disconnect()
+        raise e
 
 if __name__ == '__main__':
     # ALWAYS serve the app on port 5000
