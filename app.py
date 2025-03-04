@@ -78,9 +78,6 @@ def send_otp():
         return jsonify({'error': 'Phone number must start with +91'}), 400
 
     try:
-        # Create sessions directory if it doesn't exist
-        os.makedirs('sessions', exist_ok=True)
-
         async def send_code():
             logger.info(f"Initializing Telegram client for phone: {phone}")
             session_file = f"sessions/{phone}"
@@ -254,6 +251,56 @@ def logout():
     except Exception as e:
         logger.error(f"Error in logout route: {str(e)}")
         return redirect(url_for('login'))
+
+@app.route('/update-channels', methods=['POST'])
+@login_required
+def update_channels():
+    try:
+        source = request.form.get('source')
+        destination = request.form.get('destination')
+
+        if not source or not destination:
+            logger.error("Missing channel IDs in request")
+            return jsonify({'error': 'Both source and destination channels are required'}), 400
+
+        if source == destination:
+            logger.error("Source and destination channels cannot be the same")
+            return jsonify({'error': 'Source and destination channels must be different'}), 400
+
+        # Store channel IDs in session
+        session['source_channel'] = source
+        session['dest_channel'] = destination
+        logger.info(f"Updated channel configuration - Source: {source}, Destination: {destination}")
+
+        return jsonify({'message': 'Channel configuration updated successfully'})
+    except Exception as e:
+        logger.error(f"Error updating channels: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/bot/toggle', methods=['POST'])
+@login_required
+def toggle_bot():
+    try:
+        status = request.form.get('status') == 'true'
+        source = session.get('source_channel')
+        destination = session.get('dest_channel')
+
+        if not source or not destination:
+            logger.error("Channel configuration missing")
+            return jsonify({'error': 'Please configure source and destination channels first'}), 400
+
+        # Here you would typically start/stop the bot process
+        # For now, we'll just update the session status
+        session['bot_running'] = status
+        logger.info(f"Bot status changed to: {'running' if status else 'stopped'}")
+
+        return jsonify({
+            'status': status,
+            'message': f"Bot is now {'running' if status else 'stopped'}"
+        })
+    except Exception as e:
+        logger.error(f"Error toggling bot: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     # Make sure sessions directory exists

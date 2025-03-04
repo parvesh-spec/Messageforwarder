@@ -7,11 +7,11 @@
 <body>
     <div class="dashboard-container">
         <h2>Bot Control Panel</h2>
-        
+
         <div class="channel-section">
             <div class="channel-select">
                 <label>Source Channel:</label>
-                <select id="source-channel">
+                <select id="source-channel" onchange="updateChannels()">
                     <option value="">Select Source Channel</option>
                     {% for channel in channels %}
                     <option value="{{ channel.id }}">{{ channel.name }}</option>
@@ -21,7 +21,7 @@
 
             <div class="channel-select">
                 <label>Destination Channel:</label>
-                <select id="dest-channel">
+                <select id="dest-channel" onchange="updateChannels()">
                     <option value="">Select Destination Channel</option>
                     {% for channel in channels %}
                     <option value="{{ channel.id }}">{{ channel.name }}</option>
@@ -31,14 +31,6 @@
         </div>
 
         <div class="controls-section">
-            <div class="control-group">
-                <label>Text Replacement:</label>
-                <label class="switch">
-                    <input type="checkbox" id="replace-toggle" onchange="toggleReplace(this)">
-                    <span class="slider round"></span>
-                </label>
-            </div>
-
             <div class="control-group">
                 <label>Bot Status:</label>
                 <label class="switch">
@@ -52,7 +44,53 @@
     </div>
 
     <script>
+        function showMessage(message, isError = false) {
+            const messageDiv = document.getElementById('status-message');
+            messageDiv.innerHTML = message;
+            messageDiv.style.color = isError ? 'red' : 'green';
+            console.log(`${isError ? 'Error' : 'Info'}: ${message}`);
+        }
+
+        function updateChannels() {
+            const sourceChannel = document.getElementById('source-channel').value;
+            const destChannel = document.getElementById('dest-channel').value;
+
+            if (!sourceChannel || !destChannel) {
+                return;
+            }
+
+            console.log('Updating channel configuration...');
+            fetch('/update-channels', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `source=${encodeURIComponent(sourceChannel)}&destination=${encodeURIComponent(destChannel)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('Channel update response:', data);
+                if (data.error) {
+                    showMessage(data.error, true);
+                } else {
+                    showMessage('Channel configuration updated successfully');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showMessage('An error occurred while updating channels', true);
+            });
+        }
+
         function toggleBot(element) {
+            if (!document.getElementById('source-channel').value || 
+                !document.getElementById('dest-channel').value) {
+                showMessage('Please select both source and destination channels first', true);
+                element.checked = false;
+                return;
+            }
+
+            console.log('Toggling bot status...');
             fetch('/bot/toggle', {
                 method: 'POST',
                 headers: {
@@ -62,23 +100,18 @@
             })
             .then(response => response.json())
             .then(data => {
-                document.getElementById('status-message').innerHTML = 
-                    `Bot is now ${data.status ? 'running' : 'stopped'}`;
-            });
-        }
-
-        function toggleReplace(element) {
-            fetch('/replace/toggle', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: `status=${element.checked}`
+                console.log('Bot toggle response:', data);
+                if (data.error) {
+                    showMessage(data.error, true);
+                    element.checked = !element.checked;
+                } else {
+                    showMessage(`Bot is now ${data.status ? 'running' : 'stopped'}`);
+                }
             })
-            .then(response => response.json())
-            .then(data => {
-                document.getElementById('status-message').innerHTML = 
-                    `Text replacement is now ${data.status ? 'enabled' : 'disabled'}`;
+            .catch(error => {
+                console.error('Error:', error);
+                showMessage('An error occurred while toggling bot status', true);
+                element.checked = !element.checked;
             });
         }
     </script>
