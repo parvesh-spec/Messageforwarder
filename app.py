@@ -247,6 +247,17 @@ def dashboard():
                         'name': dialog.name
                     })
             await client.disconnect()
+
+            # Get saved channel configuration
+            user_id = get_user_id(phone)
+            config = get_user_channel_config(user_id)
+            if config:
+                for channel in channels:
+                    if str(channel['id']) == config['source_channel']:
+                        channel['is_source'] = True
+                    if str(channel['id']) == config['destination_channel']:
+                        channel['is_destination'] = True
+
             return channels
         except Exception as e:
             logger.error(f"Error fetching channels: {str(e)}")
@@ -384,27 +395,47 @@ def update_channels():
         if not destination.startswith('-100'):
             destination = f"-100{destination.lstrip('-')}"
 
-        # Store channel IDs in session and file
+        # Get user_id
+        user_phone = session.get('user_phone')
+        user_id = get_user_id(user_phone)
+
+        # Save to database
+        save_user_channel_config(user_id, source, destination)
+
+        # Store in session for current request
         session['source_channel'] = source
         session['dest_channel'] = destination
 
-        # Save to configuration file
-        config = {
-            'source_channel': source,
-            'destination_channel': destination
-        }
-
-        with open('channel_config.json', 'w') as f:
-            import json
-            json.dump(config, f)
-
         logger.info(f"Updated channel configuration - Source: {source}, Destination: {destination}")
-        logger.info("Configuration saved to channel_config.json")
-
         return jsonify({'message': 'Channel configuration updated successfully'})
+
     except Exception as e:
         logger.error(f"Error updating channels: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+def get_user_channel_config(user_id):
+    db = get_db()
+    with db.cursor(cursor_factory=DictCursor) as cur:
+        cur.execute("""
+            SELECT source_channel, destination_channel 
+            FROM channel_configs 
+            WHERE user_id = %s
+        """, (user_id,))
+        return cur.fetchone()
+
+def save_user_channel_config(user_id, source_channel, destination_channel):
+    db = get_db()
+    with db.cursor() as cur:
+        cur.execute("""
+            INSERT INTO channel_configs (user_id, source_channel, destination_channel)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET 
+                source_channel = EXCLUDED.source_channel,
+                destination_channel = EXCLUDED.destination_channel
+        """, (user_id, source_channel, destination_channel))
+        db.commit()
+
 
 @app.route('/clear-replacements', methods=['POST'])
 @login_required

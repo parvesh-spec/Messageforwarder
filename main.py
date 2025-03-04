@@ -48,13 +48,28 @@ def get_db():
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
     try:
-        with open('channel_config.json', 'r') as f:
-            config = json.load(f)
-            SOURCE_CHANNEL = config.get('source_channel')
-            DESTINATION_CHANNEL = config.get('destination_channel')
-            logger.info(f"Loaded channel configuration - Source: {SOURCE_CHANNEL}, Destination: {DESTINATION_CHANNEL}")
-    except FileNotFoundError:
-        logger.warning("No channel configuration file found")
+        if not CURRENT_USER_ID:
+            logger.warning("No current user ID set")
+            return
+
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT source_channel, destination_channel 
+                    FROM channel_configs 
+                    WHERE user_id = %s
+                """, (CURRENT_USER_ID,))
+                config = cur.fetchone()
+
+                if config:
+                    SOURCE_CHANNEL = config['source_channel']
+                    DESTINATION_CHANNEL = config['destination_channel']
+                    logger.info(f"Loaded channel configuration - Source: {SOURCE_CHANNEL}, Destination: {DESTINATION_CHANNEL}")
+                else:
+                    logger.warning("No channel configuration found")
+        finally:
+            conn.close()
     except Exception as e:
         logger.error(f"Error loading channel configuration: {str(e)}")
 
@@ -71,8 +86,10 @@ def load_user_replacements(user_id):
                     WHERE user_id = %s
                     ORDER BY LENGTH(original_text) DESC
                 """, (user_id,))
-                TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
-                logger.info(f"Loaded text replacements for user {user_id}: {TEXT_REPLACEMENTS}")
+
+                TEXT_REPLACEMENTS = {}
+                for row in cur.fetchall():
+                    TEXT_REPLACEMENTS[row['original_text']] = row['replacement_text']
 
                 # Verify data was loaded
                 if not TEXT_REPLACEMENTS:
@@ -320,11 +337,3 @@ if __name__ == "__main__":
         logger.info("\nBot stopped by user.")
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
-
-# Clean up old files if they exist
-if os.path.exists('text_replacements.json'):
-    try:
-        os.remove('text_replacements.json')
-        logger.info("Removed old text_replacements.json file")
-    except Exception as e:
-        logger.error(f"Error removing text_replacements.json: {str(e)}")

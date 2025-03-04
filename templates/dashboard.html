@@ -103,6 +103,24 @@
             });
         }
 
+        // Pre-select saved channels when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            const channels = {{ channels|tojson|safe }};
+            const sourceSelect = document.getElementById('source-channel');
+            const destSelect = document.getElementById('dest-channel');
+
+            channels.forEach(channel => {
+                if (channel.is_source) {
+                    sourceSelect.value = channel.id;
+                }
+                if (channel.is_destination) {
+                    destSelect.value = channel.id;
+                }
+            });
+
+            loadReplacements();
+        });
+
         function addReplacement() {
             const originalText = document.getElementById('original-text').value;
             const replacementText = document.getElementById('replacement-text').value;
