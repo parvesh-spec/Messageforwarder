@@ -138,3 +138,61 @@ input:checked + .slider:before {
         padding: 1rem;
     }
 }
+
+/* Message Styles */
+#message {
+    margin: 1rem 0;
+    padding: 0.8rem;
+    border-radius: 4px;
+    text-align: center;
+}
+
+#message.error {
+    background-color: #ffebee;
+    color: #c62828;
+    border: 1px solid #ef9a9a;
+}
+
+#message.success {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+    border: 1px solid #a5d6a7;
+}
+
+/* Loading Indicator */
+#loading {
+    text-align: center;
+    padding: 1rem;
+    color: #666;
+}
+
+/* Form Labels and Help Text */
+label {
+    display: block;
+    margin-bottom: 0.5rem;
+    color: #333;
+}
+
+small {
+    display: block;
+    color: #666;
+    margin-top: 0.25rem;
+    font-size: 0.875rem;
+}
+
+/* Secondary Button */
+button.secondary {
+    background-color: #666;
+    margin-top: 0.5rem;
+}
+
+button.secondary:hover {
+    background-color: #555;
+}
+
+/* Input Focus State */
+input:focus {
+    outline: none;
+    border-color: #0088cc;
+    box-shadow: 0 0 0 2px rgba(0,136,204,0.2);
+}
