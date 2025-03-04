@@ -18,6 +18,7 @@
                 <input type="text" id="otp" placeholder="Enter OTP from Telegram" required>
             </div>
             <button onclick="verifyOTP()">Verify OTP</button>
+            <button onclick="resendOTP()" class="secondary-button">Resend OTP</button>
         </div>
         <div id="twofa-form" style="display: none;">
             <div class="input-group">
@@ -57,6 +58,23 @@
                     document.getElementById('login-form').style.display = 'none';
                     document.getElementById('otp-form').style.display = 'block';
                     showMessage('OTP sent to your Telegram account');
+                }
+            });
+        }
+
+        function resendOTP() {
+            fetch('/resend-otp', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showMessage(data.error, true);
+                } else {
+                    showMessage('OTP resent to your Telegram account');
                 }
             });
         }

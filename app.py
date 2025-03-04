@@ -7,6 +7,8 @@ from functools import wraps
 from asgiref.sync import async_to_sync
 from datetime import datetime, timedelta
 from models import db, User, UserSession, Channel, BotConfig
+import time
+from sqlalchemy.exc import OperationalError
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)  # for session management
@@ -21,14 +23,32 @@ print(f"Initializing database with URL type: {db_url.split('://')[0] if db_url e
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_size': 5,
+    'pool_size': 20,  # Increased pool size
+    'max_overflow': 5,
     'pool_timeout': 30,
     'pool_recycle': 1800,
     'pool_pre_ping': True,
     'connect_args': {
-        'sslmode': 'require'
+        'sslmode': 'require',
+        'connect_timeout': 10
     }
 }
+
+def retry_on_db_error(func):
+    def wrapper(*args, **kwargs):
+        max_retries = 3
+        retry_delay = 1  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except OperationalError as e:
+                if attempt == max_retries - 1:
+                    raise
+                print(f"Database error, retrying ({attempt + 1}/{max_retries}): {e}")
+                time.sleep(retry_delay)
+                db.session.rollback()
+    return wrapper
 
 try:
     print("Initializing database connection...")
@@ -56,18 +76,19 @@ def login_required(f):
 
         try:
             # Verify session in database
-            user_session = UserSession.query.filter_by(
-                session_id=session.get('session_id'),
-                is_active=True
-            ).first()
+            with app.app_context():
+                user_session = UserSession.query.filter_by(
+                    session_id=session.get('session_id'),
+                    is_active=True
+                ).first()
 
-            if not user_session or user_session.expires_at < datetime.utcnow():
-                print("Session expired or not found")
-                session.clear()
-                return redirect(url_for('login'))
+                if not user_session or user_session.expires_at < datetime.utcnow():
+                    print("Session expired or not found")
+                    session.clear()
+                    return redirect(url_for('login'))
 
-            print(f"Session verified for user: {user_session.user_id}")
-            return f(*args, **kwargs)
+                print(f"Session verified for user: {user_session.user_id}")
+                return f(*args, **kwargs)
         except Exception as e:
             print(f"Session verification error: {e}")
             session.clear()
@@ -103,16 +124,18 @@ def send_otp():
 
                 try:
                     # Store or update user in database
-                    print(f"Creating/updating user for phone: {phone}")
-                    user = User.query.filter_by(phone=phone).first()
-                    if not user:
-                        user = User(phone=phone)
-                        db.session.add(user)
-                    db.session.commit()
-                    print(f"User saved with ID: {user.id}")
+                    with app.app_context():
+                        print(f"Creating/updating user for phone: {phone}")
+                        user = User.query.filter_by(phone=phone).first()
+                        if not user:
+                            user = User(phone=phone)
+                            db.session.add(user)
+                        db.session.commit()
+                        print(f"User saved with ID: {user.id}")
                 except Exception as db_error:
                     print(f"Database error in send_otp: {db_error}")
-                    db.session.rollback()
+                    if 'db' in locals():
+                        db.session.rollback()
                     return {'error': 'Database error occurred'}, 500
 
                 return {'message': 'OTP sent successfully'}
@@ -161,37 +184,39 @@ def verify_otp():
                 await client.disconnect()
 
                 try:
-                    print(f"Updating user and creating session for phone: {phone}")
-                    # Update user and create session in database
-                    user = User.query.filter_by(phone=phone).first()
-                    user.telegram_id = me.id
-                    user.last_login = datetime.utcnow()
+                    with app.app_context():
+                        print(f"Updating user and creating session for phone: {phone}")
+                        # Update user and create session in database
+                        user = User.query.filter_by(phone=phone).first()
+                        user.telegram_id = me.id
+                        user.last_login = datetime.utcnow()
 
-                    # Create new session
-                    session_id = os.urandom(24).hex()
-                    user_session = UserSession(
-                        user_id=user.id,
-                        session_id=session_id,
-                        expires_at=datetime.utcnow() + timedelta(days=7)
-                    )
+                        # Create new session
+                        session_id = os.urandom(24).hex()
+                        user_session = UserSession(
+                            user_id=user.id,
+                            session_id=session_id,
+                            expires_at=datetime.utcnow() + timedelta(days=7)
+                        )
 
-                    # Deactivate old sessions
-                    UserSession.query.filter_by(user_id=user.id).update({
-                        'is_active': False
-                    })
+                        # Deactivate old sessions
+                        UserSession.query.filter_by(user_id=user.id).update({
+                            'is_active': False
+                        })
 
-                    db.session.add(user_session)
-                    db.session.commit()
-                    print(f"Session created with ID: {session_id}")
+                        db.session.add(user_session)
+                        db.session.commit()
+                        print(f"Session created with ID: {session_id}")
 
-                    # Store session ID in Flask session
-                    session['session_id'] = session_id
-                    session['logged_in'] = True
+                        # Store session ID in Flask session
+                        session['session_id'] = session_id
+                        session['logged_in'] = True
 
-                    return {'message': 'Login successful'}
+                        return {'message': 'Login successful'}
                 except Exception as db_error:
                     print(f"Database error in verify_otp: {db_error}")
-                    db.session.rollback()
+                    if 'db' in locals():
+                        db.session.rollback()
                     return {'error': 'Database error occurred'}, 500
             else:
                 await client.disconnect()
@@ -226,23 +251,25 @@ def dashboard():
 
                 # Store channel in database if not exists
                 try:
-                    user = User.query.filter_by(phone=phone).first()
-                    existing_channel = Channel.query.filter_by(
-                        user_id=user.id,
-                        telegram_channel_id=dialog.id
-                    ).first()
-
-                    if not existing_channel:
-                        channel = Channel(
+                    with app.app_context():
+                        user = User.query.filter_by(phone=phone).first()
+                        existing_channel = Channel.query.filter_by(
                             user_id=user.id,
-                            telegram_channel_id=dialog.id,
-                            channel_name=dialog.name
-                        )
-                        db.session.add(channel)
-                        db.session.commit()
+                            telegram_channel_id=dialog.id
+                        ).first()
+
+                        if not existing_channel:
+                            channel = Channel(
+                                user_id=user.id,
+                                telegram_channel_id=dialog.id,
+                                channel_name=dialog.name
+                            )
+                            db.session.add(channel)
+                            db.session.commit()
                 except Exception as db_error:
                     print(f"Database error in get_channels: {db_error}")
-                    db.session.rollback()
+                    if 'db' in locals():
+                        db.session.rollback()
 
         await client.disconnect()
         return channels
@@ -263,17 +290,19 @@ def toggle_bot():
 
     # Update bot configuration
     try:
-        bot_config = BotConfig.query.filter_by(user_id=user.id).first()
-        if not bot_config:
-            bot_config = BotConfig(user_id=user.id)
-            db.session.add(bot_config)
+        with app.app_context():
+            bot_config = BotConfig.query.filter_by(user_id=user.id).first()
+            if not bot_config:
+                bot_config = BotConfig(user_id=user.id)
+                db.session.add(bot_config)
 
-        bot_config.is_active = status
-        bot_config.updated_at = datetime.utcnow()
-        db.session.commit()
+            bot_config.is_active = status
+            bot_config.updated_at = datetime.utcnow()
+            db.session.commit()
     except Exception as e:
         print(f"Database error in toggle_bot: {e}")
-        db.session.rollback()
+        if 'db' in locals():
+            db.session.rollback()
         return jsonify({'error': 'Database error'}), 500
 
     return jsonify({'status': status})
@@ -287,20 +316,68 @@ def toggle_replace():
 
     # Update text replacement configuration
     try:
-        bot_config = BotConfig.query.filter_by(user_id=user.id).first()
-        if not bot_config:
-            bot_config = BotConfig(user_id=user.id)
-            db.session.add(bot_config)
+        with app.app_context():
+            bot_config = BotConfig.query.filter_by(user_id=user.id).first()
+            if not bot_config:
+                bot_config = BotConfig(user_id=user.id)
+                db.session.add(bot_config)
 
-        bot_config.text_replacement_enabled = status
-        bot_config.updated_at = datetime.utcnow()
-        db.session.commit()
+            bot_config.text_replacement_enabled = status
+            bot_config.updated_at = datetime.utcnow()
+            db.session.commit()
     except Exception as e:
         print(f"Database error in toggle_replace: {e}")
-        db.session.rollback()
+        if 'db' in locals():
+            db.session.rollback()
         return jsonify({'error': 'Database error'}), 500
 
     return jsonify({'status': status})
+
+@app.route('/resend-otp', methods=['POST'])
+def resend_otp():
+    phone = session.get('user_phone')
+    if not phone:
+        return jsonify({'error': 'No phone number found in session'}), 400
+
+    try:
+        async def resend_code():
+            client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
+            await client.connect()
+
+            if not await client.is_user_authorized():
+                sent = await client.send_code_request(phone)
+                session['phone_code_hash'] = sent.phone_code_hash
+                await client.disconnect()
+
+                try:
+                    with app.app_context():
+                        print(f"Resending OTP for phone: {phone}")
+                        user = User.query.filter_by(phone=phone).first()
+                        if user:
+                            user.last_login = datetime.utcnow()
+                            db.session.commit()
+                            print(f"Updated last login for user ID: {user.id}")
+                except Exception as db_error:
+                    print(f"Database error in resend_otp: {db_error}")
+                    if 'db' in locals():
+                        db.session.rollback()
+                    return {'error': 'Database error occurred'}, 500
+
+                return {'message': 'OTP resent successfully'}
+            else:
+                await client.disconnect()
+                return {'error': 'Already authorized'}, 400
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(resend_code())
+        loop.close()
+
+        return jsonify(result if isinstance(result, dict) else result[0]), \
+               200 if isinstance(result, dict) else result[1]
+    except Exception as e:
+        print(f"Error in resend_otp: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     # Make sure sessions directory exists
