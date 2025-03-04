@@ -308,6 +308,7 @@ def add_replacement():
         # Update main.py's replacements
         import main
         main.TEXT_REPLACEMENTS[original] = replacement
+        main.save_replacements()  # Save to file
         logger.info(f"Added text replacement: '{original}' → '{replacement}'")
 
         return jsonify({'message': 'Replacement added successfully'})
@@ -336,6 +337,7 @@ def remove_replacement():
         import main
         if original in main.TEXT_REPLACEMENTS:
             del main.TEXT_REPLACEMENTS[original]
+            main.save_replacements()  # Save to file
             logger.info(f"Removed text replacement for '{original}'")
             return jsonify({'message': 'Replacement removed successfully'})
         else:
@@ -350,6 +352,7 @@ def clear_replacements():
     try:
         import main
         main.TEXT_REPLACEMENTS.clear()
+        main.save_replacements()  # Save to file
         logger.info("Cleared all text replacements")
         return jsonify({'message': 'All replacements cleared'})
     except Exception as e:
