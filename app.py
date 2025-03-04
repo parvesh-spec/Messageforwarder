@@ -46,8 +46,10 @@ def send_otp():
             await client.connect()
 
             if not await client.is_user_authorized():
-                await client.send_code_request(phone)
+                # Send code and get the phone_code_hash
+                sent = await client.send_code_request(phone)
                 session['user_phone'] = phone
+                session['phone_code_hash'] = sent.phone_code_hash
                 return {'message': 'OTP sent successfully'}
             else:
                 return {'message': 'Already authorized'}
@@ -64,11 +66,12 @@ def send_otp():
 @app.route('/verify-otp', methods=['POST'])
 def verify_otp():
     phone = session.get('user_phone')
+    phone_code_hash = session.get('phone_code_hash')
     otp = request.form.get('otp')
     password = request.form.get('password')  # For 2FA
 
-    if not phone or not otp:
-        return jsonify({'error': 'Phone and OTP are required'}), 400
+    if not phone or not otp or not phone_code_hash:
+        return jsonify({'error': 'Phone, OTP and verification data are required'}), 400
 
     try:
         async def verify():
@@ -76,7 +79,8 @@ def verify_otp():
             await client.connect()
 
             try:
-                await client.sign_in(phone, otp)
+                # Sign in with phone code hash
+                await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
             except SessionPasswordNeededError:
                 if not password:
                     return {
