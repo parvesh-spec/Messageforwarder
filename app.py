@@ -2,7 +2,6 @@ from flask import Flask, render_template, request, session, redirect, url_for, j
 from telethon import TelegramClient, events, sync, Button
 from telethon.errors import SessionPasswordNeededError
 from functools import wraps
-import threading
 import os
 import re
 
@@ -13,9 +12,6 @@ API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')  # Replace 
 
 # Store client states
 client_states = {}
-
-# Thread-local storage for event loops
-thread_local = threading.local()
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)  # for session management
@@ -45,7 +41,7 @@ def send_otp():
         client_states[phone] = {'authorized': False, 'phone': phone}
 
         # Create a new client for this request
-        with TelegramClient(f"sessions/{phone}", API_ID, API_HASH) as client:
+        with TelegramClient(f"sessions/{phone}", API_ID, API_HASH, connection_retries=5, timeout=30) as client:
             print(f"Created client for {phone}")
 
             # Check if already authorized
@@ -57,7 +53,7 @@ def send_otp():
 
             # Send code request
             print(f"Sending code request to {phone}")
-            client.send_code_request(phone)
+            code_request = client.send_code_request(phone)
             session['user_phone'] = phone
             return jsonify({'message': 'OTP sent successfully'})
 
@@ -76,9 +72,8 @@ def verify_otp():
         if not phone or not otp:
             return jsonify({'error': 'Phone and OTP are required'}), 400
 
-        # Sign in with the code
-        with TelegramClient(f"sessions/{phone}", API_ID, API_HASH) as client:
-            try:
+        try:
+            with TelegramClient(f"sessions/{phone}", API_ID, API_HASH) as client:
                 print(f"Attempting to sign in with OTP for {phone}")
                 client.sign_in(phone, otp)
 
@@ -90,12 +85,12 @@ def verify_otp():
                     print(f"Authorization failed for {phone}")
                     return jsonify({'error': 'Authorization failed. Please try again.'}), 400
 
-            except SessionPasswordNeededError:
-                print(f"2FA required for {phone}")
-                return jsonify({
-                    'error': 'Two-factor authentication is enabled. Please enter your password.',
-                    'needs_2fa': True
-                }), 400
+        except SessionPasswordNeededError:
+            print(f"2FA required for {phone}")
+            return jsonify({
+                'error': 'Two-factor authentication is enabled. Please enter your password.',
+                'needs_2fa': True
+            }), 400
 
     except Exception as e:
         print(f"Error in verify_otp: {str(e)}")
@@ -146,6 +141,8 @@ def dashboard():
 
         with TelegramClient(f"sessions/{phone}", API_ID, API_HASH) as client:
             try:
+                client.connect()
+                client.sign_in(phone)
                 dialogs = client.get_dialogs()
                 for dialog in dialogs:
                     if dialog.is_channel:
