@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Telegram Bot Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="dashboard-container">
+        <h2>Bot Control Panel</h2>
+        
+        <div class="channel-section">
+            <div class="channel-select">
+                <label>Source Channel:</label>
+                <select id="source-channel">
+                    <option value="">Select Source Channel</option>
+                    {% for channel in channels %}
+                    <option value="{{ channel.id }}">{{ channel.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="channel-select">
+                <label>Destination Channel:</label>
+                <select id="dest-channel">
+                    <option value="">Select Destination Channel</option>
+                    {% for channel in channels %}
+                    <option value="{{ channel.id }}">{{ channel.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <div class="controls-section">
+            <div class="control-group">
+                <label>Text Replacement:</label>
+                <label class="switch">
+                    <input type="checkbox" id="replace-toggle" onchange="toggleReplace(this)">
+                    <span class="slider round"></span>
+                </label>
+            </div>
+
+            <div class="control-group">
+                <label>Bot Status:</label>
+                <label class="switch">
+                    <input type="checkbox" id="bot-toggle" onchange="toggleBot(this)">
+                    <span class="slider round"></span>
+                </label>
+            </div>
+        </div>
+
+        <div id="status-message"></div>
+    </div>
+
+    <script>
+        function toggleBot(element) {
+            fetch('/bot/toggle', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `status=${element.checked}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('status-message').innerHTML = 
+                    `Bot is now ${data.status ? 'running' : 'stopped'}`;
+            });
+        }
+
+        function toggleReplace(element) {
+            fetch('/replace/toggle', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `status=${element.checked}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('status-message').innerHTML = 
+                    `Text replacement is now ${data.status ? 'enabled' : 'disabled'}`;
+            });
+        }
+    </script>
+</body>
+</html>

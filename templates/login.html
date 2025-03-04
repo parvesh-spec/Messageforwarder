@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Telegram Bot Login</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="login-container">
+        <h2>Login with Telegram</h2>
+        <div id="login-form">
+            <div class="input-group">
+                <input type="text" id="phone" placeholder="Phone number (e.g. +911234567890)" required>
+            </div>
+            <button onclick="sendOTP()">Send OTP</button>
+        </div>
+        <div id="otp-form" style="display: none;">
+            <div class="input-group">
+                <input type="text" id="otp" placeholder="Enter OTP from Telegram" required>
+            </div>
+            <button onclick="verifyOTP()">Verify OTP</button>
+        </div>
+        <div id="message"></div>
+    </div>
+
+    <script>
+        function sendOTP() {
+            const phone = document.getElementById('phone').value;
+            fetch('/send-otp', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `phone=${encodeURIComponent(phone)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    document.getElementById('message').innerHTML = data.error;
+                } else {
+                    document.getElementById('login-form').style.display = 'none';
+                    document.getElementById('otp-form').style.display = 'block';
+                    document.getElementById('message').innerHTML = 'OTP sent to your Telegram account';
+                }
+            });
+        }
+
+        function verifyOTP() {
+            const otp = document.getElementById('otp').value;
+            fetch('/verify-otp', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `otp=${encodeURIComponent(otp)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    document.getElementById('message').innerHTML = data.error;
+                } else {
+                    window.location.href = '/dashboard';
+                }
+            });
+        }
+    </script>
+</body>
+</html>
