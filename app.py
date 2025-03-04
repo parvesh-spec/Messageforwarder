@@ -71,7 +71,8 @@ API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'user_phone' not in session:
+        if 'session_id' not in session:
+            print("No session_id found, redirecting to login")
             return redirect(url_for('login'))
 
         try:
@@ -87,6 +88,8 @@ def login_required(f):
                     session.clear()
                     return redirect(url_for('login'))
 
+                # Ensure logged_in flag is set
+                session['logged_in'] = True
                 print(f"Session verified for user: {user_session.user_id}")
                 return f(*args, **kwargs)
         except Exception as e:
@@ -107,6 +110,8 @@ def login():
                     is_active=True
                 ).first()
                 if user_session and user_session.expires_at > datetime.utcnow():
+                    print("Valid session found, redirecting to dashboard")
+                    session['logged_in'] = True  # Ensure logged_in flag is set
                     return redirect(url_for('dashboard'))
     except Exception as e:
         print(f"Error checking session: {e}")
@@ -230,7 +235,8 @@ def verify_otp():
 
                         # Store session ID in Flask session
                         session['session_id'] = session_id
-                        session['logged_in'] = True #Added this line
+                        session['logged_in'] = True
+                        print("User successfully logged in")
 
                         return {'message': 'Login successful'}
                 except Exception as db_error:
