@@ -11,6 +11,8 @@ from psycopg2.extras import DictCursor
 from flask_session import Session
 from datetime import timedelta
 from flask_sqlalchemy import SQLAlchemy
+import tempfile
+from telethon.sessions import StringSession
 
 # Set up logging
 logging.basicConfig(
@@ -90,6 +92,11 @@ def get_user_id(phone):
 def login():
     return render_template('login.html')
 
+def get_temp_session_path(phone):
+    # Create a temporary session file that will be deleted after successful login
+    temp_dir = tempfile.gettempdir()
+    return os.path.join(temp_dir, f"telegram_session_{phone}")
+
 @app.route('/send-otp', methods=['POST'])
 def send_otp():
     phone = request.form.get('phone')
@@ -104,7 +111,10 @@ def send_otp():
     try:
         async def send_code():
             logger.info(f"Initializing Telegram client for phone: {phone}")
-            client = TelegramClient(None, API_ID, API_HASH)  # Using memory session
+
+            # Use temporary session file
+            session_path = get_temp_session_path(phone)
+            client = TelegramClient(session_path, API_ID, API_HASH)
 
             try:
                 logger.info("Connecting to Telegram...")
@@ -115,18 +125,26 @@ def send_otp():
                     sent = await client.send_code_request(phone)
                     session['user_phone'] = phone
                     session['phone_code_hash'] = sent.phone_code_hash
+                    session['temp_session_path'] = session_path
                     logger.info("Code request sent successfully")
-                    await client.disconnect()
+
+                    if client.is_connected():
+                        await client.disconnect()
                     return {'message': 'OTP sent successfully'}
                 except PhoneNumberInvalidError:
                     logger.error(f"Invalid phone number: {phone}")
-                    await client.disconnect()
+                    if client.is_connected():
+                        await client.disconnect()
+                    if os.path.exists(session_path):
+                        os.remove(session_path)
                     return {'error': 'Invalid phone number'}, 400
 
             except Exception as e:
                 logger.error(f"Error in send_code: {str(e)}")
-                if client and client.connected:
+                if client.is_connected():
                     await client.disconnect()
+                if os.path.exists(session_path):
+                    os.remove(session_path)
                 raise e
 
         result = asyncio.run(send_code())
@@ -137,14 +155,21 @@ def send_otp():
         logger.error(f"Error in send_otp route: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+async def get_session_string(client):
+    """Get session string from a connected client"""
+    if client.is_connected() and await client.is_user_authorized():
+        return StringSession.save(client.session)
+    return None
+
 @app.route('/verify-otp', methods=['POST'])
 def verify_otp():
     phone = session.get('user_phone')
     phone_code_hash = session.get('phone_code_hash')
+    temp_session_path = session.get('temp_session_path')
     otp = request.form.get('otp')
     password = request.form.get('password')  # For 2FA
 
-    if not phone or not phone_code_hash:
+    if not phone or not phone_code_hash or not temp_session_path:
         logger.error("Missing session data")
         return jsonify({'error': 'Session expired. Please try again.'}), 400
 
@@ -155,7 +180,7 @@ def verify_otp():
     try:
         async def verify():
             logger.info(f"Verifying OTP for phone: {phone}")
-            client = TelegramClient(None, API_ID, API_HASH)  # Using memory session
+            client = TelegramClient(temp_session_path, API_ID, API_HASH)
 
             try:
                 logger.info("Connecting to Telegram...")
@@ -185,9 +210,28 @@ def verify_otp():
                         return {'error': 'Invalid 2FA password'}, 400
 
                 if await client.is_user_authorized():
+                    # Get session string before disconnecting
+                    session_string = await get_session_string(client)
+                    if session_string:
+                        # Store session string in database
+                        user_id = get_user_id(phone)
+                        db = get_db()
+                        with db.cursor() as cur:
+                            cur.execute("""
+                                INSERT INTO user_sessions (user_id, session_string)
+                                VALUES (%s, %s)
+                                ON CONFLICT (user_id) 
+                                DO UPDATE SET session_string = EXCLUDED.session_string
+                            """, (user_id, session_string))
+                            db.commit()
+                            logger.info("Saved session string to database")
+
                     session['logged_in'] = True
                     if client.is_connected():
                         await client.disconnect()
+                    # Clean up temporary session file
+                    if os.path.exists(temp_session_path):
+                        os.remove(temp_session_path)
                     return {'message': 'Login successful'}
                 else:
                     if client.is_connected():
@@ -206,6 +250,9 @@ def verify_otp():
         return jsonify(result)
     except Exception as e:
         logger.error(f"Error in verify_otp route: {str(e)}")
+        # Clean up temporary session file on error
+        if temp_session_path and os.path.exists(temp_session_path):
+            os.remove(temp_session_path)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/dashboard')

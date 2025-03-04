@@ -398,7 +398,7 @@ requires-dist = [
     { name = "hypercorn", specifier = ">=0.17.3" },
     { name = "psycopg2-binary", specifier = ">=2.9.10" },
     { name = "sqlalchemy", specifier = ">=2.0.38" },
-    { name = "telethon", specifier = ">=1.39.0" },
+    { name = "telethon", specifier = "==1.32.1" },
 ]
 
 [[package]]
@@ -452,16 +452,13 @@ wheels = [
 
 [[package]]
 name = "telethon"
-version = "1.39.0"
+version = "1.32.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyaes" },
     { name = "rsa" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/54/b2/6e48b593a0e4e678578a682332ef36e54648c78ef13a5d395e5cdd293c6d/telethon-1.39.0.tar.gz", hash = "sha256:35d4795d8c91deac515fb0bcb3723866b924de1c724e1d5c230460e96f284a63", size = 640634 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/32/f2/4e66a59c6d0cb6a25c0c2a630b4b184d81cfe8cb982bf3b65ce32b020fc8/Telethon-1.39.0-py3-none-any.whl", hash = "sha256:aa9f394b94be144799a6f6a93ab463867bc7c63503ede9631751940a98f6c703", size = 715851 },
-]
+sdist = { url = "https://files.pythonhosted.org/packages/c9/23/350a41f85c00f7ce2d516b8c5e970b67f682c6cfe9fa169290b3ed24ff88/Telethon-1.32.1.tar.gz", hash = "sha256:9896c0d7386121e8e67cf9a20c3aa4743e33cb24253f924e2fc1397df0281890", size = 563953 }
 
 [[package]]
 name = "typing-extensions"

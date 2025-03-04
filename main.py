@@ -5,6 +5,11 @@ from threading import Thread
 import psycopg2
 from psycopg2.extras import DictCursor
 import os
+import tempfile
+from telethon import TelegramClient, events
+from telethon.errors import SessionPasswordNeededError
+from telethon.sessions import StringSession
+import asyncio
 
 # Add stream handler to output logs to console
 handler = logging.StreamHandler(sys.stdout)
@@ -14,11 +19,6 @@ handler.setFormatter(formatter)
 logger = logging.getLogger(__name__)
 logger.addHandler(handler)
 logger.setLevel(logging.DEBUG)
-
-# Rest of the imports
-from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError
-import asyncio
 
 # Message ID mapping dictionary
 MESSAGE_IDS = {}  # Will store source_msg_id: destination_msg_id mapping
@@ -131,6 +131,26 @@ async def get_user_id_from_db():
         logger.error(f"Error getting initial user ID: {str(e)}")
     return None
 
+async def get_session_string_from_db(user_id):
+    """Get saved session string from database"""
+    try:
+        conn = get_db()
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT session_string 
+                FROM user_sessions 
+                WHERE user_id = %s
+            """, (user_id,))
+            result = cur.fetchone()
+            if result:
+                return result['session_string']
+            return None
+    except Exception as e:
+        logger.error(f"Error getting session string: {str(e)}")
+        return None
+    finally:
+        conn.close()
+
 async def main():
     try:
         # Get initial user ID for configuration
@@ -138,197 +158,205 @@ async def main():
         CURRENT_USER_ID = await get_user_id_from_db()
         if not CURRENT_USER_ID:
             logger.warning("No users found in database")
+            return
 
         # Start config monitoring in background
         Thread(target=config_monitor, daemon=True).start()
         logger.info("Started channel configuration monitor")
 
-        # Start the client with memory session
+        # Get session string from database
+        session_string = await get_session_string_from_db(CURRENT_USER_ID)
+        if not session_string:
+            logger.error("No session string found in database. Please authenticate through web interface.")
+            return
+
+        # Start client with session string
         logger.debug("Starting Telegram client...")
-        client = TelegramClient(None, API_ID, API_HASH)
+        client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
         try:
-            await client.start()
-        except Exception as e:
-            logger.error(f"Failed to start client: {str(e)}")
-            return
+            await client.connect()
+            logger.info("Client connected successfully")
 
-        # Check if already authorized
-        if not await client.is_user_authorized():
-            logger.error("Bot is not authorized. Please run the web interface first to authenticate.")
-            return
+            if not await client.is_user_authorized():
+                logger.error("Bot is not authorized. Please run the web interface first to authenticate.")
+                return
 
-        # Get information about yourself
-        me = await client.get_me()
-        logger.info(f"Successfully logged in as {me.first_name} (ID: {me.id})")
+            # Get information about yourself
+            me = await client.get_me()
+            logger.info(f"Successfully logged in as {me.first_name} (ID: {me.id})")
 
-        @client.on(events.NewMessage())
-        async def forward_handler(event):
-            try:
-                # Skip if channels not configured
-                if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
-                    logger.warning("Channels not configured yet")
-                    return
-
-                # Format IDs for comparison
-                source_id = str(SOURCE_CHANNEL)
-                if not source_id.startswith('-100'):
-                    source_id = f"-100{source_id.lstrip('-')}"
-
-                chat_id = str(event.chat_id)
-                if not chat_id.startswith('-100'):
-                    chat_id = f"-100{chat_id.lstrip('-')}"
-
-                # Check if message is from source channel
-                if chat_id != source_id:
-                    return
-
-                logger.info(f"Processing message from source channel {source_id}")
-
+            @client.on(events.NewMessage())
+            async def forward_handler(event):
                 try:
-                    # Format destination channel ID
-                    dest_id = str(DESTINATION_CHANNEL)
-                    if not dest_id.startswith('-100'):
-                        dest_id = f"-100{dest_id.lstrip('-')}"
+                    # Skip if channels not configured
+                    if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
+                        logger.warning("Channels not configured yet")
+                        return
 
-                    # Get destination channel entity
-                    dest_channel = await client.get_entity(int(dest_id))
+                    # Format IDs for comparison
+                    source_id = str(SOURCE_CHANNEL)
+                    if not source_id.startswith('-100'):
+                        source_id = f"-100{source_id.lstrip('-')}"
 
-                    # Create a new message
+                    chat_id = str(event.chat_id)
+                    if not chat_id.startswith('-100'):
+                        chat_id = f"-100{chat_id.lstrip('-')}"
+
+                    # Check if message is from source channel
+                    if chat_id != source_id:
+                        return
+
+                    logger.info(f"Processing message from source channel {source_id}")
+
+                    try:
+                        # Format destination channel ID
+                        dest_id = str(DESTINATION_CHANNEL)
+                        if not dest_id.startswith('-100'):
+                            dest_id = f"-100{dest_id.lstrip('-')}"
+
+                        # Get destination channel entity
+                        dest_channel = await client.get_entity(int(dest_id))
+
+                        # Create a new message
+                        message_text = event.message.text if event.message.text else ""
+
+                        # Apply text replacements if any
+                        if TEXT_REPLACEMENTS and message_text:
+                            logger.debug("Starting text replacement process...")
+                            logger.debug(f"Current TEXT_REPLACEMENTS dictionary: {TEXT_REPLACEMENTS}")
+                            logger.debug(f"Original text before replacements: {message_text}")
+
+                            # Sort replacements by length (longest first) to handle overlapping patterns
+                            for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
+                                logger.debug(f"Checking replacement: '{original}' -> '{replacement}'")
+                                if original in message_text:
+                                    old_text = message_text
+                                    message_text = message_text.replace(original, replacement)
+                                    logger.info(f"Replaced '{original}' with '{replacement}'")
+                                    logger.debug(f"Text changed from '{old_text}' to '{message_text}'")
+
+                        # Handle media
+                        media = None
+                        if event.message.media:
+                            logger.info("Downloading media...")
+                            try:
+                                media = await event.message.download_media()
+                                logger.info(f"Media downloaded: {media}")
+                            except Exception as e:
+                                logger.error(f"Failed to download media: {str(e)}")
+                                return
+
+                        # Send message
+                        try:
+                            if media:
+                                logger.info("Sending message with media...")
+                                sent_message = await client.send_file(
+                                    dest_channel,
+                                    media,
+                                    caption=message_text,
+                                    formatting_entities=event.message.entities
+                                )
+                                logger.info("Message with media sent successfully")
+                            else:
+                                logger.info("Sending text message...")
+                                sent_message = await client.send_message(
+                                    dest_channel,
+                                    message_text,
+                                    formatting_entities=event.message.entities
+                                )
+                                logger.info("Text message sent successfully")
+
+                            # Store message IDs mapping
+                            MESSAGE_IDS[event.message.id] = sent_message.id
+                            logger.debug(f"Stored message ID mapping: {event.message.id} → {sent_message.id}")
+
+                        except Exception as e:
+                            logger.error(f"Failed to send message: {str(e)}")
+                            return
+
+                    except ValueError as e:
+                        logger.error(f"Failed to access destination channel: {str(e)}")
+                        return
+
+                except Exception as e:
+                    logger.error(f"Error in forward handler: {str(e)}")
+                    logger.error(f"Error type: {type(e).__name__}")
+
+            @client.on(events.MessageEdited())
+            async def edit_handler(event):
+                try:
+                    # Skip if channels not configured
+                    if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
+                        logger.warning("Channels not configured yet")
+                        return
+
+                    # Format IDs for comparison
+                    source_id = str(SOURCE_CHANNEL)
+                    if not source_id.startswith('-100'):
+                        source_id = f"-100{source_id.lstrip('-')}"
+
+                    chat_id = str(event.chat_id)
+                    if not chat_id.startswith('-100'):
+                        chat_id = f"-100{chat_id.lstrip('-')}"
+
+                    # Check if message is from source channel
+                    if chat_id != source_id:
+                        return
+
+                    if event.message.id not in MESSAGE_IDS:
+                        logger.info("Original message mapping not found")
+                        return
+
+                    dest_msg_id = MESSAGE_IDS[event.message.id]
+                    logger.info(f"Found destination message ID: {dest_msg_id}")
+
+                    # Get the edited message content
                     message_text = event.message.text if event.message.text else ""
 
                     # Apply text replacements if any
                     if TEXT_REPLACEMENTS and message_text:
-                        logger.debug("Starting text replacement process...")
-                        logger.debug(f"Current TEXT_REPLACEMENTS dictionary: {TEXT_REPLACEMENTS}")
-                        logger.debug(f"Original text before replacements: {message_text}")
-
-                        # Sort replacements by length (longest first) to handle overlapping patterns
+                        logger.debug("Applying text replacements to edited message...")
                         for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
-                            logger.debug(f"Checking replacement: '{original}' -> '{replacement}'")
                             if original in message_text:
-                                old_text = message_text
                                 message_text = message_text.replace(original, replacement)
-                                logger.info(f"Replaced '{original}' with '{replacement}'")
-                                logger.debug(f"Text changed from '{old_text}' to '{message_text}'")
+                                logger.info(f"Replaced '{original}' with '{replacement}' in edited message")
 
-                    # Handle media
-                    media = None
-                    if event.message.media:
-                        logger.info("Downloading media...")
-                        try:
-                            media = await event.message.download_media()
-                            logger.info(f"Media downloaded: {media}")
-                        except Exception as e:
-                            logger.error(f"Failed to download media: {str(e)}")
-                            return
-
-                    # Send message
                     try:
-                        if media:
-                            logger.info("Sending message with media...")
-                            sent_message = await client.send_file(
-                                dest_channel,
-                                media,
-                                caption=message_text,
-                                formatting_entities=event.message.entities
-                            )
-                            logger.info("Message with media sent successfully")
-                        else:
-                            logger.info("Sending text message...")
-                            sent_message = await client.send_message(
-                                dest_channel,
-                                message_text,
-                                formatting_entities=event.message.entities
-                            )
-                            logger.info("Text message sent successfully")
+                        # Format destination channel ID
+                        dest_id = str(DESTINATION_CHANNEL)
+                        if not dest_id.startswith('-100'):
+                            dest_id = f"-100{dest_id.lstrip('-')}"
 
-                        # Store message IDs mapping
-                        MESSAGE_IDS[event.message.id] = sent_message.id
-                        logger.debug(f"Stored message ID mapping: {event.message.id} → {sent_message.id}")
+                        # Get destination channel entity
+                        channel = await client.get_entity(int(dest_id))
+
+                        # Edit the corresponding message
+                        logger.info("Updating message in destination channel...")
+                        await client.edit_message(
+                            channel,
+                            dest_msg_id,
+                            text=message_text,
+                            formatting_entities=event.message.entities
+                        )
+                        logger.info("Message updated successfully")
 
                     except Exception as e:
-                        logger.error(f"Failed to send message: {str(e)}")
+                        logger.error(f"Error editing message: {str(e)}")
                         return
 
-                except ValueError as e:
-                    logger.error(f"Failed to access destination channel: {str(e)}")
-                    return
-
-            except Exception as e:
-                logger.error(f"Error in forward handler: {str(e)}")
-                logger.error(f"Error type: {type(e).__name__}")
-
-        @client.on(events.MessageEdited())
-        async def edit_handler(event):
-            try:
-                # Skip if channels not configured
-                if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
-                    logger.warning("Channels not configured yet")
-                    return
-
-                # Format IDs for comparison
-                source_id = str(SOURCE_CHANNEL)
-                if not source_id.startswith('-100'):
-                    source_id = f"-100{source_id.lstrip('-')}"
-
-                chat_id = str(event.chat_id)
-                if not chat_id.startswith('-100'):
-                    chat_id = f"-100{chat_id.lstrip('-')}"
-
-                # Check if message is from source channel
-                if chat_id != source_id:
-                    return
-
-                if event.message.id not in MESSAGE_IDS:
-                    logger.info("Original message mapping not found")
-                    return
-
-                dest_msg_id = MESSAGE_IDS[event.message.id]
-                logger.info(f"Found destination message ID: {dest_msg_id}")
-
-                # Get the edited message content
-                message_text = event.message.text if event.message.text else ""
-
-                # Apply text replacements if any
-                if TEXT_REPLACEMENTS and message_text:
-                    logger.debug("Applying text replacements to edited message...")
-                    for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
-                        if original in message_text:
-                            message_text = message_text.replace(original, replacement)
-                            logger.info(f"Replaced '{original}' with '{replacement}' in edited message")
-
-                try:
-                    # Format destination channel ID
-                    dest_id = str(DESTINATION_CHANNEL)
-                    if not dest_id.startswith('-100'):
-                        dest_id = f"-100{dest_id.lstrip('-')}"
-
-                    # Get destination channel entity
-                    channel = await client.get_entity(int(dest_id))
-
-                    # Edit the corresponding message
-                    logger.info("Updating message in destination channel...")
-                    await client.edit_message(
-                        channel,
-                        dest_msg_id,
-                        text=message_text,
-                        formatting_entities=event.message.entities
-                    )
-                    logger.info("Message updated successfully")
-
                 except Exception as e:
-                    logger.error(f"Error editing message: {str(e)}")
-                    return
+                    logger.error(f"Error in edit handler: {str(e)}")
+                    logger.error(f"Error type: {type(e).__name__}")
 
-            except Exception as e:
-                logger.error(f"Error in edit handler: {str(e)}")
-                logger.error(f"Error type: {type(e).__name__}")
+            logger.info("\nBot is running and monitoring for new messages and edits.")
+            logger.info(f"Source channel: {SOURCE_CHANNEL}")
+            logger.info(f"Destination channel: {DESTINATION_CHANNEL}")
+            await client.run_until_disconnected()
 
-        logger.info("\nBot is running and monitoring for new messages and edits.")
-        logger.info(f"Source channel: {SOURCE_CHANNEL}")
-        logger.info(f"Destination channel: {DESTINATION_CHANNEL}")
-        await client.run_until_disconnected()
+        except Exception as e:
+            logger.error(f"Failed to start client: {str(e)}")
+            return
 
     except Exception as e:
         logger.error(f"Critical error in main function: {str(e)}")
