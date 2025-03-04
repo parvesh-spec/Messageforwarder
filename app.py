@@ -333,18 +333,46 @@ def toggle_replace():
 
     return jsonify({'status': status})
 
+@app.route('/logout')
+@login_required
+def logout():
+    try:
+        with app.app_context():
+            # Get current session and deactivate it
+            user_session = UserSession.query.filter_by(
+                session_id=session.get('session_id'),
+                is_active=True
+            ).first()
+            if user_session:
+                user_session.is_active = False
+                db.session.commit()
+                print(f"Deactivated session: {user_session.session_id}")
+
+        # Clear Flask session
+        session.clear()
+        print("Session cleared")
+        return redirect(url_for('login'))
+    except Exception as e:
+        print(f"Error in logout: {e}")
+        session.clear()
+        return redirect(url_for('login'))
+
 @app.route('/resend-otp', methods=['POST'])
 def resend_otp():
-    phone = session.get('user_phone')
-    if not phone:
-        return jsonify({'error': 'No phone number found in session'}), 400
-
     try:
+        # Check if user is already logged in
+        if 'logged_in' in session and session['logged_in']:
+            return jsonify({'message': 'Already logged in. Please logout first.'}), 400
+
+        phone = session.get('user_phone')
+        if not phone:
+            return jsonify({'error': 'No phone number found in session. Please enter your phone number again.'}), 400
+
         async def resend_code():
             client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
             await client.connect()
 
-            if not await client.is_user_authorized():
+            try:
                 print(f"Resending OTP for phone: {phone}")
                 sent = await client.send_code_request(phone)
                 session['phone_code_hash'] = sent.phone_code_hash
@@ -365,9 +393,12 @@ def resend_otp():
                     return {'error': 'Database error occurred'}, 500
 
                 return {'message': 'OTP resent successfully'}
-            else:
+            except Exception as e:
+                if client and client.is_user_authorized():
+                    await client.disconnect()
+                    return {'message': 'You are already authorized. Please logout first.'}, 400
                 await client.disconnect()
-                return {'message': 'Already authorized'}
+                raise e
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
