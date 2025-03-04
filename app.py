@@ -158,6 +158,7 @@ def verify_otp():
             client = TelegramClient(None, API_ID, API_HASH)  # Using memory session
 
             try:
+                logger.info("Connecting to Telegram...")
                 await client.connect()
                 logger.info("Connected to Telegram")
 
@@ -168,7 +169,8 @@ def verify_otp():
                 except SessionPasswordNeededError:
                     logger.info("2FA password needed")
                     if not password:
-                        await client.disconnect()
+                        if client.is_connected():
+                            await client.disconnect()
                         return {
                             'error': 'two_factor_needed',
                             'message': 'Two-factor authentication is required'
@@ -178,20 +180,23 @@ def verify_otp():
                         logger.info("2FA verification successful")
                     except Exception as e:
                         logger.error(f"2FA verification failed: {e}")
-                        await client.disconnect()
+                        if client.is_connected():
+                            await client.disconnect()
                         return {'error': 'Invalid 2FA password'}, 400
 
                 if await client.is_user_authorized():
                     session['logged_in'] = True
-                    await client.disconnect()
+                    if client.is_connected():
+                        await client.disconnect()
                     return {'message': 'Login successful'}
                 else:
-                    await client.disconnect()
+                    if client.is_connected():
+                        await client.disconnect()
                     return {'error': 'Invalid OTP'}, 400
 
             except Exception as e:
                 logger.error(f"Error during verification: {str(e)}")
-                if client and client.connected:
+                if client.is_connected():
                     await client.disconnect()
                 raise e
 
