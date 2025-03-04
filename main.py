@@ -1,24 +1,27 @@
-from telethon import TelegramClient, events, sync, Button
+import sys
+import logging
+
+# Add stream handler to output logs to console
+handler = logging.StreamHandler(sys.stdout)
+handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger = logging.getLogger(__name__)
+logger.addHandler(handler)
+logger.setLevel(logging.DEBUG)
+
+# Rest of the imports
+from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
 import asyncio
 import os
-import re
-import logging
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Add message ID mapping dictionary
+# Message ID mapping dictionary
 MESSAGE_IDS = {}  # Will store source_msg_id: destination_msg_id mapping
 
-# These example values won't work. You must get your own api_id and
-# api_hash from https://my.telegram.org, under API Development.
-API_ID = int(os.getenv('API_ID', '27202142'))  # Replace with your API ID
-API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')  # Replace with your API hash
+# Telegram API credentials
+API_ID = int(os.getenv('API_ID', '27202142'))
+API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
 # Define source and destination channels - will be set by app.py
 SOURCE_CHANNEL = None
@@ -30,7 +33,7 @@ TEXT_REPLACEMENTS = {}  # Will be populated during runtime
 async def main():
     try:
         # Start the client
-        logger.info("Starting Telegram client...")
+        logger.debug("Starting Telegram client...")
         client = TelegramClient('anon', API_ID, API_HASH, connection_retries=5, timeout=30)
         await client.start()
 
@@ -43,36 +46,43 @@ async def main():
         me = await client.get_me()
         logger.info(f"Successfully logged in as {me.first_name} (ID: {me.id})")
 
-        # Message handler for forwarding
         @client.on(events.NewMessage())
         async def forward_handler(event):
             try:
+                global SOURCE_CHANNEL, DESTINATION_CHANNEL
+
+                # Add debug logging for channel IDs and message
+                logger.debug(f"Message received - chat_id: {event.chat_id}")
+                logger.debug(f"Current SOURCE_CHANNEL: {SOURCE_CHANNEL}")
+                logger.debug(f"Current DESTINATION_CHANNEL: {DESTINATION_CHANNEL}")
+
                 # Skip if channels not configured
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
-                    logger.info("Channels not configured yet")
+                    logger.warning("Channels not configured yet")
                     return
 
                 # Check if message is from source channel
                 if str(event.chat_id) != str(SOURCE_CHANNEL):
+                    logger.debug(f"Message not from source channel. Got: {event.chat_id}, Expected: {SOURCE_CHANNEL}")
                     return
 
-                logger.info(f"\nNew message received in source channel")
-                logger.info(f"Source channel ID: {SOURCE_CHANNEL}")
-                logger.info(f"Destination channel ID: {DESTINATION_CHANNEL}")
+                logger.info(f"Processing message from source channel {SOURCE_CHANNEL}")
 
                 try:
                     # Get destination channel entity
-                    channel = await client.get_entity(int(DESTINATION_CHANNEL))
-                    logger.info(f"✓ Channel access verified: {getattr(channel, 'title', 'Unknown')}")
+                    dest_channel = await client.get_entity(int(DESTINATION_CHANNEL))
+                    logger.info(f"Destination channel found: {getattr(dest_channel, 'title', 'Unknown')}")
 
                     # Create a new message
                     message_text = event.message.text if event.message.text else ""
+                    logger.debug(f"Original message text: {message_text}")
 
                     # Apply text replacements if any
                     if TEXT_REPLACEMENTS and message_text:
-                        logger.info("Applying text replacements...")
+                        logger.debug("Applying text replacements...")
                         for original, replacement in TEXT_REPLACEMENTS.items():
                             message_text = message_text.replace(original, replacement)
+                        logger.debug(f"Modified message text: {message_text}")
 
                     # Handle media
                     media = None
@@ -80,9 +90,9 @@ async def main():
                         logger.info("Downloading media...")
                         try:
                             media = await event.message.download_media()
-                            logger.info("✓ Media downloaded successfully")
+                            logger.info(f"Media downloaded: {media}")
                         except Exception as e:
-                            logger.error(f"❌ Error downloading media: {str(e)}")
+                            logger.error(f"Failed to download media: {str(e)}")
                             return
 
                     # Send message
@@ -90,47 +100,41 @@ async def main():
                         if media:
                             logger.info("Sending message with media...")
                             sent_message = await client.send_file(
-                                channel,
+                                dest_channel,
                                 media,
                                 caption=message_text,
                                 formatting_entities=event.message.entities
                             )
                             os.remove(media)  # Clean up
-                            logger.info("✓ Message with media sent successfully")
+                            logger.info("Message with media sent successfully")
                         else:
                             logger.info("Sending text message...")
                             sent_message = await client.send_message(
-                                channel,
+                                dest_channel,
                                 message_text,
                                 formatting_entities=event.message.entities
                             )
-                            logger.info("✓ Text message sent successfully")
+                            logger.info("Text message sent successfully")
 
                         # Store message IDs mapping
                         MESSAGE_IDS[event.message.id] = sent_message.id
-                        logger.info(f"✓ Message ID mapping stored: {event.message.id} → {sent_message.id}")
+                        logger.debug(f"Stored message ID mapping: {event.message.id} → {sent_message.id}")
 
                     except Exception as e:
-                        logger.error(f"❌ Error sending message: {str(e)}")
+                        logger.error(f"Failed to send message: {str(e)}")
                         if media and os.path.exists(media):
-                            os.remove(media)  # Clean up on error
+                            os.remove(media)
                         return
 
                 except ValueError as e:
-                    logger.error("❌ Error: Could not access destination channel.")
-                    logger.error("Please verify:")
-                    logger.error("1. The bot/account is a member of the channel")
-                    logger.error("2. The channel ID is correct")
-                    logger.error("3. You have permission to post in the channel")
-                    logger.error(f"Full error: {str(e)}")
+                    logger.error(f"Failed to access destination channel: {str(e)}")
+                    logger.error(f"Destination channel ID: {DESTINATION_CHANNEL}")
                     return
 
             except Exception as e:
-                logger.error(f"❌ Error in message handler: {str(e)}")
+                logger.error(f"Error in forward handler: {str(e)}")
                 logger.error(f"Error type: {type(e).__name__}")
-                logger.error(f"Full error details: {str(e)}")
 
-        # Add message edit handler
         @client.on(events.MessageEdited())
         async def edit_handler(event):
             try:
@@ -181,7 +185,6 @@ async def main():
                 logger.error(f"Error type: {type(e).__name__}")
                 logger.error(f"Full error details: {str(e)}")
 
-        # Command handler for bot control and text replacements
         @client.on(events.NewMessage(pattern=r'/start|/help'))
         async def command_handler(event):
             logger.info(f"Received command: {event.raw_text}")

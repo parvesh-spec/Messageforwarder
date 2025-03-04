@@ -145,42 +145,55 @@ input:checked + .slider:before {
     padding: 1rem;
     border: 1px solid #ddd;
     border-radius: 4px;
+    background: #fff;
 }
 
 .replacement-form {
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
     gap: 1rem;
     margin-bottom: 1rem;
 }
 
 .replacement-form input {
-    flex: 1;
-    margin-bottom: 0; /* Updated margin-bottom */
+    padding: 0.8rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    width: 100%;
+}
+
+.replacement-form button {
+    width: auto;
+    white-space: nowrap;
 }
 
 #replacements-list {
     margin: 1rem 0;
+    max-height: 300px;
+    overflow-y: auto;
 }
 
 .replacement-item {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.5rem;
+    padding: 0.8rem;
     margin: 0.5rem 0;
     background: #f5f5f5;
     border-radius: 4px;
+    font-size: 0.9rem;
 }
 
 .remove-btn {
     background: #ff4444;
     color: white;
-    width: 30px;
-    height: 30px;
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
     padding: 0;
-    font-size: 18px;
-    line-height: 30px;
+    font-size: 16px;
+    line-height: 24px;
+    margin-left: 1rem;
     cursor: pointer;
 }
 
@@ -191,6 +204,7 @@ input:checked + .slider:before {
 button.secondary {
     background-color: #666;
     margin-top: 1rem;
+    width: auto;
 }
 
 button.secondary:hover {

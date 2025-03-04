@@ -267,6 +267,12 @@ def update_channels():
             logger.error("Source and destination channels cannot be the same")
             return jsonify({'error': 'Source and destination channels must be different'}), 400
 
+        # Format channel IDs properly
+        if not source.startswith('-100'):
+            source = f"-100{source.lstrip('-')}"
+        if not destination.startswith('-100'):
+            destination = f"-100{destination.lstrip('-')}"
+
         # Store channel IDs in session
         session['source_channel'] = source
         session['dest_channel'] = destination
@@ -276,6 +282,7 @@ def update_channels():
         import main
         main.SOURCE_CHANNEL = source
         main.DESTINATION_CHANNEL = destination
+        logger.info(f"Updated main.py channel IDs - Source: {main.SOURCE_CHANNEL}, Destination: {main.DESTINATION_CHANNEL}")
 
         return jsonify({'message': 'Channel configuration updated successfully'})
     except Exception as e:
@@ -355,8 +362,16 @@ def toggle_bot():
             logger.error("Channel configuration missing")
             return jsonify({'error': 'Please configure source and destination channels first'}), 400
 
-        # Here you would typically start/stop the bot process
-        # For now, we'll just update the session status
+        # Configure bot channels
+        try:
+            import main
+            main.SOURCE_CHANNEL = source
+            main.DESTINATION_CHANNEL = destination
+            logger.info(f"Bot channels configured - Source: {main.SOURCE_CHANNEL}, Destination: {main.DESTINATION_CHANNEL}")
+        except Exception as e:
+            logger.error(f"Error configuring bot channels: {e}")
+            return jsonify({'error': 'Failed to configure bot channels'}), 500
+
         session['bot_running'] = status
         logger.info(f"Bot status changed to: {'running' if status else 'stopped'}")
 
