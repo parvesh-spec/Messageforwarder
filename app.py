@@ -14,7 +14,7 @@ from telethon.sessions import StringSession
 
 # Set up logging
 logging.basicConfig(
-    level=logging.INFO if os.getenv('FLASK_ENV') == 'production' else logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -35,12 +35,17 @@ API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 # Database connection pool configuration
 def get_db():
     if 'db' not in g:
-        g.db = psycopg2.connect(
-            os.getenv('DATABASE_URL'),
-            application_name='telegram_bot_web',
-            connect_timeout=10
-        )
-        g.db.autocommit = True
+        try:
+            g.db = psycopg2.connect(
+                os.getenv('DATABASE_URL'),
+                application_name='telegram_bot_web',
+                connect_timeout=10
+            )
+            g.db.autocommit = True
+            return g.db
+        except Exception as e:
+            logger.error(f"Database connection error: {str(e)}")
+            raise
     return g.db
 
 @app.teardown_appcontext
@@ -449,7 +454,7 @@ def toggle_bot():
         logger.error(f"Error toggling bot: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/')
+@app.route('/health') #Changed route name to avoid conflict.
 def health_check():
     try:
         db = get_db()

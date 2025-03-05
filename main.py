@@ -11,9 +11,9 @@ from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 import asyncio
 
-# Configure logging based on environment
+# Configure logging
 logging.basicConfig(
-    level=logging.INFO if os.getenv('FLASK_ENV') == 'production' else logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -33,17 +33,17 @@ def get_db():
         raise
 
 # Message ID mapping dictionary
-MESSAGE_IDS = {}  # Will store source_msg_id: destination_msg_id mapping
+MESSAGE_IDS = {}
 
 # Telegram API credentials
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
-# Define source and destination channels
+# Channel configuration
 SOURCE_CHANNEL = None
 DESTINATION_CHANNEL = None
 
-# Text replacement dictionary - now per user
+# Text replacement dictionary - per user
 TEXT_REPLACEMENTS = {}
 CURRENT_USER_ID = None
 
