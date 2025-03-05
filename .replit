@@ -50,6 +50,7 @@ args = "python main.py"
 
 [deployment]
 run = ["sh", "-c", "hypercorn app:app --bind 0.0.0.0:5000"]
+deploymentTarget = "cloudrun"
 
 [[ports]]
 localPort = 5000
