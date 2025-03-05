@@ -456,16 +456,22 @@ def toggle_bot():
 
 @app.route('/')
 def root():
-    return 'OK', 200
+    if session.get('logged_in') and session.get('user_phone'):
+        logger.info(f"User {session.get('user_phone')} already logged in, redirecting to dashboard")
+        return redirect(url_for('dashboard'))
+    return render_template('login.html')
 
 @app.route('/health')
 def health_check():
     try:
         db = get_db()
-        return 'OK', 200
-    except Exception:
-        # Still return OK even if DB fails for health check
-        return 'OK', 200
+        with db.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        return jsonify({'status': 'healthy', 'database': 'connected'}), 200
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
 async def get_channels():
     phone = session.get('user_phone')
