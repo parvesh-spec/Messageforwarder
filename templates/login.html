@@ -49,9 +49,15 @@
                 return error.response.json().then(data => {
                     showMessage(data.error || defaultMessage, true);
                 });
-            } else {
-                showMessage(error.message || defaultMessage, true);
             }
+            showMessage(error.message || defaultMessage, true);
+        }
+
+        function redirectToDashboard(url) {
+            showMessage('Login successful! Redirecting to dashboard...');
+            setTimeout(() => {
+                window.location.replace(url);
+            }, 1500);
         }
 
         function sendOTP() {
@@ -104,10 +110,7 @@
                 } else if (data.error) {
                     showMessage(data.error, true);
                 } else if (data.message === 'Login successful' && data.redirect) {
-                    showMessage('Login successful! Redirecting to dashboard...');
-                    setTimeout(() => {
-                        window.location.replace(data.redirect);
-                    }, 1000);
+                    redirectToDashboard(data.redirect);
                 }
             })
             .catch(error => handleApiError(error));
@@ -130,10 +133,7 @@
                 if (data.error) {
                     showMessage(data.error, true);
                 } else if (data.message === 'Login successful' && data.redirect) {
-                    showMessage('Login successful! Redirecting to dashboard...');
-                    setTimeout(() => {
-                        window.location.replace(data.redirect);
-                    }, 1000);
+                    redirectToDashboard(data.redirect);
                 }
             })
             .catch(error => handleApiError(error));

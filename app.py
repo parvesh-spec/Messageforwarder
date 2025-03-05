@@ -11,7 +11,6 @@ from psycopg2.extras import DictCursor
 from datetime import timedelta
 import tempfile
 from telethon.sessions import StringSession
-from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 
 # Set up logging
 logging.basicConfig(
@@ -22,35 +21,11 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-
-# Initialize Flask-Login
-login_manager = LoginManager()
-login_manager.init_app(app)
-login_manager.login_view = 'login'
+app.permanent_session_lifetime = timedelta(days=7)
 
 # Telegram API credentials
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
-
-# User class for Flask-Login
-class User(UserMixin):
-    def __init__(self, user_id, phone):
-        self.id = user_id
-        self.phone = phone
-
-@login_manager.user_loader
-def load_user(user_id):
-    try:
-        conn = get_db()
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("SELECT id, phone FROM users WHERE id = %s", (user_id,))
-            user = cur.fetchone()
-            if user:
-                return User(user['id'], user['phone'])
-    except Exception as e:
-        logger.error(f"Error loading user: {str(e)}")
-    return None
 
 def get_db():
     if 'db' not in g:
@@ -67,6 +42,16 @@ def close_db(e=None):
     if db is not None:
         db.close()
 
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        logger.debug(f"Session state: {dict(session)}")
+        if not session.get('user_id'):
+            logger.warning("No user_id in session, redirecting to login")
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
 def get_user_id(phone):
     conn = get_db()
     with conn.cursor() as cur:
@@ -80,14 +65,15 @@ def get_user_id(phone):
 
 @app.route('/')
 def index():
-    if current_user.is_authenticated:
+    if session.get('user_id'):
+        logger.info(f"User {session.get('user_id')} already logged in, redirecting to dashboard")
         return redirect(url_for('dashboard'))
     return redirect(url_for('login'))
 
 @app.route('/login')
 def login():
-    if current_user.is_authenticated:
-        logger.info(f"User {current_user.phone} already logged in, redirecting to dashboard")
+    if session.get('user_id'):
+        logger.info(f"User {session.get('user_id')} already logged in, redirecting to dashboard")
         return redirect(url_for('dashboard'))
     return render_template('login.html')
 
@@ -116,7 +102,7 @@ def send_otp():
                 await client.connect()
                 try:
                     sent = await client.send_code_request(phone)
-                    session['user_phone'] = phone
+                    session['phone'] = phone
                     session['phone_code_hash'] = sent.phone_code_hash
                     session['temp_session_path'] = session_path
                     session.permanent = True
@@ -125,6 +111,7 @@ def send_otp():
                     if client.is_connected():
                         await client.disconnect()
                     return {'message': 'OTP sent successfully'}
+
                 except PhoneNumberInvalidError:
                     logger.error(f"Invalid phone number: {phone}")
                     if client.is_connected():
@@ -156,7 +143,7 @@ async def get_session_string(client):
 
 @app.route('/verify-otp', methods=['POST'])
 def verify_otp():
-    phone = session.get('user_phone')
+    phone = session.get('phone')
     phone_code_hash = session.get('phone_code_hash')
     temp_session_path = session.get('temp_session_path')
     otp = request.form.get('otp')
@@ -212,21 +199,23 @@ def verify_otp():
                             conn.commit()
                             logger.info("Saved session string to database")
 
-                        # Create and login user with Flask-Login
-                        user = User(user_id, phone)
-                        login_user(user, remember=True)
-                        logger.info(f"User logged in successfully - ID: {user_id}, Phone: {phone}")
+                        # Set session data
+                        session.clear()
+                        session['user_id'] = user_id
+                        session['phone'] = phone
+                        session.permanent = True
+                        logger.info(f"Session set - user_id: {user_id}, phone: {phone}")
 
                         if client.is_connected():
                             await client.disconnect()
                         if os.path.exists(temp_session_path):
                             os.remove(temp_session_path)
+
                         return {'message': 'Login successful', 'redirect': url_for('dashboard')}
                     else:
                         if client.is_connected():
                             await client.disconnect()
                         return {'error': 'Failed to get session string'}, 500
-
                 else:
                     if client.is_connected():
                         await client.disconnect()
@@ -252,11 +241,12 @@ def verify_otp():
 @login_required
 def dashboard():
     try:
+        logger.info(f"Loading dashboard for user_id: {session.get('user_id')}")
         channels = asyncio.run(get_channels())
         return render_template('dashboard.html', channels=channels)
     except Exception as e:
         logger.error(f"Error in dashboard route: {str(e)}")
-        logout_user()
+        session.clear()
         return redirect(url_for('login'))
 
 @app.route('/add-replacement', methods=['POST'])
@@ -265,7 +255,7 @@ def add_replacement():
     try:
         original = request.form.get('original')
         replacement = request.form.get('replacement')
-        user_phone = session.get('user_phone')
+        user_phone = session.get('phone')
 
         if not original or not replacement:
             return jsonify({'error': 'Both original and replacement text are required'}), 400
@@ -294,7 +284,7 @@ def add_replacement():
 @login_required
 def get_replacements():
     try:
-        user_phone = session.get('user_phone')
+        user_phone = session.get('phone')
         user_id = get_user_id(user_phone)
 
         conn = get_db()
@@ -316,7 +306,7 @@ def get_replacements():
 def remove_replacement():
     try:
         original = request.form.get('original')
-        user_phone = session.get('user_phone')
+        user_phone = session.get('phone')
 
         if not original:
             return jsonify({'error': 'Original text is required'}), 400
@@ -345,7 +335,7 @@ def remove_replacement():
 
 @app.route('/logout')
 def logout():
-    logout_user()
+    session.clear()
     return redirect(url_for('login'))
 
 
@@ -369,7 +359,7 @@ def update_channels():
         if not destination.startswith('-100'):
             destination = f"-100{destination.lstrip('-')}"
 
-        user_phone = session.get('user_phone')
+        user_phone = session.get('phone')
         user_id = get_user_id(user_phone)
 
         save_user_channel_config(user_id, source, destination)
@@ -411,7 +401,7 @@ def save_user_channel_config(user_id, source_channel, destination_channel):
 @login_required
 def clear_replacements():
     try:
-        user_phone = session.get('user_phone')
+        user_phone = session.get('phone')
         user_id = get_user_id(user_phone)
 
         conn = get_db()
@@ -462,7 +452,7 @@ def toggle_bot():
         return jsonify({'error': str(e)}), 500
 
 async def get_channels():
-    if not current_user.is_authenticated:
+    if not session.get('user_id'):
         return []
 
     client = TelegramClient(None, API_ID, API_HASH)
@@ -477,7 +467,7 @@ async def get_channels():
                 })
         await client.disconnect()
 
-        user_id = current_user.id
+        user_id = session.get('user_id')
         config = get_user_channel_config(user_id)
         if config:
             for channel in channels:
