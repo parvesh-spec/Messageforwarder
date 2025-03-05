@@ -20,7 +20,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
+app.debug = False
+app.secret_key = os.getenv('SESSION_SECRET', os.urandom(24))
 
 # Configure session
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
@@ -50,7 +51,11 @@ def close_db(e=None):
     if db is not None:
         db.close()
 
-# Add healthcheck endpoint
+# Add healthcheck endpoints
+@app.route('/')
+def root():
+    return jsonify({'status': 'ok'}), 200
+
 @app.route('/health')
 def health_check():
     try:
@@ -495,4 +500,4 @@ async def get_channels():
         raise e
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000)
