@@ -11,14 +11,19 @@ from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 import asyncio
 
-# Add stream handler to output logs to console
-handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
+# Configure root logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('telegram_bot.log')
+    ]
+)
+
+# Create logger for this module
 logger = logging.getLogger(__name__)
-logger.addHandler(handler)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 # Message ID mapping dictionary
 MESSAGE_IDS = {}  # Will store source_msg_id: destination_msg_id mapping
@@ -35,14 +40,20 @@ DESTINATION_CHANNEL = None
 TEXT_REPLACEMENTS = {}
 CURRENT_USER_ID = None
 
-# Database connection with better connection handling
+client = None  # Global client variable
+
 def get_db():
-    conn = psycopg2.connect(
-        os.getenv('DATABASE_URL'),
-        application_name='telegram_bot_main'
-    )
-    conn.autocommit = True  # Prevent transaction locks
-    return conn
+    try:
+        conn = psycopg2.connect(
+            os.getenv('DATABASE_URL'),
+            application_name='telegram_bot_main'
+        )
+        conn.autocommit = True
+        logger.info("Database connection established successfully")
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection error: {str(e)}")
+        return None
 
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
@@ -52,6 +63,10 @@ def load_channel_config():
             return
 
         conn = get_db()
+        if not conn:
+            logger.error("Could not establish database connection")
+            return
+
         try:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute("""
@@ -76,7 +91,13 @@ def load_user_replacements(user_id):
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
     try:
         CURRENT_USER_ID = user_id
+        logger.info(f"Loading text replacements for user {user_id}")
+
         conn = get_db()
+        if not conn:
+            logger.error("Could not establish database connection")
+            return
+
         try:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute("""
@@ -86,7 +107,6 @@ def load_user_replacements(user_id):
                     ORDER BY LENGTH(original_text) DESC
                 """, (user_id,))
 
-                # Clear existing replacements first
                 TEXT_REPLACEMENTS = {}
                 rows = cur.fetchall()
                 logger.info(f"Found {len(rows)} replacements for user {user_id}")
@@ -94,279 +114,268 @@ def load_user_replacements(user_id):
                 for row in rows:
                     TEXT_REPLACEMENTS[row['original_text']] = row['replacement_text']
                     logger.debug(f"Loaded replacement: '{row['original_text']}' -> '{row['replacement_text']}'")
-
-                # Verify data was loaded
-                if not TEXT_REPLACEMENTS:
-                    logger.warning(f"No text replacements found for user {user_id}")
-                else:
-                    logger.info(f"Successfully loaded {len(TEXT_REPLACEMENTS)} replacements")
         finally:
             conn.close()
     except Exception as e:
         logger.error(f"Error loading text replacements for user {user_id}: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
         TEXT_REPLACEMENTS = {}
 
-def config_monitor():
-    while True:
-        try:
-            load_channel_config()
-            if CURRENT_USER_ID:
-                load_user_replacements(CURRENT_USER_ID)
-            time.sleep(5)  # Check every 5 seconds
-        except Exception as e:
-            logger.error(f"Error in config monitor: {str(e)}")
-            time.sleep(1)  # Wait a bit before retrying on error
-
-async def get_user_id_from_db():
+async def get_initial_user():
     """Get first user ID from database to use for initial configuration"""
     try:
         conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users LIMIT 1")
-            result = cur.fetchone()
-            if result:
-                return result[0]
+        if not conn:
+            logger.error("Could not establish database connection")
+            return None
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users LIMIT 1")
+                result = cur.fetchone()
+                if result:
+                    user_id = result[0]
+                    logger.info(f"Found initial user ID: {user_id}")
+                    return user_id
+                logger.warning("No users found in database")
+                return None
+        finally:
+            conn.close()
     except Exception as e:
         logger.error(f"Error getting initial user ID: {str(e)}")
-    return None
+        return None
 
-async def get_session_string_from_db(user_id):
+async def get_session_string(user_id):
     """Get saved session string from database"""
     try:
         conn = get_db()
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("""
-                SELECT session_string 
-                FROM user_sessions 
-                WHERE user_id = %s
-            """, (user_id,))
-            result = cur.fetchone()
-            if result:
-                return result['session_string']
+        if not conn:
+            logger.error("Could not establish database connection")
             return None
+
+        try:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT session_string 
+                    FROM user_sessions 
+                    WHERE user_id = %s
+                """, (user_id,))
+                result = cur.fetchone()
+                if result:
+                    logger.info("Successfully retrieved session string")
+                    return result['session_string']
+                logger.warning(f"No session string found for user {user_id}")
+                return None
+        finally:
+            conn.close()
     except Exception as e:
         logger.error(f"Error getting session string: {str(e)}")
         return None
-    finally:
-        conn.close()
+
+async def start_client(session_string):
+    global client
+    try:
+        logger.info("Initializing Telegram client")
+        client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+        await client.connect()
+        logger.info("Client connected successfully")
+
+        if not await client.is_user_authorized():
+            logger.error("Bot is not authorized. Please authenticate through web interface.")
+            return False
+
+        me = await client.get_me()
+        logger.info(f"Successfully logged in as {me.first_name} (ID: {me.id})")
+        return True
+    except Exception as e:
+        logger.error(f"Error starting client: {str(e)}")
+        return False
 
 async def main():
     try:
+        logger.info("Starting Telegram bot service")
+
         # Get initial user ID for configuration
         global CURRENT_USER_ID
-        CURRENT_USER_ID = await get_user_id_from_db()
+        CURRENT_USER_ID = await get_initial_user()
         if not CURRENT_USER_ID:
             logger.warning("No users found in database")
             return
 
         # Start config monitoring in background
-        Thread(target=config_monitor, daemon=True).start()
+        Thread(target=lambda: asyncio.run(config_monitor()), daemon=True).start()
         logger.info("Started channel configuration monitor")
 
-        # Get session string from database
-        session_string = await get_session_string_from_db(CURRENT_USER_ID)
-        if not session_string:
-            logger.error("No session string found in database. Please authenticate through web interface.")
-            return
+        while True:  # Keep trying to connect
+            try:
+                # Get session string from database
+                session_string = await get_session_string(CURRENT_USER_ID)
+                if not session_string:
+                    logger.error("No session string found in database. Please authenticate through web interface.")
+                    await asyncio.sleep(5)  # Wait before retrying
+                    continue
 
-        # Start client with session string
-        logger.debug("Starting Telegram client...")
-        client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+                # Start client with session string
+                if not await start_client(session_string):
+                    await asyncio.sleep(5)  # Wait before retrying
+                    continue
 
-        try:
-            await client.connect()
-            logger.info("Client connected successfully")
-
-            if not await client.is_user_authorized():
-                logger.error("Bot is not authorized. Please run the web interface first to authenticate.")
-                return
-
-            # Get information about yourself
-            me = await client.get_me()
-            logger.info(f"Successfully logged in as {me.first_name} (ID: {me.id})")
-
-            @client.on(events.NewMessage())
-            async def forward_handler(event):
-                try:
-                    # Skip if channels not configured
-                    if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
-                        logger.warning("Channels not configured yet")
-                        return
-
-                    # Format IDs for comparison
-                    source_id = str(SOURCE_CHANNEL)
-                    if not source_id.startswith('-100'):
-                        source_id = f"-100{source_id.lstrip('-')}"
-
-                    chat_id = str(event.chat_id)
-                    if not chat_id.startswith('-100'):
-                        chat_id = f"-100{chat_id.lstrip('-')}"
-
-                    # Check if message is from source channel
-                    if chat_id != source_id:
-                        return
-
-                    logger.info(f"Processing message from source channel {source_id}")
-
+                @client.on(events.NewMessage())
+                async def forward_handler(event):
                     try:
-                        # Format destination channel ID
-                        dest_id = str(DESTINATION_CHANNEL)
-                        if not dest_id.startswith('-100'):
-                            dest_id = f"-100{dest_id.lstrip('-')}"
-
-                        # Get destination channel entity
-                        dest_channel = await client.get_entity(int(dest_id))
-
-                        # Create a new message
-                        message_text = event.message.text if event.message.text else ""
-
-                        # Apply text replacements if any
-                        if TEXT_REPLACEMENTS and message_text:
-                            logger.debug("Starting text replacement process...")
-                            logger.debug(f"Current TEXT_REPLACEMENTS dictionary: {TEXT_REPLACEMENTS}")
-                            logger.debug(f"Original text before replacements: {message_text}")
-
-                            # Sort replacements by length (longest first) to handle overlapping patterns
-                            for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
-                                logger.debug(f"Checking replacement: '{original}' -> '{replacement}'")
-                                if original in message_text:
-                                    old_text = message_text
-                                    message_text = message_text.replace(original, replacement)
-                                    logger.info(f"Replaced '{original}' with '{replacement}'")
-                                    logger.debug(f"Text changed from '{old_text}' to '{message_text}'")
-
-                        # Handle media
-                        media = None
-                        if event.message.media:
-                            logger.info("Downloading media...")
-                            try:
-                                media = await event.message.download_media()
-                                logger.info(f"Media downloaded: {media}")
-                            except Exception as e:
-                                logger.error(f"Failed to download media: {str(e)}")
-                                return
-
-                        # Send message
-                        try:
-                            if media:
-                                logger.info("Sending message with media...")
-                                sent_message = await client.send_file(
-                                    dest_channel,
-                                    media,
-                                    caption=message_text,
-                                    formatting_entities=event.message.entities
-                                )
-                                logger.info("Message with media sent successfully")
-                            else:
-                                logger.info("Sending text message...")
-                                sent_message = await client.send_message(
-                                    dest_channel,
-                                    message_text,
-                                    formatting_entities=event.message.entities
-                                )
-                                logger.info("Text message sent successfully")
-
-                            # Store message IDs mapping
-                            MESSAGE_IDS[event.message.id] = sent_message.id
-                            logger.debug(f"Stored message ID mapping: {event.message.id} → {sent_message.id}")
-
-                        except Exception as e:
-                            logger.error(f"Failed to send message: {str(e)}")
+                        if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
                             return
 
-                    except ValueError as e:
-                        logger.error(f"Failed to access destination channel: {str(e)}")
-                        return
+                        source_id = str(SOURCE_CHANNEL)
+                        if not source_id.startswith('-100'):
+                            source_id = f"-100{source_id.lstrip('-')}"
 
-                except Exception as e:
-                    logger.error(f"Error in forward handler: {str(e)}")
-                    logger.error(f"Error type: {type(e).__name__}")
+                        chat_id = str(event.chat_id)
+                        if not chat_id.startswith('-100'):
+                            chat_id = f"-100{chat_id.lstrip('-')}"
 
-            @client.on(events.MessageEdited())
-            async def edit_handler(event):
-                try:
-                    # Skip if channels not configured
-                    if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
-                        logger.warning("Channels not configured yet")
-                        return
+                        if chat_id != source_id:
+                            return
 
-                    # Format IDs for comparison
-                    source_id = str(SOURCE_CHANNEL)
-                    if not source_id.startswith('-100'):
-                        source_id = f"-100{source_id.lstrip('-')}"
+                        logger.info(f"Processing message from source channel {source_id}")
 
-                    chat_id = str(event.chat_id)
-                    if not chat_id.startswith('-100'):
-                        chat_id = f"-100{chat_id.lstrip('-')}"
+                        try:
+                            dest_id = str(DESTINATION_CHANNEL)
+                            if not dest_id.startswith('-100'):
+                                dest_id = f"-100{dest_id.lstrip('-')}"
 
-                    # Check if message is from source channel
-                    if chat_id != source_id:
-                        return
+                            dest_channel = await client.get_entity(int(dest_id))
+                            message_text = event.message.text if event.message.text else ""
 
-                    if event.message.id not in MESSAGE_IDS:
-                        logger.info("Original message mapping not found")
-                        return
+                            if TEXT_REPLACEMENTS and message_text:
+                                logger.debug(f"Original message: {message_text}")
+                                for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
+                                    if original in message_text:
+                                        message_text = message_text.replace(original, replacement)
+                                logger.debug(f"Message after replacements: {message_text}")
 
-                    dest_msg_id = MESSAGE_IDS[event.message.id]
-                    logger.info(f"Found destination message ID: {dest_msg_id}")
+                            media = None
+                            if event.message.media:
+                                logger.info("Downloading media from message")
+                                media = await event.message.download_media()
 
-                    # Get the edited message content
-                    message_text = event.message.text if event.message.text else ""
+                            try:
+                                if media:
+                                    logger.info("Forwarding message with media")
+                                    sent_message = await client.send_file(
+                                        dest_channel,
+                                        media,
+                                        caption=message_text,
+                                        formatting_entities=event.message.entities
+                                    )
+                                else:
+                                    logger.info("Forwarding text message")
+                                    sent_message = await client.send_message(
+                                        dest_channel,
+                                        message_text,
+                                        formatting_entities=event.message.entities
+                                    )
 
-                    # Apply text replacements if any
-                    if TEXT_REPLACEMENTS and message_text:
-                        logger.debug("Applying text replacements to edited message...")
-                        for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
-                            if original in message_text:
-                                message_text = message_text.replace(original, replacement)
-                                logger.info(f"Replaced '{original}' with '{replacement}' in edited message")
+                                MESSAGE_IDS[event.message.id] = sent_message.id
+                                logger.info(f"Message forwarded successfully. ID mapping: {event.message.id} -> {sent_message.id}")
 
-                    try:
-                        # Format destination channel ID
-                        dest_id = str(DESTINATION_CHANNEL)
-                        if not dest_id.startswith('-100'):
-                            dest_id = f"-100{dest_id.lstrip('-')}"
+                            except Exception as e:
+                                logger.error(f"Failed to send message: {str(e)}")
+                                return
 
-                        # Get destination channel entity
-                        channel = await client.get_entity(int(dest_id))
-
-                        # Edit the corresponding message
-                        logger.info("Updating message in destination channel...")
-                        await client.edit_message(
-                            channel,
-                            dest_msg_id,
-                            text=message_text,
-                            formatting_entities=event.message.entities
-                        )
-                        logger.info("Message updated successfully")
+                        except ValueError as e:
+                            logger.error(f"Failed to access destination channel: {str(e)}")
+                            return
 
                     except Exception as e:
-                        logger.error(f"Error editing message: {str(e)}")
-                        return
+                        logger.error(f"Error in forward handler: {str(e)}")
 
-                except Exception as e:
-                    logger.error(f"Error in edit handler: {str(e)}")
-                    logger.error(f"Error type: {type(e).__name__}")
+                @client.on(events.MessageEdited())
+                async def edit_handler(event):
+                    try:
+                        if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
+                            return
 
-            logger.info("\nBot is running and monitoring for new messages and edits.")
-            logger.info(f"Source channel: {SOURCE_CHANNEL}")
-            logger.info(f"Destination channel: {DESTINATION_CHANNEL}")
-            await client.run_until_disconnected()
+                        source_id = str(SOURCE_CHANNEL)
+                        if not source_id.startswith('-100'):
+                            source_id = f"-100{source_id.lstrip('-')}"
 
-        except Exception as e:
-            logger.error(f"Failed to start client: {str(e)}")
-            return
+                        chat_id = str(event.chat_id)
+                        if not chat_id.startswith('-100'):
+                            chat_id = f"-100{chat_id.lstrip('-')}"
+
+                        if chat_id != source_id:
+                            return
+
+                        if event.message.id not in MESSAGE_IDS:
+                            return
+
+                        logger.info(f"Processing edited message from source channel {source_id}")
+
+                        dest_msg_id = MESSAGE_IDS[event.message.id]
+                        message_text = event.message.text if event.message.text else ""
+
+                        if TEXT_REPLACEMENTS and message_text:
+                            logger.debug(f"Original edited message: {message_text}")
+                            for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
+                                if original in message_text:
+                                    message_text = message_text.replace(original, replacement)
+                            logger.debug(f"Edited message after replacements: {message_text}")
+
+                        try:
+                            dest_id = str(DESTINATION_CHANNEL)
+                            if not dest_id.startswith('-100'):
+                                dest_id = f"-100{dest_id.lstrip('-')}"
+
+                            channel = await client.get_entity(int(dest_id))
+                            await client.edit_message(
+                                channel,
+                                dest_msg_id,
+                                text=message_text,
+                                formatting_entities=event.message.entities
+                            )
+                            logger.info(f"Message edited successfully. ID: {dest_msg_id}")
+
+                        except Exception as e:
+                            logger.error(f"Error editing message: {str(e)}")
+                            return
+
+                    except Exception as e:
+                        logger.error(f"Error in edit handler: {str(e)}")
+
+                logger.info("Bot is running and monitoring for new messages and edits")
+                await client.run_until_disconnected()
+
+            except Exception as e:
+                logger.error(f"Connection error: {str(e)}")
+                if client and client.is_connected():
+                    await client.disconnect()
+                await asyncio.sleep(5)  # Wait before retrying
 
     except Exception as e:
         logger.error(f"Critical error in main function: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
-        raise
+        if client and client.is_connected():
+            await client.disconnect()
+
+async def config_monitor():
+    while True:
+        try:
+            load_channel_config()
+            if CURRENT_USER_ID:
+                load_user_replacements(CURRENT_USER_ID)
+            await asyncio.sleep(5)  # Check every 5 seconds
+        except Exception as e:
+            logger.error(f"Error in config monitor: {str(e)}")
+            await asyncio.sleep(1)  # Wait a bit before retrying on error
 
 if __name__ == "__main__":
     try:
+        logger.info("Starting bot application")
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("\nBot stopped by user.")
+        logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
+    finally:
+        if client and client.is_connected():
+            asyncio.run(client.disconnect())
+        logger.info("Bot application shutdown complete")
