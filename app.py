@@ -14,24 +14,15 @@ from telethon.sessions import StringSession
 
 # Set up logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO if os.getenv('FLASK_ENV') == 'production' else logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Strong secret key for session encryption
+# Use environment variable for secret key
 app.secret_key = os.getenv('SESSION_SECRET', os.urandom(24))
-
-@app.route('/')
-def health_check():
-    try:
-        db = get_db()
-        return 'OK', 200
-    except Exception:
-        # Still return OK even if DB fails for health check
-        return 'OK', 200
 
 # Configure session
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
@@ -41,11 +32,13 @@ app.config['SESSION_TYPE'] = 'filesystem'
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
+# Database connection pool configuration
 def get_db():
     if 'db' not in g:
         g.db = psycopg2.connect(
             os.getenv('DATABASE_URL'),
-            application_name='telegram_bot_web'
+            application_name='telegram_bot_web',
+            connect_timeout=10
         )
         g.db.autocommit = True
     return g.db
@@ -456,6 +449,15 @@ def toggle_bot():
         logger.error(f"Error toggling bot: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/')
+def health_check():
+    try:
+        db = get_db()
+        return 'OK', 200
+    except Exception:
+        # Still return OK even if DB fails for health check
+        return 'OK', 200
+
 async def get_channels():
     phone = session.get('user_phone')
     client = TelegramClient(None, API_ID, API_HASH) 
@@ -488,6 +490,9 @@ async def get_channels():
         raise e
 
 if __name__ == '__main__':
-    # In production environment, disable debug mode
-    debug_mode = os.getenv('FLASK_ENV') == 'development'
-    app.run(host='0.0.0.0', port=5000, debug=debug_mode)
+    port = int(os.getenv('PORT', 5000))
+    app.run(
+        host='0.0.0.0',
+        port=port,
+        debug=os.getenv('FLASK_ENV') == 'development'
+    )

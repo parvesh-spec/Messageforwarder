@@ -49,7 +49,8 @@ task = "shell.exec"
 args = "python main.py"
 
 [deployment]
-run = ["sh", "-c", "python app.py"]
+run = ["sh", "-c", "hypercorn app:app --bind 0.0.0.0:5000"]
+build = ["sh", "-c", "pip install -r requirements.txt hypercorn psycopg2-binary"]
 
 [[ports]]
 localPort = 5000

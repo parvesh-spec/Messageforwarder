@@ -11,14 +11,26 @@ from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 import asyncio
 
-# Add stream handler to output logs to console
-handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
+# Configure logging based on environment
+logging.basicConfig(
+    level=logging.INFO if os.getenv('FLASK_ENV') == 'production' else logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
-logger.addHandler(handler)
-logger.setLevel(logging.DEBUG)
+
+# Database connection with better error handling and connection pooling
+def get_db():
+    try:
+        conn = psycopg2.connect(
+            os.getenv('DATABASE_URL'),
+            application_name='telegram_bot_main',
+            connect_timeout=10
+        )
+        conn.autocommit = True
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection error: {str(e)}")
+        raise
 
 # Message ID mapping dictionary
 MESSAGE_IDS = {}  # Will store source_msg_id: destination_msg_id mapping
@@ -34,15 +46,6 @@ DESTINATION_CHANNEL = None
 # Text replacement dictionary - now per user
 TEXT_REPLACEMENTS = {}
 CURRENT_USER_ID = None
-
-# Database connection with better connection handling
-def get_db():
-    conn = psycopg2.connect(
-        os.getenv('DATABASE_URL'),
-        application_name='telegram_bot_main'
-    )
-    conn.autocommit = True  # Prevent transaction locks
-    return conn
 
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
@@ -364,9 +367,21 @@ async def main():
         raise
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("\nBot stopped by user.")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
+    max_retries = 3
+    retry_count = 0
+
+    while retry_count < max_retries:
+        try:
+            asyncio.run(main())
+            break
+        except KeyboardInterrupt:
+            logger.info("\nBot stopped by user.")
+            break
+        except Exception as e:
+            retry_count += 1
+            logger.error(f"An error occurred (attempt {retry_count}/{max_retries}): {e}")
+            if retry_count < max_retries:
+                time.sleep(5)  # Wait before retrying
+            else:
+                logger.error("Max retries reached, exiting.")
+                sys.exit(1)
