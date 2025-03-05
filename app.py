@@ -14,14 +14,12 @@ from telethon.sessions import StringSession
 
 # Set up logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-# Strong secret key for session encryption
 app.secret_key = os.urandom(24)
 
 # Configure session
@@ -34,11 +32,16 @@ API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
 def get_db():
     if 'db' not in g:
-        g.db = psycopg2.connect(
-            os.getenv('DATABASE_URL'),
-            application_name='telegram_bot_web'
-        )
-        g.db.autocommit = True
+        try:
+            g.db = psycopg2.connect(
+                os.getenv('DATABASE_URL'),
+                application_name='telegram_bot_web'
+            )
+            g.db.autocommit = True
+            return g.db
+        except Exception as e:
+            logger.error(f"Database connection error: {str(e)}")
+            raise
     return g.db
 
 @app.teardown_appcontext
@@ -46,6 +49,19 @@ def close_db(e=None):
     db = g.pop('db', None)
     if db is not None:
         db.close()
+
+# Add healthcheck endpoint
+@app.route('/health')
+def health_check():
+    try:
+        # Check database connection
+        db = get_db()
+        with db.cursor() as cur:
+            cur.execute('SELECT 1')
+        return jsonify({'status': 'healthy'}), 200
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
 def login_required(f):
     @wraps(f)
