@@ -45,18 +45,15 @@
         }
 
         function handleApiError(error, defaultMessage = 'An error occurred. Please try again.') {
-            console.error('API Error:', error);
-            let errorMessage = defaultMessage;
-
             if (error.response) {
                 return error.response.json().then(data => {
                     showMessage(data.error || defaultMessage, true);
                 });
             } else if (error.message) {
-                errorMessage = error.message;
+                showMessage(error.message, true);
+            } else {
+                showMessage(defaultMessage, true);
             }
-
-            showMessage(errorMessage, true);
         }
 
         function sendOTP() {
@@ -108,9 +105,9 @@
                     showMessage('Please enter your 2FA password');
                 } else if (data.error) {
                     showMessage(data.error, true);
-                } else if (data.message === 'Login successful') {
+                } else if (data.message === 'Login successful' && data.redirect) {
                     showMessage('Login successful! Redirecting to dashboard...');
-                    window.location.href = '/dashboard';
+                    window.location.replace(data.redirect);
                 }
             })
             .catch(error => handleApiError(error));
@@ -132,9 +129,9 @@
             .then(data => {
                 if (data.error) {
                     showMessage(data.error, true);
-                } else if (data.message === 'Login successful') {
+                } else if (data.message === 'Login successful' && data.redirect) {
                     showMessage('Login successful! Redirecting to dashboard...');
-                    window.location.href = '/dashboard';
+                    window.location.replace(data.redirect);
                 }
             })
             .catch(error => handleApiError(error));

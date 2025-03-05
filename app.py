@@ -25,7 +25,6 @@ app.secret_key = os.urandom(24)
 
 # Configure session
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-app.config['SESSION_TYPE'] = 'filesystem'
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -220,14 +219,13 @@ def verify_otp():
                     # Create and login user
                     user = User(user_id, phone)
                     login_user(user, remember=True)
-                    session.permanent = True
                     logger.info(f"User logged in successfully - ID: {user_id}, Phone: {phone}")
 
                     if client.is_connected():
                         await client.disconnect()
                     if os.path.exists(temp_session_path):
                         os.remove(temp_session_path)
-                    return {'message': 'Login successful'}
+                    return {'message': 'Login successful', 'redirect': url_for('dashboard')}
                 else:
                     if client.is_connected():
                         await client.disconnect()
