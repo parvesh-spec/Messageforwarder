@@ -4,7 +4,7 @@ modules = ["python-3.11", "postgresql-16"]
 channel = "stable-24_05"
 
 [workflows]
-runButton = "Web Dashboard"
+runButton = "Project"
 
 [[workflows.workflow]]
 name = "Project"
@@ -49,8 +49,7 @@ task = "shell.exec"
 args = "python main.py"
 
 [deployment]
-run = ["sh", "-c", "hypercorn app:app --bind 0.0.0.0:5000"]
-deploymentTarget = "cloudrun"
+run = ["sh", "-c", "python app.py"]
 
 [[ports]]
 localPort = 5000

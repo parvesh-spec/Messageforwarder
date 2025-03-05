@@ -14,14 +14,15 @@ from telethon.sessions import StringSession
 
 # Set up logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.debug = False
-app.secret_key = os.getenv('SESSION_SECRET', os.urandom(24))
+
+# Strong secret key for session encryption
+app.secret_key = os.urandom(24)
 
 # Configure session
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
@@ -33,16 +34,11 @@ API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
 def get_db():
     if 'db' not in g:
-        try:
-            g.db = psycopg2.connect(
-                os.getenv('DATABASE_URL'),
-                application_name='telegram_bot_web'
-            )
-            g.db.autocommit = True
-            return g.db
-        except Exception as e:
-            logger.error(f"Database connection error: {str(e)}")
-            raise
+        g.db = psycopg2.connect(
+            os.getenv('DATABASE_URL'),
+            application_name='telegram_bot_web'
+        )
+        g.db.autocommit = True
     return g.db
 
 @app.teardown_appcontext
@@ -50,25 +46,6 @@ def close_db(e=None):
     db = g.pop('db', None)
     if db is not None:
         db.close()
-
-# Add healthcheck endpoints
-@app.route('/')
-def root():
-    if session.get('logged_in') and session.get('user_phone'):
-        return redirect(url_for('dashboard'))
-    return redirect(url_for('login'))
-
-@app.route('/health')
-def health_check():
-    try:
-        # Check database connection
-        db = get_db()
-        with db.cursor() as cur:
-            cur.execute('SELECT 1')
-        return jsonify({'status': 'healthy'}), 200
-    except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
-        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
 def login_required(f):
     @wraps(f)
@@ -91,7 +68,7 @@ def get_user_id(phone):
         db.commit()
         return cur.fetchone()[0]
 
-@app.route('/login')
+@app.route('/')
 def login():
     if session.get('logged_in') and session.get('user_phone'):
         logger.info(f"User {session.get('user_phone')} already logged in, redirecting to dashboard")
@@ -224,14 +201,11 @@ def verify_otp():
                             db.commit()
                             logger.info("Saved session string to database")
 
-                    # Clear existing session and set new data
                     session.clear()
                     session['logged_in'] = True
                     session['user_phone'] = phone
                     session['user_id'] = user_id
                     session.permanent = True
-                    # Make sure session is saved
-                    session.modified = True
                     logger.info(f"Session variables set - user_phone: {phone}, user_id: {user_id}")
 
                     if client.is_connected():
@@ -505,4 +479,4 @@ async def get_channels():
         raise e
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, debug=True)
