@@ -11,6 +11,7 @@ from psycopg2.extras import DictCursor
 from datetime import timedelta
 import tempfile
 from telethon.sessions import StringSession
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 
 # Set up logging
 logging.basicConfig(
@@ -20,17 +21,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-# Strong secret key for session encryption
 app.secret_key = os.urandom(24)
 
 # Configure session
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['SESSION_TYPE'] = 'filesystem'
 
+# Initialize Flask-Login
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+
 # Telegram API credentials
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
+
+# User class for Flask-Login
+class User(UserMixin):
+    def __init__(self, user_id, phone):
+        self.id = user_id
+        self.phone = phone
+
+@login_manager.user_loader
+def load_user(user_id):
+    try:
+        conn = get_db()
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT id, phone FROM users WHERE id = %s", (user_id,))
+            user = cur.fetchone()
+            if user:
+                return User(user['id'], user['phone'])
+    except Exception as e:
+        logger.error(f"Error loading user: {str(e)}")
+    return None
 
 def get_db():
     if 'db' not in g:
@@ -47,16 +70,6 @@ def close_db(e=None):
     if db is not None:
         db.close()
 
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('logged_in') or not session.get('user_phone'):
-            logger.warning("Session invalid, redirecting to login")
-            session.clear()
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
 def get_user_id(phone):
     db = get_db()
     with db.cursor() as cur:
@@ -69,9 +82,14 @@ def get_user_id(phone):
         return cur.fetchone()[0]
 
 @app.route('/')
+def index():
+    if current_user.is_authenticated:
+        return redirect(url_for('dashboard'))
+    return redirect(url_for('login'))
+
+@app.route('/login')
 def login():
-    if session.get('logged_in') and session.get('user_phone'):
-        logger.info(f"User {session.get('user_phone')} already logged in, redirecting to dashboard")
+    if current_user.is_authenticated:
         return redirect(url_for('dashboard'))
     return render_template('login.html')
 
@@ -93,13 +111,11 @@ def send_otp():
     try:
         async def send_code():
             logger.info(f"Initializing Telegram client for phone: {phone}")
-
             session_path = get_temp_session_path(phone)
             client = TelegramClient(session_path, API_ID, API_HASH)
 
             try:
                 await client.connect()
-
                 try:
                     sent = await client.send_code_request(phone)
                     session['user_phone'] = phone
@@ -201,12 +217,11 @@ def verify_otp():
                             db.commit()
                             logger.info("Saved session string to database")
 
-                    session.clear()
-                    session['logged_in'] = True
-                    session['user_phone'] = phone
-                    session['user_id'] = user_id
+                    # Create and login user
+                    user = User(user_id, phone)
+                    login_user(user, remember=True)
                     session.permanent = True
-                    logger.info(f"Session variables set - user_phone: {phone}, user_id: {user_id}")
+                    logger.info(f"User logged in successfully - ID: {user_id}, Phone: {phone}")
 
                     if client.is_connected():
                         await client.disconnect()
@@ -219,7 +234,7 @@ def verify_otp():
                     return {'error': 'Invalid OTP'}, 400
 
             except Exception as e:
-                logger.error(f"Error in verification: {str(e)}")
+                logger.error(f"Error during verification: {str(e)}")
                 if client.is_connected():
                     await client.disconnect()
                 raise e
@@ -242,7 +257,7 @@ def dashboard():
         return render_template('dashboard.html', channels=channels)
     except Exception as e:
         logger.error(f"Error in dashboard route: {str(e)}")
-        session.clear()
+        logout_user()
         return redirect(url_for('login'))
 
 @app.route('/add-replacement', methods=['POST'])
@@ -331,7 +346,7 @@ def remove_replacement():
 
 @app.route('/logout')
 def logout():
-    session.clear()
+    logout_user()
     return redirect(url_for('login'))
 
 
@@ -448,9 +463,10 @@ def toggle_bot():
         return jsonify({'error': str(e)}), 500
 
 async def get_channels():
-    phone = session.get('user_phone')
-    client = TelegramClient(None, API_ID, API_HASH) 
+    if not current_user.is_authenticated:
+        return []
 
+    client = TelegramClient(None, API_ID, API_HASH)
     try:
         await client.connect()
         channels = []
@@ -462,7 +478,7 @@ async def get_channels():
                 })
         await client.disconnect()
 
-        user_id = get_user_id(phone)
+        user_id = current_user.id
         config = get_user_channel_config(user_id)
         if config:
             for channel in channels:

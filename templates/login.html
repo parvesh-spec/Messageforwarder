@@ -18,7 +18,6 @@
                 <input type="text" id="otp" placeholder="Enter OTP from Telegram" required>
             </div>
             <button onclick="verifyOTP()">Verify OTP</button>
-            <button onclick="resendOTP()" class="secondary">Resend OTP</button>
         </div>
         <div id="twofa-form" style="display: none;">
             <div class="input-group">
@@ -36,7 +35,6 @@
             const messageDiv = document.getElementById('message');
             messageDiv.innerHTML = message;
             messageDiv.style.color = isError ? 'red' : 'green';
-            console.log(`${isError ? 'Error' : 'Info'}: ${message}`);
         }
 
         function resetForms() {
@@ -112,8 +110,7 @@
                     showMessage(data.error, true);
                 } else if (data.message === 'Login successful') {
                     showMessage('Login successful! Redirecting to dashboard...');
-                    // Force redirect to dashboard after successful login
-                    window.location.replace('/dashboard');
+                    window.location.href = '/dashboard';
                 }
             })
             .catch(error => handleApiError(error));
@@ -137,8 +134,7 @@
                     showMessage(data.error, true);
                 } else if (data.message === 'Login successful') {
                     showMessage('Login successful! Redirecting to dashboard...');
-                    // Force redirect to dashboard after successful login
-                    window.location.replace('/dashboard');
+                    window.location.href = '/dashboard';
                 }
             })
             .catch(error => handleApiError(error));
