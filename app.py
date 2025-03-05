@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Use environment variable for secret key
-app.secret_key = os.getenv('SESSION_SECRET', os.urandom(24))
+app.secret_key = os.getenv('SESSION_SECRET')
 
 # Configure session
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
@@ -454,7 +454,11 @@ def toggle_bot():
         logger.error(f"Error toggling bot: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/health') #Changed route name to avoid conflict.
+@app.route('/')
+def root():
+    return 'OK', 200
+
+@app.route('/health')
 def health_check():
     try:
         db = get_db()
