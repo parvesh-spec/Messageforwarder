@@ -31,7 +31,7 @@ task = "packager.installForAll"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "gunicorn --bind 0.0.0.0:5000 app:app --log-level info"
+args = "python app.py"
 waitForPort = 5000
 
 [[workflows.workflow]]
@@ -48,17 +48,8 @@ task = "packager.installForAll"
 task = "shell.exec"
 args = "python main.py"
 
-[[workflows.workflow]]
-name = "Web Server"
-author = 39735059
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "hypercorn app:app --bind 0.0.0.0:5000"
-
 [deployment]
-run = ["sh", "-c", "hypercorn app:app --bind 0.0.0.0:5000"]
-build = ["sh", "-c", "pip install -r requirements.txt hypercorn psycopg2-binary"]
+run = ["sh", "-c", "python app.py"]
 
 [[ports]]
 localPort = 5000

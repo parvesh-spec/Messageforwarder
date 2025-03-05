@@ -5,63 +5,44 @@ from threading import Thread
 import psycopg2
 from psycopg2.extras import DictCursor
 import os
+import tempfile
 from telethon import TelegramClient, events
+from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 import asyncio
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Add stream handler to output logs to console
+handler = logging.StreamHandler(sys.stdout)
+handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
 logger = logging.getLogger(__name__)
-
-# Database connection with better error handling
-def get_db():
-    try:
-        conn = psycopg2.connect(
-            os.getenv('DATABASE_URL'),
-            application_name='telegram_bot_main',
-            connect_timeout=10
-        )
-        conn.autocommit = True
-        return conn
-    except Exception as e:
-        logger.error(f"Database connection error: {str(e)}")
-        return None
+logger.addHandler(handler)
+logger.setLevel(logging.DEBUG)
 
 # Message ID mapping dictionary
-MESSAGE_IDS = {}
+MESSAGE_IDS = {}  # Will store source_msg_id: destination_msg_id mapping
 
 # Telegram API credentials
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
-# Channel configuration
+# Define source and destination channels
 SOURCE_CHANNEL = None
 DESTINATION_CHANNEL = None
 
-async def get_user_session():
-    """Get session string from database for first user"""
-    try:
-        db = get_db()
-        if not db:
-            logger.error("Could not connect to database")
-            return None
+# Text replacement dictionary - now per user
+TEXT_REPLACEMENTS = {}
+CURRENT_USER_ID = None
 
-        with db.cursor(cursor_factory=DictCursor) as cur:
-            # Get first active user session
-            cur.execute("""
-                SELECT us.session_string 
-                FROM user_sessions us 
-                JOIN users u ON us.user_id = u.id 
-                LIMIT 1
-            """)
-            result = cur.fetchone()
-            return result['session_string'] if result else None
-    except Exception as e:
-        logger.error(f"Error getting user session: {str(e)}")
-        return None
+# Database connection with better connection handling
+def get_db():
+    conn = psycopg2.connect(
+        os.getenv('DATABASE_URL'),
+        application_name='telegram_bot_main'
+    )
+    conn.autocommit = True  # Prevent transaction locks
+    return conn
 
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
@@ -87,11 +68,9 @@ def load_channel_config():
                 else:
                     logger.warning("No channel configuration found")
         finally:
-            if conn:
-                conn.close()
+            conn.close()
     except Exception as e:
         logger.error(f"Error loading channel configuration: {str(e)}")
-
 
 def load_user_replacements(user_id):
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
@@ -122,8 +101,7 @@ def load_user_replacements(user_id):
                 else:
                     logger.info(f"Successfully loaded {len(TEXT_REPLACEMENTS)} replacements")
         finally:
-            if conn:
-                conn.close()
+            conn.close()
     except Exception as e:
         logger.error(f"Error loading text replacements for user {user_id}: {str(e)}")
         logger.error(f"Error type: {type(e).__name__}")
@@ -140,34 +118,73 @@ def config_monitor():
             logger.error(f"Error in config monitor: {str(e)}")
             time.sleep(1)  # Wait a bit before retrying on error
 
-# Text replacement dictionary - per user
-TEXT_REPLACEMENTS = {}
-CURRENT_USER_ID = None
+async def get_user_id_from_db():
+    """Get first user ID from database to use for initial configuration"""
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users LIMIT 1")
+            result = cur.fetchone()
+            if result:
+                return result[0]
+    except Exception as e:
+        logger.error(f"Error getting initial user ID: {str(e)}")
+    return None
+
+async def get_session_string_from_db(user_id):
+    """Get saved session string from database"""
+    try:
+        conn = get_db()
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT session_string 
+                FROM user_sessions 
+                WHERE user_id = %s
+            """, (user_id,))
+            result = cur.fetchone()
+            if result:
+                return result['session_string']
+            return None
+    except Exception as e:
+        logger.error(f"Error getting session string: {str(e)}")
+        return None
+    finally:
+        conn.close()
 
 async def main():
     try:
-        # Get session string
-        session_string = await get_user_session()
-        if not session_string:
-            logger.error("No session string found. Please authenticate through web interface first.")
+        # Get initial user ID for configuration
+        global CURRENT_USER_ID
+        CURRENT_USER_ID = await get_user_id_from_db()
+        if not CURRENT_USER_ID:
+            logger.warning("No users found in database")
             return
 
-        # Initialize client with session
+        # Start config monitoring in background
+        Thread(target=config_monitor, daemon=True).start()
+        logger.info("Started channel configuration monitor")
+
+        # Get session string from database
+        session_string = await get_session_string_from_db(CURRENT_USER_ID)
+        if not session_string:
+            logger.error("No session string found in database. Please authenticate through web interface.")
+            return
+
+        # Start client with session string
+        logger.debug("Starting Telegram client...")
         client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
         try:
             await client.connect()
+            logger.info("Client connected successfully")
 
             if not await client.is_user_authorized():
-                logger.error("Bot is not authorized. Please authenticate through web interface.")
+                logger.error("Bot is not authorized. Please run the web interface first to authenticate.")
                 return
 
+            # Get information about yourself
             me = await client.get_me()
             logger.info(f"Successfully logged in as {me.first_name} (ID: {me.id})")
-            
-            # Start config monitoring in background
-            Thread(target=config_monitor, daemon=True).start()
-            logger.info("Started channel configuration monitor")
 
             @client.on(events.NewMessage())
             async def forward_handler(event):
@@ -339,8 +356,7 @@ async def main():
 
         except Exception as e:
             logger.error(f"Failed to start client: {str(e)}")
-            if client and client.is_connected():
-                await client.disconnect()
+            return
 
     except Exception as e:
         logger.error(f"Critical error in main function: {str(e)}")
@@ -348,21 +364,9 @@ async def main():
         raise
 
 if __name__ == "__main__":
-    max_retries = 3
-    retry_count = 0
-
-    while retry_count < max_retries:
-        try:
-            asyncio.run(main())
-            break
-        except KeyboardInterrupt:
-            logger.info("\nBot stopped by user.")
-            break
-        except Exception as e:
-            retry_count += 1
-            logger.error(f"An error occurred (attempt {retry_count}/{max_retries}): {e}")
-            if retry_count < max_retries:
-                time.sleep(5)  # Wait before retrying
-            else:
-                logger.error("Max retries reached, exiting.")
-                sys.exit(1)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("\nBot stopped by user.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred: {e}")
