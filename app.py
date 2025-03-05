@@ -60,7 +60,7 @@ def login_required(f):
         if not session.get('logged_in') or not session.get('user_phone'):
             logger.warning("Session invalid, redirecting to login")
             session.clear()
-            return redirect(url_for('login'))
+            return redirect(url_for('login_page'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -339,7 +339,7 @@ def remove_replacement():
 @app.route('/logout')
 def logout():
     session.clear()
-    return redirect(url_for('login'))
+    return redirect(url_for('login_page'))
 
 
 @app.route('/update-channels', methods=['POST'])
@@ -456,6 +456,11 @@ def toggle_bot():
 
 @app.route('/')
 def root():
+    # For deployment health checks, return an immediate 200 response
+    return '', 200
+
+@app.route('/login')
+def login_page():
     if session.get('logged_in') and session.get('user_phone'):
         logger.info(f"User {session.get('user_phone')} already logged in, redirecting to dashboard")
         return redirect(url_for('dashboard'))
