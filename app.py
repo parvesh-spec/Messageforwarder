@@ -54,6 +54,12 @@ def close_db(e=None):
 # Add healthcheck endpoints
 @app.route('/')
 def root():
+    if session.get('logged_in') and session.get('user_phone'):
+        return redirect(url_for('dashboard'))
+    return redirect(url_for('login'))
+
+@app.route('/health')
+def health_check():
     try:
         # Check database connection
         db = get_db()
