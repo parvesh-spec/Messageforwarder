@@ -31,7 +31,7 @@ task = "packager.installForAll"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "gunicorn app:app --bind 0.0.0.0:5000"
+args = "gunicorn --bind 0.0.0.0:5000 app:app --log-level info"
 waitForPort = 5000
 
 [[workflows.workflow]]

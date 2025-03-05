@@ -22,3 +22,5 @@ psycopg2-binary
 telethon
 flask
 gunicorn
+flask-login
+flask-wtf
