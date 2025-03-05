@@ -224,11 +224,14 @@ def verify_otp():
                             db.commit()
                             logger.info("Saved session string to database")
 
+                    # Clear existing session and set new data
                     session.clear()
                     session['logged_in'] = True
                     session['user_phone'] = phone
                     session['user_id'] = user_id
                     session.permanent = True
+                    # Make sure session is saved
+                    session.modified = True
                     logger.info(f"Session variables set - user_phone: {phone}, user_id: {user_id}")
 
                     if client.is_connected():

@@ -51,9 +51,17 @@
             let errorMessage = defaultMessage;
 
             if (error.response) {
-                return error.response.json().then(data => {
-                    showMessage(data.error || defaultMessage, true);
-                });
+                const contentType = error.response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    return error.response.json().then(data => {
+                        showMessage(data.error || defaultMessage, true);
+                    });
+                } else {
+                    showMessage('Session expired. Please try again.', true);
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 2000);
+                }
             } else if (error.message) {
                 errorMessage = error.message;
             }
@@ -78,7 +86,12 @@
                 },
                 body: `phone=${encodeURIComponent(phone)}`
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw response;
+                }
+                return response.json();
+            })
             .then(data => {
                 if (data.error) {
                     showMessage(data.error, true);
@@ -102,7 +115,12 @@
                 },
                 body: `otp=${encodeURIComponent(otp)}`
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw response;
+                }
+                return response.json();
+            })
             .then(data => {
                 if (data.error === 'two_factor_needed') {
                     document.getElementById('otp-form').style.display = 'none';
@@ -113,7 +131,9 @@
                 } else if (data.message === 'Login successful') {
                     showMessage('Login successful! Redirecting to dashboard...');
                     // Force redirect to dashboard after successful login
-                    window.location.replace('/dashboard');
+                    setTimeout(() => {
+                        window.location.href = '/dashboard';
+                    }, 1000);
                 }
             })
             .catch(error => handleApiError(error));
@@ -131,14 +151,21 @@
                 },
                 body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw response;
+                }
+                return response.json();
+            })
             .then(data => {
                 if (data.error) {
                     showMessage(data.error, true);
                 } else if (data.message === 'Login successful') {
                     showMessage('Login successful! Redirecting to dashboard...');
                     // Force redirect to dashboard after successful login
-                    window.location.replace('/dashboard');
+                    setTimeout(() => {
+                        window.location.href = '/dashboard';
+                    }, 1000);
                 }
             })
             .catch(error => handleApiError(error));
