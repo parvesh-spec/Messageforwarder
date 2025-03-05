@@ -22,7 +22,11 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Strong secret key for session encryption
-app.secret_key = os.urandom(24)
+app.secret_key = os.getenv('SESSION_SECRET', os.urandom(24))
+
+@app.route('/')
+def health_check():
+    return 'OK', 200
 
 # Configure session
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
@@ -479,4 +483,6 @@ async def get_channels():
         raise e
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # In production environment, disable debug mode
+    debug_mode = os.getenv('FLASK_ENV') == 'development'
+    app.run(host='0.0.0.0', port=5000, debug=debug_mode)
