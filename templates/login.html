@@ -53,15 +53,8 @@
             showMessage(error.message || defaultMessage, true);
         }
 
-        function redirectToDashboard(url) {
-            showMessage('Login successful! Redirecting to dashboard...');
-            setTimeout(() => {
-                window.location.replace(url);
-            }, 1500);
-        }
-
         function sendOTP() {
-            const phone = document.getElementById('phone').value;
+            const phone = document.getElementById('phone').value.trim();
             if (!phone.startsWith('+91')) {
                 showMessage('Phone number must start with +91', true);
                 return;
@@ -77,7 +70,12 @@
                 },
                 body: `phone=${encodeURIComponent(phone)}`
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Failed to send OTP');
+                }
+                return response.json();
+            })
             .then(data => {
                 if (data.error) {
                     showMessage(data.error, true);
@@ -91,7 +89,7 @@
         }
 
         function verifyOTP() {
-            const otp = document.getElementById('otp').value;
+            const otp = document.getElementById('otp').value.trim();
             showMessage('Verifying OTP...');
 
             fetch('/verify-otp', {
@@ -101,7 +99,12 @@
                 },
                 body: `otp=${encodeURIComponent(otp)}`
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Failed to verify OTP');
+                }
+                return response.json();
+            })
             .then(data => {
                 if (data.error === 'two_factor_needed') {
                     document.getElementById('otp-form').style.display = 'none';
@@ -110,14 +113,16 @@
                 } else if (data.error) {
                     showMessage(data.error, true);
                 } else if (data.message === 'Login successful' && data.redirect) {
-                    redirectToDashboard(data.redirect);
+                    showMessage('Login successful! Redirecting to dashboard...');
+                    // Use replace to prevent going back to login page
+                    window.location.replace(data.redirect);
                 }
             })
             .catch(error => handleApiError(error));
         }
 
         function verify2FA() {
-            const otp = document.getElementById('otp').value;
+            const otp = document.getElementById('otp').value.trim();
             const password = document.getElementById('password').value;
             showMessage('Verifying 2FA...');
 
@@ -128,12 +133,19 @@
                 },
                 body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Failed to verify 2FA');
+                }
+                return response.json();
+            })
             .then(data => {
                 if (data.error) {
                     showMessage(data.error, true);
                 } else if (data.message === 'Login successful' && data.redirect) {
-                    redirectToDashboard(data.redirect);
+                    showMessage('Login successful! Redirecting to dashboard...');
+                    // Use replace to prevent going back to login page
+                    window.location.replace(data.redirect);
                 }
             })
             .catch(error => handleApiError(error));

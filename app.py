@@ -11,6 +11,7 @@ from psycopg2.extras import DictCursor
 from datetime import timedelta
 import tempfile
 from telethon.sessions import StringSession
+import os
 
 # Set up logging
 logging.basicConfig(
@@ -20,7 +21,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
+# Use a fixed secret key for development
+app.secret_key = 'dev-secret-key'  # In production, use environment variable
 app.permanent_session_lifetime = timedelta(days=7)
 
 # Telegram API credentials
@@ -45,7 +47,7 @@ def close_db(e=None):
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        logger.debug(f"Session state: {dict(session)}")
+        logger.info(f"Checking auth - Session data: {dict(session)}")
         if not session.get('user_id'):
             logger.warning("No user_id in session, redirecting to login")
             return redirect(url_for('login'))
@@ -65,15 +67,15 @@ def get_user_id(phone):
 
 @app.route('/')
 def index():
+    logger.info(f"Index route - Session data: {dict(session)}")
     if session.get('user_id'):
-        logger.info(f"User {session.get('user_id')} already logged in, redirecting to dashboard")
         return redirect(url_for('dashboard'))
     return redirect(url_for('login'))
 
 @app.route('/login')
 def login():
+    logger.info(f"Login route - Session data: {dict(session)}")
     if session.get('user_id'):
-        logger.info(f"User {session.get('user_id')} already logged in, redirecting to dashboard")
         return redirect(url_for('dashboard'))
     return render_template('login.html')
 
@@ -85,16 +87,14 @@ def get_temp_session_path(phone):
 def send_otp():
     phone = request.form.get('phone')
     if not phone:
-        logger.error("Phone number missing in request")
         return jsonify({'error': 'Phone number is required'}), 400
 
     if not phone.startswith('+91'):
-        logger.error(f"Invalid phone number format: {phone}")
         return jsonify({'error': 'Phone number must start with +91'}), 400
 
     try:
         async def send_code():
-            logger.info(f"Initializing Telegram client for phone: {phone}")
+            logger.info(f"Sending OTP to phone: {phone}")
             session_path = get_temp_session_path(phone)
             client = TelegramClient(session_path, API_ID, API_HASH)
 
@@ -102,11 +102,12 @@ def send_otp():
                 await client.connect()
                 try:
                     sent = await client.send_code_request(phone)
+                    session.clear()  # Clear any old session data
+                    session.permanent = True
                     session['phone'] = phone
                     session['phone_code_hash'] = sent.phone_code_hash
                     session['temp_session_path'] = session_path
-                    session.permanent = True
-                    logger.info("Code request sent successfully")
+                    logger.info(f"OTP sent - Session data: {dict(session)}")
 
                     if client.is_connected():
                         await client.disconnect()
@@ -132,14 +133,10 @@ def send_otp():
         if isinstance(result, tuple):
             return jsonify(result[0]), result[1]
         return jsonify(result)
+
     except Exception as e:
         logger.error(f"Error in send_otp route: {str(e)}")
         return jsonify({'error': str(e)}), 500
-
-async def get_session_string(client):
-    if client.is_connected() and await client.is_user_authorized():
-        return StringSession.save(client.session)
-    return None
 
 @app.route('/verify-otp', methods=['POST'])
 def verify_otp():
@@ -148,6 +145,8 @@ def verify_otp():
     temp_session_path = session.get('temp_session_path')
     otp = request.form.get('otp')
     password = request.form.get('password')
+
+    logger.info(f"Verifying OTP - Current session data: {dict(session)}")
 
     if not phone or not phone_code_hash or not temp_session_path:
         logger.error("Missing session data")
@@ -159,25 +158,20 @@ def verify_otp():
 
     try:
         async def verify():
-            logger.info(f"Verifying OTP for phone: {phone}")
+            logger.info(f"Starting verification for phone: {phone}")
             client = TelegramClient(temp_session_path, API_ID, API_HASH)
 
             try:
                 await client.connect()
-                logger.info("Connected to Telegram")
-
                 try:
                     await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
-                    logger.info("Sign in successful")
                 except SessionPasswordNeededError:
-                    logger.info("2FA password needed")
                     if not password:
                         if client.is_connected():
                             await client.disconnect()
                         return {'error': 'two_factor_needed', 'message': 'Two-factor authentication is required'}
                     try:
                         await client.sign_in(password=password)
-                        logger.info("2FA verification successful")
                     except Exception as e:
                         logger.error(f"2FA verification failed: {e}")
                         if client.is_connected():
@@ -185,37 +179,33 @@ def verify_otp():
                         return {'error': 'Invalid 2FA password'}, 400
 
                 if await client.is_user_authorized():
-                    session_string = await get_session_string(client)
-                    if session_string:
-                        user_id = get_user_id(phone)
-                        conn = get_db()
-                        with conn.cursor() as cur:
-                            cur.execute("""
-                                INSERT INTO user_sessions (user_id, session_string)
-                                VALUES (%s, %s)
-                                ON CONFLICT (user_id) 
-                                DO UPDATE SET session_string = EXCLUDED.session_string
-                            """, (user_id, session_string))
-                            conn.commit()
-                            logger.info("Saved session string to database")
+                    session_string = StringSession.save(client.session)
+                    user_id = get_user_id(phone)
 
-                        # Set session data
-                        session.clear()
-                        session['user_id'] = user_id
-                        session['phone'] = phone
-                        session.permanent = True
-                        logger.info(f"Session set - user_id: {user_id}, phone: {phone}")
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO user_sessions (user_id, session_string)
+                            VALUES (%s, %s)
+                            ON CONFLICT (user_id) 
+                            DO UPDATE SET session_string = EXCLUDED.session_string
+                        """, (user_id, session_string))
+                        conn.commit()
+                        logger.info("Saved session string to database")
 
-                        if client.is_connected():
-                            await client.disconnect()
-                        if os.path.exists(temp_session_path):
-                            os.remove(temp_session_path)
+                    # Set session data
+                    session.clear()
+                    session.permanent = True
+                    session['user_id'] = user_id
+                    session['phone'] = phone
+                    logger.info(f"Login successful - New session data: {dict(session)}")
 
-                        return {'message': 'Login successful', 'redirect': url_for('dashboard')}
-                    else:
-                        if client.is_connected():
-                            await client.disconnect()
-                        return {'error': 'Failed to get session string'}, 500
+                    if client.is_connected():
+                        await client.disconnect()
+                    if os.path.exists(temp_session_path):
+                        os.remove(temp_session_path)
+
+                    return {'message': 'Login successful', 'redirect': url_for('dashboard')}
                 else:
                     if client.is_connected():
                         await client.disconnect()
@@ -231,6 +221,7 @@ def verify_otp():
         if isinstance(result, tuple):
             return jsonify(result[0]), result[1]
         return jsonify(result)
+
     except Exception as e:
         logger.error(f"Error in verify_otp route: {str(e)}")
         if temp_session_path and os.path.exists(temp_session_path):
@@ -241,7 +232,7 @@ def verify_otp():
 @login_required
 def dashboard():
     try:
-        logger.info(f"Loading dashboard for user_id: {session.get('user_id')}")
+        logger.info(f"Dashboard access - Session data: {dict(session)}")
         channels = asyncio.run(get_channels())
         return render_template('dashboard.html', channels=channels)
     except Exception as e:
