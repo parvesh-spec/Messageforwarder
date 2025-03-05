@@ -22,8 +22,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
-
-# Configure session
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
 # Initialize Flask-Login
@@ -70,14 +68,14 @@ def close_db(e=None):
         db.close()
 
 def get_user_id(phone):
-    db = get_db()
-    with db.cursor() as cur:
+    conn = get_db()
+    with conn.cursor() as cur:
         cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
         result = cur.fetchone()
         if result:
             return result[0]
         cur.execute("INSERT INTO users (phone) VALUES (%s) RETURNING id", (phone,))
-        db.commit()
+        conn.commit()
         return cur.fetchone()[0]
 
 @app.route('/')
@@ -89,6 +87,7 @@ def index():
 @app.route('/login')
 def login():
     if current_user.is_authenticated:
+        logger.info(f"User {current_user.phone} already logged in, redirecting to dashboard")
         return redirect(url_for('dashboard'))
     return render_template('login.html')
 
@@ -188,10 +187,7 @@ def verify_otp():
                     if not password:
                         if client.is_connected():
                             await client.disconnect()
-                        return {
-                            'error': 'two_factor_needed',
-                            'message': 'Two-factor authentication is required'
-                        }
+                        return {'error': 'two_factor_needed', 'message': 'Two-factor authentication is required'}
                     try:
                         await client.sign_in(password=password)
                         logger.info("2FA verification successful")
@@ -205,27 +201,32 @@ def verify_otp():
                     session_string = await get_session_string(client)
                     if session_string:
                         user_id = get_user_id(phone)
-                        db = get_db()
-                        with db.cursor() as cur:
+                        conn = get_db()
+                        with conn.cursor() as cur:
                             cur.execute("""
                                 INSERT INTO user_sessions (user_id, session_string)
                                 VALUES (%s, %s)
                                 ON CONFLICT (user_id) 
                                 DO UPDATE SET session_string = EXCLUDED.session_string
                             """, (user_id, session_string))
-                            db.commit()
+                            conn.commit()
                             logger.info("Saved session string to database")
 
-                    # Create and login user
-                    user = User(user_id, phone)
-                    login_user(user, remember=True)
-                    logger.info(f"User logged in successfully - ID: {user_id}, Phone: {phone}")
+                        # Create and login user with Flask-Login
+                        user = User(user_id, phone)
+                        login_user(user, remember=True)
+                        logger.info(f"User logged in successfully - ID: {user_id}, Phone: {phone}")
 
-                    if client.is_connected():
-                        await client.disconnect()
-                    if os.path.exists(temp_session_path):
-                        os.remove(temp_session_path)
-                    return {'message': 'Login successful', 'redirect': url_for('dashboard')}
+                        if client.is_connected():
+                            await client.disconnect()
+                        if os.path.exists(temp_session_path):
+                            os.remove(temp_session_path)
+                        return {'message': 'Login successful', 'redirect': url_for('dashboard')}
+                    else:
+                        if client.is_connected():
+                            await client.disconnect()
+                        return {'error': 'Failed to get session string'}, 500
+
                 else:
                     if client.is_connected():
                         await client.disconnect()
@@ -271,15 +272,15 @@ def add_replacement():
 
         user_id = get_user_id(user_phone)
 
-        db = get_db()
-        with db.cursor() as cur:
+        conn = get_db()
+        with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO text_replacements (user_id, original_text, replacement_text)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (user_id, original_text) 
                 DO UPDATE SET replacement_text = EXCLUDED.replacement_text
             """, (user_id, original, replacement))
-            db.commit()
+            conn.commit()
 
         import main
         main.load_user_replacements(user_id)
@@ -296,8 +297,8 @@ def get_replacements():
         user_phone = session.get('user_phone')
         user_id = get_user_id(user_phone)
 
-        db = get_db()
-        with db.cursor(cursor_factory=DictCursor) as cur:
+        conn = get_db()
+        with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
                 SELECT original_text, replacement_text 
                 FROM text_replacements 
@@ -322,14 +323,14 @@ def remove_replacement():
 
         user_id = get_user_id(user_phone)
 
-        db = get_db()
-        with db.cursor() as cur:
+        conn = get_db()
+        with conn.cursor() as cur:
             cur.execute("""
                 DELETE FROM text_replacements 
                 WHERE user_id = %s AND original_text = %s
             """, (user_id, original))
             deleted = cur.rowcount > 0
-            db.commit()
+            conn.commit()
 
         if deleted:
             import main
@@ -384,8 +385,8 @@ def update_channels():
         return jsonify({'error': str(e)}), 500
 
 def get_user_channel_config(user_id):
-    db = get_db()
-    with db.cursor(cursor_factory=DictCursor) as cur:
+    conn = get_db()
+    with conn.cursor(cursor_factory=DictCursor) as cur:
         cur.execute("""
             SELECT source_channel, destination_channel 
             FROM channel_configs 
@@ -394,8 +395,8 @@ def get_user_channel_config(user_id):
         return cur.fetchone()
 
 def save_user_channel_config(user_id, source_channel, destination_channel):
-    db = get_db()
-    with db.cursor() as cur:
+    conn = get_db()
+    with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO channel_configs (user_id, source_channel, destination_channel)
             VALUES (%s, %s, %s)
@@ -404,7 +405,7 @@ def save_user_channel_config(user_id, source_channel, destination_channel):
                 source_channel = EXCLUDED.source_channel,
                 destination_channel = EXCLUDED.destination_channel
         """, (user_id, source_channel, destination_channel))
-        db.commit()
+        conn.commit()
 
 @app.route('/clear-replacements', methods=['POST'])
 @login_required
@@ -413,10 +414,10 @@ def clear_replacements():
         user_phone = session.get('user_phone')
         user_id = get_user_id(user_phone)
 
-        db = get_db()
-        with db.cursor() as cur:
+        conn = get_db()
+        with conn.cursor() as cur:
             cur.execute("DELETE FROM text_replacements WHERE user_id = %s", (user_id,))
-            db.commit()
+            conn.commit()
 
         import main
         main.TEXT_REPLACEMENTS = {}  

@@ -49,10 +49,8 @@
                 return error.response.json().then(data => {
                     showMessage(data.error || defaultMessage, true);
                 });
-            } else if (error.message) {
-                showMessage(error.message, true);
             } else {
-                showMessage(defaultMessage, true);
+                showMessage(error.message || defaultMessage, true);
             }
         }
 
@@ -107,7 +105,9 @@
                     showMessage(data.error, true);
                 } else if (data.message === 'Login successful' && data.redirect) {
                     showMessage('Login successful! Redirecting to dashboard...');
-                    window.location.replace(data.redirect);
+                    setTimeout(() => {
+                        window.location.replace(data.redirect);
+                    }, 1000);
                 }
             })
             .catch(error => handleApiError(error));
@@ -131,7 +131,9 @@
                     showMessage(data.error, true);
                 } else if (data.message === 'Login successful' && data.redirect) {
                     showMessage('Login successful! Redirecting to dashboard...');
-                    window.location.replace(data.redirect);
+                    setTimeout(() => {
+                        window.location.replace(data.redirect);
+                    }, 1000);
                 }
             })
             .catch(error => handleApiError(error));
