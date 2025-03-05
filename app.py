@@ -54,10 +54,6 @@ def close_db(e=None):
 # Add healthcheck endpoints
 @app.route('/')
 def root():
-    return jsonify({'status': 'ok'}), 200
-
-@app.route('/health')
-def health_check():
     try:
         # Check database connection
         db = get_db()
@@ -67,6 +63,10 @@ def health_check():
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
         return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
+
+@app.route('/health')
+def health_check():
+    return root()
 
 def login_required(f):
     @wraps(f)
@@ -89,7 +89,7 @@ def get_user_id(phone):
         db.commit()
         return cur.fetchone()[0]
 
-@app.route('/')
+@app.route('/login')
 def login():
     if session.get('logged_in') and session.get('user_phone'):
         logger.info(f"User {session.get('user_phone')} already logged in, redirecting to dashboard")
