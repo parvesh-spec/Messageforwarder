@@ -14,3 +14,11 @@ flask
 flask-session
 psycopg2-binary
 telethon
+asgiref
+flask
+flask-session
+flask-sqlalchemy
+psycopg2-binary
+telethon
+flask
+gunicorn

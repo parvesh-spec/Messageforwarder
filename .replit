@@ -4,7 +4,7 @@ modules = ["python-3.11", "postgresql-16"]
 channel = "stable-24_05"
 
 [workflows]
-runButton = "Web Server"
+runButton = "Project"
 
 [[workflows.workflow]]
 name = "Project"
@@ -31,7 +31,7 @@ task = "packager.installForAll"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python app.py"
+args = "gunicorn app:app --bind 0.0.0.0:5000"
 waitForPort = 5000
 
 [[workflows.workflow]]
