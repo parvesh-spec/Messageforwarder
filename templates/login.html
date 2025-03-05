@@ -30,8 +30,6 @@
     </div>
 
     <script>
-        let currentPhone = '';
-
         function showMessage(message, isError = false) {
             const messageDiv = document.getElementById('message');
             messageDiv.innerHTML = message;
@@ -39,109 +37,95 @@
             console.log(`${isError ? 'Error' : 'Info'}: ${message}`);
         }
 
-        function resetForms() {
-            document.getElementById('login-form').style.display = 'block';
-            document.getElementById('otp-form').style.display = 'none';
-            document.getElementById('twofa-form').style.display = 'none';
-            document.getElementById('message').innerHTML = '';
-        }
-
-        function handleApiError(error, defaultMessage = 'An error occurred. Please try again.') {
-            console.error('API Error:', error);
-            let errorMessage = defaultMessage;
-
-            if (error.response) {
-                return error.response.json().then(data => {
-                    showMessage(data.error || defaultMessage, true);
-                });
-            } else if (error.message) {
-                errorMessage = error.message;
-            }
-
-            showMessage(errorMessage, true);
-        }
-
-        function sendOTP() {
+        async function sendOTP() {
             const phone = document.getElementById('phone').value;
             if (!phone.startsWith('+91')) {
                 showMessage('Phone number must start with +91', true);
                 return;
             }
 
-            currentPhone = phone;
             showMessage('Sending OTP request...');
+            try {
+                const response = await fetch('/send-otp', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `phone=${encodeURIComponent(phone)}`
+                });
 
-            fetch('/send-otp', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: `phone=${encodeURIComponent(phone)}`
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.error) {
-                    showMessage(data.error, true);
-                } else {
-                    document.getElementById('login-form').style.display = 'none';
-                    document.getElementById('otp-form').style.display = 'block';
-                    showMessage('OTP sent to your Telegram account');
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to send OTP');
                 }
-            })
-            .catch(error => handleApiError(error));
+
+                document.getElementById('login-form').style.display = 'none';
+                document.getElementById('otp-form').style.display = 'block';
+                showMessage('OTP sent to your Telegram account');
+            } catch (error) {
+                showMessage(error.message || 'Failed to send OTP', true);
+                console.error('Error:', error);
+            }
         }
 
-        function verifyOTP() {
+        async function verifyOTP() {
             const otp = document.getElementById('otp').value;
             showMessage('Verifying OTP...');
 
-            fetch('/verify-otp', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: `otp=${encodeURIComponent(otp)}`
-            })
-            .then(response => response.json())
-            .then(data => {
+            try {
+                const response = await fetch('/verify-otp', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `otp=${encodeURIComponent(otp)}`
+                });
+
+                const data = await response.json();
+
                 if (data.error === 'two_factor_needed') {
                     document.getElementById('otp-form').style.display = 'none';
                     document.getElementById('twofa-form').style.display = 'block';
                     showMessage('Please enter your 2FA password');
-                } else if (data.error) {
-                    showMessage(data.error, true);
+                } else if (!response.ok) {
+                    throw new Error(data.error || 'Failed to verify OTP');
                 } else if (data.message === 'Login successful') {
                     showMessage('Login successful! Redirecting to dashboard...');
-                    // Force redirect to dashboard after successful login
                     window.location.replace('/dashboard');
                 }
-            })
-            .catch(error => handleApiError(error));
+            } catch (error) {
+                showMessage(error.message || 'Failed to verify OTP', true);
+                console.error('Error:', error);
+            }
         }
 
-        function verify2FA() {
+        async function verify2FA() {
             const otp = document.getElementById('otp').value;
             const password = document.getElementById('password').value;
             showMessage('Verifying 2FA...');
 
-            fetch('/verify-otp', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.error) {
-                    showMessage(data.error, true);
+            try {
+                const response = await fetch('/verify-otp', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to verify 2FA');
                 } else if (data.message === 'Login successful') {
                     showMessage('Login successful! Redirecting to dashboard...');
-                    // Force redirect to dashboard after successful login
                     window.location.replace('/dashboard');
                 }
-            })
-            .catch(error => handleApiError(error));
+            } catch (error) {
+                showMessage(error.message || 'Failed to verify 2FA', true);
+                console.error('Error:', error);
+            }
         }
 
         // Add event listeners for Enter key

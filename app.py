@@ -1,10 +1,15 @@
 import os
 import logging
-from flask import Flask, render_template, redirect, url_for, session, jsonify
+from flask import Flask, render_template, redirect, url_for, session, jsonify, request
 from flask_login import LoginManager, login_required, UserMixin, current_user
 import psycopg2
 from psycopg2.extras import DictCursor
 from datetime import timedelta
+import asyncio
+from telethon import TelegramClient
+from telethon.errors import PhoneNumberInvalidError
+from telethon.sessions import StringSession
+
 
 # Configure logging
 logging.basicConfig(
@@ -17,6 +22,9 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+app.config['API_ID'] = os.getenv('TELEGRAM_API_ID') #Add this line
+app.config['API_HASH'] = os.getenv('TELEGRAM_API_HASH') #Add this line
+
 
 # Initialize login manager
 login_manager = LoginManager()
@@ -123,6 +131,55 @@ def health_check():
         'status': 'degraded',
         'message': 'Service is running'
     }), 200
+
+@app.route('/send-otp', methods=['POST'])
+def send_otp():
+    """Handle OTP sending request"""
+    try:
+        phone = request.form.get('phone')
+        if not phone:
+            return jsonify({'error': 'Phone number is required'}), 400
+
+        if not phone.startswith('+91'):
+            return jsonify({'error': 'Phone number must start with +91'}), 400
+
+        try:
+            async def send_code():
+                client = TelegramClient(
+                    StringSession(), 
+                    app.config['API_ID'], 
+                    app.config['API_HASH']
+                )
+
+                try:
+                    await client.connect()
+                    # Send code request
+                    sent = await client.send_code_request(phone)
+
+                    # Store in session
+                    session['phone'] = phone
+                    session['phone_code_hash'] = sent.phone_code_hash
+
+                    return jsonify({'message': 'OTP sent successfully'})
+
+                except PhoneNumberInvalidError:
+                    return jsonify({'error': 'Invalid phone number'}), 400
+                except Exception as e:
+                    logger.error(f"Error in send_code: {str(e)}")
+                    return jsonify({'error': 'Failed to send OTP'}), 500
+                finally:
+                    if client and client.is_connected():
+                        await client.disconnect()
+
+            return asyncio.run(send_code())
+
+        except Exception as e:
+            logger.error(f"Error in send_otp route: {str(e)}")
+            return jsonify({'error': 'Internal server error'}), 500
+
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        return jsonify({'error': 'Bad request'}), 400
 
 @app.errorhandler(404)
 def not_found_error(error):
