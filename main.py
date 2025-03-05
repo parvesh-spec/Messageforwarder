@@ -5,9 +5,7 @@ from threading import Thread
 import psycopg2
 from psycopg2.extras import DictCursor
 import os
-import tempfile
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 import asyncio
 
@@ -18,7 +16,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Database connection with better error handling and connection pooling
+# Database connection with better error handling
 def get_db():
     try:
         conn = psycopg2.connect(
@@ -30,7 +28,7 @@ def get_db():
         return conn
     except Exception as e:
         logger.error(f"Database connection error: {str(e)}")
-        raise
+        return None
 
 # Message ID mapping dictionary
 MESSAGE_IDS = {}
@@ -43,9 +41,27 @@ API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 SOURCE_CHANNEL = None
 DESTINATION_CHANNEL = None
 
-# Text replacement dictionary - per user
-TEXT_REPLACEMENTS = {}
-CURRENT_USER_ID = None
+async def get_user_session():
+    """Get session string from database for first user"""
+    try:
+        db = get_db()
+        if not db:
+            logger.error("Could not connect to database")
+            return None
+
+        with db.cursor(cursor_factory=DictCursor) as cur:
+            # Get first active user session
+            cur.execute("""
+                SELECT us.session_string 
+                FROM user_sessions us 
+                JOIN users u ON us.user_id = u.id 
+                LIMIT 1
+            """)
+            result = cur.fetchone()
+            return result['session_string'] if result else None
+    except Exception as e:
+        logger.error(f"Error getting user session: {str(e)}")
+        return None
 
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
@@ -71,9 +87,11 @@ def load_channel_config():
                 else:
                     logger.warning("No channel configuration found")
         finally:
-            conn.close()
+            if conn:
+                conn.close()
     except Exception as e:
         logger.error(f"Error loading channel configuration: {str(e)}")
+
 
 def load_user_replacements(user_id):
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
@@ -104,7 +122,8 @@ def load_user_replacements(user_id):
                 else:
                     logger.info(f"Successfully loaded {len(TEXT_REPLACEMENTS)} replacements")
         finally:
-            conn.close()
+            if conn:
+                conn.close()
     except Exception as e:
         logger.error(f"Error loading text replacements for user {user_id}: {str(e)}")
         logger.error(f"Error type: {type(e).__name__}")
@@ -121,73 +140,34 @@ def config_monitor():
             logger.error(f"Error in config monitor: {str(e)}")
             time.sleep(1)  # Wait a bit before retrying on error
 
-async def get_user_id_from_db():
-    """Get first user ID from database to use for initial configuration"""
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users LIMIT 1")
-            result = cur.fetchone()
-            if result:
-                return result[0]
-    except Exception as e:
-        logger.error(f"Error getting initial user ID: {str(e)}")
-    return None
-
-async def get_session_string_from_db(user_id):
-    """Get saved session string from database"""
-    try:
-        conn = get_db()
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("""
-                SELECT session_string 
-                FROM user_sessions 
-                WHERE user_id = %s
-            """, (user_id,))
-            result = cur.fetchone()
-            if result:
-                return result['session_string']
-            return None
-    except Exception as e:
-        logger.error(f"Error getting session string: {str(e)}")
-        return None
-    finally:
-        conn.close()
+# Text replacement dictionary - per user
+TEXT_REPLACEMENTS = {}
+CURRENT_USER_ID = None
 
 async def main():
     try:
-        # Get initial user ID for configuration
-        global CURRENT_USER_ID
-        CURRENT_USER_ID = await get_user_id_from_db()
-        if not CURRENT_USER_ID:
-            logger.warning("No users found in database")
-            return
-
-        # Start config monitoring in background
-        Thread(target=config_monitor, daemon=True).start()
-        logger.info("Started channel configuration monitor")
-
-        # Get session string from database
-        session_string = await get_session_string_from_db(CURRENT_USER_ID)
+        # Get session string
+        session_string = await get_user_session()
         if not session_string:
-            logger.error("No session string found in database. Please authenticate through web interface.")
+            logger.error("No session string found. Please authenticate through web interface first.")
             return
 
-        # Start client with session string
-        logger.debug("Starting Telegram client...")
+        # Initialize client with session
         client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
         try:
             await client.connect()
-            logger.info("Client connected successfully")
 
             if not await client.is_user_authorized():
-                logger.error("Bot is not authorized. Please run the web interface first to authenticate.")
+                logger.error("Bot is not authorized. Please authenticate through web interface.")
                 return
 
-            # Get information about yourself
             me = await client.get_me()
             logger.info(f"Successfully logged in as {me.first_name} (ID: {me.id})")
+            
+            # Start config monitoring in background
+            Thread(target=config_monitor, daemon=True).start()
+            logger.info("Started channel configuration monitor")
 
             @client.on(events.NewMessage())
             async def forward_handler(event):
@@ -359,7 +339,8 @@ async def main():
 
         except Exception as e:
             logger.error(f"Failed to start client: {str(e)}")
-            return
+            if client and client.is_connected():
+                await client.disconnect()
 
     except Exception as e:
         logger.error(f"Critical error in main function: {str(e)}")
