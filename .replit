@@ -4,7 +4,7 @@ modules = ["python-3.11", "postgresql-16"]
 channel = "stable-24_05"
 
 [workflows]
-runButton = "Project"
+runButton = "Web Server"
 
 [[workflows.workflow]]
 name = "Project"
@@ -47,6 +47,14 @@ task = "packager.installForAll"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python main.py"
+
+[[workflows.workflow]]
+name = "Web Server"
+author = 39735059
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "hypercorn app:app --bind 0.0.0.0:5000"
 
 [deployment]
 run = ["sh", "-c", "hypercorn app:app --bind 0.0.0.0:5000"]
