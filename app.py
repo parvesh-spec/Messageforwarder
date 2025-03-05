@@ -70,10 +70,6 @@ def health_check():
         logger.error(f"Health check failed: {str(e)}")
         return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
-@app.route('/health')
-def health_check():
-    return root()
-
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
