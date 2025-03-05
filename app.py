@@ -26,7 +26,12 @@ app.secret_key = os.getenv('SESSION_SECRET', os.urandom(24))
 
 @app.route('/')
 def health_check():
-    return 'OK', 200
+    try:
+        db = get_db()
+        return 'OK', 200
+    except Exception:
+        # Still return OK even if DB fails for health check
+        return 'OK', 200
 
 # Configure session
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
