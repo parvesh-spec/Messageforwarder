@@ -42,7 +42,9 @@ db_lock = threading.Lock()
 def get_db():
     """Get database connection from pool"""
     try:
-        return db_pool.getconn()
+        conn = db_pool.getconn()
+        conn.autocommit = True
+        return conn
     except Exception as e:
         logger.error(f"❌ Database connection error: {str(e)}")
         return None
@@ -128,13 +130,12 @@ def apply_text_replacements(text):
 async def setup_client():
     """Initialize Telegram client with session string"""
     global client
-
     try:
         if not SESSION_STRING:
             logger.error("❌ No session string provided")
             return False
 
-        logger.info("🔄 Starting Telegram client...")
+        # Create new client instance with session
         client = TelegramClient(
             StringSession(SESSION_STRING),
             API_ID,
@@ -144,11 +145,12 @@ async def setup_client():
             app_version="1.0"
         )
 
-        if not client.is_connected():
-            await client.connect()
-
+        # Connect and verify authorization
+        await client.connect()
         if not await client.is_user_authorized():
             logger.error("❌ Bot not authorized")
+            await client.disconnect()
+            client = None
             return False
 
         me = await client.get_me()
@@ -157,12 +159,17 @@ async def setup_client():
 
     except Exception as e:
         logger.error(f"❌ Client setup error: {str(e)}")
+        if client:
+            try:
+                await client.disconnect()
+            except:
+                pass
+            client = None
         return False
 
 async def setup_handlers():
     """Set up message handlers"""
     global client
-
     try:
         @client.on(events.NewMessage())
         async def handle_new_message(event):
@@ -253,7 +260,7 @@ async def setup_handlers():
 
 async def main():
     """Main bot function"""
-    global client
+    global client, SOURCE_CHANNEL, DESTINATION_CHANNEL
 
     try:
         # Setup client
@@ -279,16 +286,47 @@ async def main():
         logger.info(f"📱 Destination: {DESTINATION_CHANNEL}")
         logger.info(f"📚 Replacements: {len(TEXT_REPLACEMENTS)}")
 
-        await client.run_until_disconnected()
-        return True
+        # Keep the bot running
+        try:
+            while SESSION_STRING:  # Only run while we have a valid session
+                # Check client connection
+                if not client or not client.is_connected():
+                    logger.error("❌ Client disconnected, attempting to reconnect")
+                    if not await setup_client():
+                        break
+
+                # Reload configuration and replacements
+                if load_channel_config():
+                    logger.info("✅ Channel config refreshed")
+                if load_replacements():
+                    logger.info("✅ Replacements refreshed")
+
+                # Wait before next check
+                await asyncio.sleep(30)  # Check every 30 seconds
+
+        except KeyboardInterrupt:
+            logger.info("👋 Bot stopped by user")
+            return True
+        except asyncio.CancelledError:
+            logger.info("👋 Bot stopping...")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Runtime error: {str(e)}")
+            return False
 
     except Exception as e:
         logger.error(f"❌ Bot error: {str(e)}")
         return False
 
     finally:
-        if client and client.is_connected():
-            await client.disconnect()
+        if client:
+            try:
+                if client.is_connected():
+                    await client.disconnect()
+            except:
+                pass
+            client = None
+        return True
 
 if __name__ == "__main__":
     try:

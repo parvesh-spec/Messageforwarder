@@ -61,26 +61,36 @@ class EventLoopManager:
                     except RuntimeError:
                         cls._loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(cls._loop)
+                        logger.info("✅ Created new event loop")
         return cls._loop
-
-    @classmethod
-    def get_client(cls):
-        return cls._client
-
-    @classmethod
-    def set_client(cls, client):
-        cls._client = client
 
     @classmethod
     def reset(cls):
         with cls._lock:
-            if cls._loop:
-                try:
+            try:
+                if cls._loop and cls._loop.is_running():
+                    cls._loop.stop()
+                if cls._loop:
                     cls._loop.close()
-                except:
-                    pass
+            except:
+                pass
+            finally:
                 cls._loop = None
-            cls._client = None
+                cls._client = None
+                logger.info("✅ Reset event loop")
+
+    @classmethod
+    def ensure_loop(cls):
+        """Ensure we have a valid event loop"""
+        try:
+            loop = cls.get_loop()
+            if not loop.is_running():
+                asyncio.set_event_loop(loop)
+            return loop
+        except Exception as e:
+            logger.error(f"❌ Loop setup error: {str(e)}")
+            cls.reset()
+            return cls.get_loop()
 
 # Database connection context manager
 @contextmanager
@@ -118,52 +128,75 @@ class TelegramManager:
         self.api_hash = api_hash
         self._lock = threading.Lock()
         self._client = None
+        self._session_string = None
 
     async def get_auth_client(self):
         """Get a client for authentication or dashboard operations"""
         with self._lock:
             try:
-                # Create new client for each auth request
-                session_string = session.get('session_string')
-
-                if self._client and self._client.is_connected():
+                # Check if we have a valid session
+                if self._client and self._client.is_connected() and await self._client.is_user_authorized():
                     return self._client
 
-                client = TelegramClient(
-                    StringSession(session_string) if session_string else StringSession(),
-                    self.api_id,
-                    self.api_hash,
-                    device_model="Replit Web",
-                    system_version="Linux",
-                    app_version="1.0",
-                    loop=EventLoopManager.get_loop()
-                )
+                # Get current session string
+                session_string = session.get('session_string')
 
-                if not client.is_connected():
-                    await client.connect()
+                # If session string changed, cleanup old client
+                if session_string != self._session_string:
+                    await self._cleanup_client()
+                    self._session_string = session_string
 
-                # If session string exists but client is not authorized, start fresh
-                if session_string and not await client.is_user_authorized():
+                # Create new client if needed
+                if not self._client:
+                    self._client = TelegramClient(
+                        StringSession(session_string) if session_string else StringSession(),
+                        self.api_id,
+                        self.api_hash,
+                        device_model="Replit Web",
+                        system_version="Linux",
+                        app_version="1.0",
+                        loop=EventLoopManager.ensure_loop()
+                    )
+
+                # Connect if needed
+                if not self._client.is_connected():
+                    await self._client.connect()
+
+                # Verify authorization if we have a session
+                if session_string and not await self._client.is_user_authorized():
+                    # Session expired, clear it
                     session.pop('session_string', None)
-                    await client.disconnect()
+                    self._session_string = None
+                    await self._cleanup_client()
 
-                    client = TelegramClient(
+                    # Create fresh client
+                    self._client = TelegramClient(
                         StringSession(),
                         self.api_id,
                         self.api_hash,
                         device_model="Replit Web",
                         system_version="Linux",
                         app_version="1.0",
-                        loop=EventLoopManager.get_loop()
+                        loop=EventLoopManager.ensure_loop()
                     )
-                    await client.connect()
+                    await self._client.connect()
 
-                self._client = client
-                return client
+                return self._client
 
             except Exception as e:
                 logger.error(f"❌ Client creation error: {str(e)}")
+                await self._cleanup_client()
                 raise
+
+    async def _cleanup_client(self):
+        """Internal method to cleanup client"""
+        if self._client:
+            try:
+                if self._client.is_connected():
+                    await self._client.disconnect()
+            except:
+                pass
+            self._client = None
 
     def cleanup(self):
         """Clean up resources"""
@@ -176,7 +209,13 @@ class TelegramManager:
                 except:
                     pass
                 self._client = None
+            self._session_string = None
             EventLoopManager.reset()
+
+    @property
+    def current_session(self):
+        """Get current session string"""
+        return self._session_string
 
 # Create global Telegram manager
 telegram_manager = TelegramManager(
@@ -392,10 +431,12 @@ def toggle_bot():
         destination = session.get('dest_channel')
 
         if not source or not destination:
+            logger.error("❌ Missing channel configuration")
             return jsonify({'error': 'Configure channels first'}), 400
 
         session_string = session.get('session_string')
         if not session_string:
+            logger.error("❌ No session string found")
             return jsonify({'error': 'Session expired, please login again'}), 401
 
         import main
@@ -409,21 +450,31 @@ def toggle_bot():
                 # Start bot in a daemon thread
                 def start_bot():
                     try:
+                        # Create new event loop for bot thread
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
+
                         try:
                             loop.run_until_complete(main.main())
                         except Exception as e:
                             logger.error(f"❌ Bot startup error: {str(e)}")
                         finally:
-                            if loop.is_running():
-                                loop.stop()
-                            loop.close()
+                            try:
+                                # Cleanup loop
+                                if loop.is_running():
+                                    loop.stop()
+                                loop.close()
+                            except:
+                                pass
                     except Exception as e:
                         logger.error(f"❌ Thread error: {str(e)}")
 
-                # Ensure any previous bot thread is stopped
-                session['bot_running'] = False
+                # Stop any existing bot instance
+                if session.get('bot_running'):
+                    main.SESSION_STRING = None
+                    main.SOURCE_CHANNEL = None
+                    main.DESTINATION_CHANNEL = None
+                    EventLoopManager.reset()
 
                 # Start new bot thread
                 bot_thread = threading.Thread(target=start_bot, daemon=True)
@@ -446,6 +497,7 @@ def toggle_bot():
                 main.SOURCE_CHANNEL = None
                 main.DESTINATION_CHANNEL = None
                 session['bot_running'] = False
+                EventLoopManager.reset()
                 logger.info("✅ Bot stopped successfully")
 
                 return jsonify({
@@ -464,6 +516,78 @@ def toggle_bot():
 @app.route('/static/<path:filename>')
 def serve_static(filename):
     return send_from_directory('static', filename)
+
+
+@app.route('/get-replacements')
+@login_required
+def get_replacements():
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT original_text, replacement_text 
+                    FROM text_replacements
+                    ORDER BY id DESC
+                """)
+                replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
+                return jsonify(replacements)
+    except Exception as e:
+        logger.error(f"❌ Get replacements error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/add-replacement', methods=['POST'])
+@login_required
+def add_replacement():
+    try:
+        original = request.form.get('original')
+        replacement = request.form.get('replacement')
+
+        if not original or not replacement:
+            return jsonify({'error': 'Both original and replacement text required'}), 400
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO text_replacements (original_text, replacement_text)
+                    VALUES (%s, %s)
+                """, (original, replacement))
+
+        return jsonify({'message': 'Replacement added successfully'})
+    except Exception as e:
+        logger.error(f"❌ Add replacement error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/remove-replacement', methods=['POST'])
+@login_required
+def remove_replacement():
+    try:
+        original = request.form.get('original')
+        if not original:
+            return jsonify({'error': 'Original text required'}), 400
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM text_replacements 
+                    WHERE original_text = %s
+                """, (original,))
+
+        return jsonify({'message': 'Replacement removed successfully'})
+    except Exception as e:
+        logger.error(f"❌ Remove replacement error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/clear-replacements', methods=['POST'])
+@login_required
+def clear_replacements():
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM text_replacements")
+        return jsonify({'message': 'All replacements cleared'})
+    except Exception as e:
+        logger.error(f"❌ Clear replacements error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
