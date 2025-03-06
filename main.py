@@ -94,19 +94,32 @@ def load_user_replacements(user_id):
                 logger.info(f"📚 Found {len(TEXT_REPLACEMENTS)} replacements")
                 for original, replacement in TEXT_REPLACEMENTS.items():
                     logger.info(f"📝 Loaded: '{original}' → '{replacement}'")
+
+                # Test a sample text to verify replacements work
+                test_text = "hello what are you doing?"
+                logger.info(f"🧪 Testing replacements with: '{test_text}'")
+                test_result = apply_text_replacements(test_text)
+                logger.info(f"🧪 Test result: '{test_result}'")
+
+                return True
         finally:
             conn.close()
     except Exception as e:
         logger.error(f"❌ Error loading replacements: {str(e)}")
         TEXT_REPLACEMENTS = {}
+        return False
 
 def apply_text_replacements(text):
-    if not text or not TEXT_REPLACEMENTS:
-        logger.info(f"❌ No replacements possible - Text: '{text}', Replacements: {bool(TEXT_REPLACEMENTS)}")
+    if not text:
+        logger.info(f"❌ Empty text, no replacements needed")
+        return text
+
+    if not TEXT_REPLACEMENTS:
+        logger.info(f"❌ No replacements available")
         return text
 
     logger.info(f"🔄 Processing text: '{text}'")
-    logger.info(f"📚 Using {len(TEXT_REPLACEMENTS)} replacements")
+    logger.info(f"📚 Using replacements: {TEXT_REPLACEMENTS}")
 
     result = text
     for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
@@ -116,15 +129,22 @@ def apply_text_replacements(text):
             logger.info(f"✅ Replaced '{original}' with '{replacement}'")
             logger.info(f"📝 Changed: '{old_text}' → '{result}'")
 
+    logger.info(f"📄 Final text after replacements: '{result}'")
     return result
 
 async def forward_message(client, event, source_id, dest_id):
     try:
         # Get message text and apply replacements
         message_text = event.message.text if event.message.text else ""
+
+        logger.info(f"📥 Processing message from {source_id}")
+        logger.info(f"💬 Original text: '{message_text}'")
+        logger.info(f"👤 Current user ID: {CURRENT_USER_ID}")
+        logger.info(f"📚 Available replacements: {TEXT_REPLACEMENTS}")
+
         if message_text:
             message_text = apply_text_replacements(message_text)
-            logger.info(f"📝 Final message after replacements: '{message_text}'")
+            logger.info(f"📝 Final text after replacements: '{message_text}'")
 
         # Send to destination
         dest_channel = await client.get_entity(int(dest_id))
@@ -159,6 +179,7 @@ async def main():
 
         try:
             await client.connect()
+            logger.info("✅ Connected to Telegram")
 
             # Check authorization
             if not await client.is_user_authorized():
@@ -187,7 +208,10 @@ async def main():
                 user_id = get_user_id_by_phone(session_phone)
                 if user_id:
                     logger.info(f"👤 Found user ID {user_id}")
-                    load_user_replacements(user_id)
+                    if load_user_replacements(user_id):
+                        logger.info("✅ Successfully loaded text replacements")
+                    else:
+                        logger.warning("❌ Failed to load text replacements")
                 else:
                     logger.warning(f"❌ No user ID for {session_phone}")
 
@@ -198,26 +222,27 @@ async def main():
             async def forward_handler(event):
                 try:
                     if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
-                        logger.warning("❌ Channels not configured")
+                        logger.warning("❌ Channels not configured yet")
                         return
 
-                    # Format channel IDs
+                    # Format source channel ID for comparison
                     source_id = str(SOURCE_CHANNEL)
                     if not source_id.startswith('-100'):
                         source_id = f"-100{source_id.lstrip('-')}"
 
+                    # Format event chat ID for comparison
                     chat_id = str(event.chat_id)
                     if not chat_id.startswith('-100'):
                         chat_id = f"-100{chat_id.lstrip('-')}"
 
+                    # Check if message is from source channel
                     if chat_id != source_id:
+                        logger.debug(f"🚫 Message not from source channel. Expected: {source_id}, Got: {chat_id}")
                         return
 
                     logger.info(f"📨 Got message from source channel")
-                    logger.info(f"Current source channel: {source_id}")
-                    logger.info(f"Message chat ID: {chat_id}")
 
-                    # Format destination channel ID
+                    # Forward message
                     dest_id = str(DESTINATION_CHANNEL)
                     if not dest_id.startswith('-100'):
                         dest_id = f"-100{dest_id.lstrip('-')}"
@@ -228,6 +253,7 @@ async def main():
 
                 except Exception as e:
                     logger.error(f"❌ Handler error: {str(e)}")
+                    logger.error(f"❌ Error type: {type(e).__name__}")
 
             @client.on(events.MessageEdited())
             async def edit_handler(event):
@@ -295,6 +321,9 @@ async def main():
             logger.info("\n🤖 Bot is running")
             logger.info(f"📱 Source channel: {SOURCE_CHANNEL}")
             logger.info(f"📱 Destination: {DESTINATION_CHANNEL}")
+            logger.info(f"👤 Current user ID: {CURRENT_USER_ID}")
+            logger.info(f"📚 Active replacements: {TEXT_REPLACEMENTS}")
+
 
             # Run the client
             await client.run_until_disconnected()
@@ -310,15 +339,15 @@ async def main():
         raise
 
 if __name__ == "__main__":
-    try:
-        # Clean up old session if exists
-        if os.path.exists('anon.session-journal'):
-            try:
-                os.remove('anon.session-journal')
-                logger.info("✅ Cleaned old session journal")
-            except Exception as e:
-                logger.error(f"❌ Cleanup error: {str(e)}")
+    # Clean up old session if exists
+    if os.path.exists('anon.session-journal'):
+        try:
+            os.remove('anon.session-journal')
+            logger.info("✅ Cleaned old session journal")
+        except Exception as e:
+            logger.error(f"❌ Cleanup error: {str(e)}")
 
+    try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("\n👋 Bot stopped by user")
