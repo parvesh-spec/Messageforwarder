@@ -1,5 +1,6 @@
 import os
 import logging
+import threading
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify, g, send_from_directory
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
@@ -159,6 +160,34 @@ def login():
         return redirect(url_for('dashboard'))
     return render_template('login.html')
 
+# Add this after imports
+class EventLoopManager:
+    _instance = None
+    _lock = threading.Lock()
+    _loop = None
+
+    @classmethod
+    def get_loop(cls):
+        if cls._loop is None:
+            with cls._lock:
+                if cls._loop is None:
+                    try:
+                        cls._loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        cls._loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(cls._loop)
+        return cls._loop
+
+    @classmethod
+    def reset(cls):
+        with cls._lock:
+            if cls._loop:
+                try:
+                    cls._loop.close()
+                except:
+                    pass
+                cls._loop = None
+
 @app.route('/send-otp', methods=['POST'])
 @async_route
 async def send_otp():
@@ -255,14 +284,12 @@ class TelegramManager:
         self.api_id = api_id
         self.api_hash = api_hash
         self.client = None
-        self.loop = None
         self._lock = Lock()
 
     async def get_client(self):
         with self._lock:
             if not self.client:
-                if not self.loop:
-                    self.loop = asyncio.get_event_loop()
+                loop = EventLoopManager.get_loop()
                 self.client = TelegramClient(
                     self.session_name,
                     self.api_id,
@@ -270,7 +297,7 @@ class TelegramManager:
                     device_model="Replit Web",
                     system_version="Linux",
                     app_version="1.0",
-                    loop=self.loop
+                    loop=loop
                 )
 
             if not self.client.is_connected():
@@ -286,8 +313,14 @@ class TelegramManager:
 
     def cleanup(self):
         with self._lock:
+            if self.client:
+                try:
+                    loop = EventLoopManager.get_loop()
+                    loop.run_until_complete(self.disconnect())
+                except:
+                    pass
             self.client = None
-            self.loop = None
+            EventLoopManager.reset()
 
 # Create global Telegram manager
 telegram_manager = TelegramManager(
@@ -462,17 +495,19 @@ def logout():
     try:
         phone = session.get('user_phone')
         if phone:
-            session_file = f"anon.session"
+            session_file = "anon.session"
             if os.path.exists(session_file):
                 try:
                     os.remove(session_file)
-                    logger.info(f"✅ Removed session file")
+                    logger.info("✅ Removed session file")
                 except Exception as e:
                     logger.error(f"❌ Cleanup error: {str(e)}")
 
-        # Cleanup Telegram manager
+        # Cleanup telegram manager and reset event loop
         telegram_manager.cleanup()
+        EventLoopManager.reset()
 
+        # Clear session
         session.clear()
         return redirect(url_for('login'))
     except Exception as e:
