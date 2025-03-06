@@ -48,15 +48,26 @@ def get_db():
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
     try:
-        with open('channel_config.json', 'r') as f:
-            config = json.load(f)
-            SOURCE_CHANNEL = config.get('source_channel')
-            DESTINATION_CHANNEL = config.get('destination_channel')
-            logger.info(f"Loaded channel configuration - Source: {SOURCE_CHANNEL}, Destination: {DESTINATION_CHANNEL}")
-    except FileNotFoundError:
-        logger.warning("No channel configuration file found")
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT source_channel, destination_channel
+                    FROM channel_config
+                    WHERE user_id = %s
+                """, (CURRENT_USER_ID,))
+                config = cur.fetchone()
+                if config:
+                    SOURCE_CHANNEL = config['source_channel']
+                    DESTINATION_CHANNEL = config['destination_channel']
+                    logger.info(f"Loaded channel configuration - Source: {SOURCE_CHANNEL}, Destination: {DESTINATION_CHANNEL}")
+                else:
+                    logger.warning("No channel configuration found for user")
+        finally:
+            conn.close()
     except Exception as e:
         logger.error(f"Error loading channel configuration: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
 
 def load_user_replacements(user_id):
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
