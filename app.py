@@ -484,12 +484,14 @@ def toggle_bot():
                 if not hasattr(main, 'client') or not main.client:
                     def start_bot():
                         try:
+                            # Create new event loop for this thread
                             loop = asyncio.new_event_loop()
                             asyncio.set_event_loop(loop)
                             try:
-                                loop.run_until_complete(main.setup_client())
-                                loop.run_until_complete(main.setup_handlers())
-                                loop.run_until_complete(main.client.run_until_disconnected())
+                                # Reset stop event
+                                main.stop_event.clear()
+                                # Start bot
+                                loop.run_until_complete(main.main())
                             except Exception as e:
                                 logger.error(f"❌ Bot error: {str(e)}")
                             finally:
@@ -505,10 +507,14 @@ def toggle_bot():
             else:
                 logger.info("🔄 Stopping bot...")
                 if hasattr(main, 'client') and main.client:
+                    # Signal bot to stop
+                    main.stop_event.set()
+                    # Create new event loop for cleanup
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     try:
-                        loop.run_until_complete(main.client.disconnect())
+                        if main.client.is_connected():
+                            loop.run_until_complete(main.client.disconnect())
                         main.client = None
                         logger.info("✅ Bot stopped successfully")
                     finally:
