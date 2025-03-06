@@ -6,15 +6,16 @@ from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
 import asyncio
 from functools import wraps
 from asgiref.sync import async_to_sync
-import psycopg2
-from psycopg2.extras import DictCursor
+from sqlalchemy import create_engine, Integer, String, LargeBinary, DateTime, Column
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy.pool import QueuePool
 from flask_session import Session
 from datetime import timedelta
 from flask_sqlalchemy import SQLAlchemy
 from threading import Thread, Lock
-from contextlib import contextmanager
 
-# Set up logging with more detailed format
+# Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -23,6 +24,16 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
+
+# Configure database engine with proper pooling
+engine = create_engine(
+    os.getenv('DATABASE_URL'),
+    poolclass=QueuePool,
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_recycle=1800
+)
 
 # Configure Flask application
 app.config.update(
@@ -37,6 +48,57 @@ app.config.update(
         'pool_recycle': 1800,
     }
 )
+
+# Initialize SQLAlchemy
+db = SQLAlchemy(app)
+DBSession = scoped_session(sessionmaker(bind=engine))
+
+# Define models
+Base = declarative_base()
+
+class FlaskSession(Base):
+    __tablename__ = 'session'
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String(255), unique=True, nullable=False)
+    data = Column(LargeBinary)
+    expiry = Column(DateTime)
+
+# Create tables
+Base.metadata.create_all(engine)
+
+# Configure Flask-Session
+app.config['SESSION_SQLALCHEMY'] = db
+Session(app)
+
+# Database connection management
+@app.teardown_appcontext
+def shutdown_session(exception=None):
+    DBSession.remove()
+
+def get_db():
+    if not hasattr(g, 'db_session'):
+        g.db_session = DBSession()
+    return g.db_session
+
+@app.teardown_appcontext
+def close_db(e=None):
+    db_session = g.pop('db_session', None)
+    if db_session is not None:
+        db_session.close()
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_phone' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def async_route(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        return async_to_sync(f)(*args, **kwargs)
+    return wrapped
 
 # Ensure static folder exists
 os.makedirs('static/css', exist_ok=True)
@@ -59,9 +121,6 @@ if not os.path.exists('static/css/style.css'):
                 border-radius: 8px;
                 box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
             }
-            .input-group {
-                margin-bottom: 15px;
-            }
             input {
                 width: 100%;
                 padding: 8px;
@@ -81,75 +140,7 @@ if not os.path.exists('static/css/style.css'):
             button:hover {
                 background-color: #0052a3;
             }
-            .message {
-                margin-top: 10px;
-                padding: 10px;
-                border-radius: 4px;
-            }
-            .error {
-                background-color: #ffebee;
-                color: #c62828;
-            }
-            .success {
-                background-color: #e8f5e9;
-                color: #2e7d32;
-            }
         """)
-
-# Initialize database
-db = SQLAlchemy(app)
-
-# Database lock for concurrent operations
-db_lock = Lock()
-
-# Configure session
-class FlaskSession(db.Model):
-    __tablename__ = 'session'
-    id = db.Column(db.Integer, primary_key=True)
-    session_id = db.Column(db.String(255), unique=True, nullable=False)
-    data = db.Column(db.LargeBinary)
-    expiry = db.Column(db.DateTime)
-
-app.config['SESSION_SQLALCHEMY'] = db
-Session(app)
-
-# Database connection
-@contextmanager
-def get_db():
-    if hasattr(g, 'db'):
-        yield g.db
-    else:
-        conn = psycopg2.connect(
-            os.getenv('DATABASE_URL'),
-            application_name='telegram_bot_web'
-        )
-        conn.autocommit = True
-        g.db = conn
-        try:
-            yield g.db
-        finally:
-            conn.close()
-            g.pop('db', None)
-
-@app.teardown_appcontext
-def close_db(e=None):
-    db = g.pop('db', None)
-    if db is not None:
-        db.close()
-
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_phone' not in session:
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-def async_route(f):
-    @wraps(f)
-    def wrapped(*args, **kwargs):
-        return async_to_sync(f)(*args, **kwargs)
-    return wrapped
 
 @app.route('/')
 def login():
@@ -173,30 +164,39 @@ async def send_otp():
             return jsonify({'error': 'Phone number must start with +91'}), 400
 
         try:
+            # Get Telegram client
             client = await telegram_manager.get_client()
 
-            # Check existing session
-            if await client.is_user_authorized():
-                logger.info(f"✅ Found valid session for {phone}")
+            try:
+                # Check existing session
+                if await client.is_user_authorized():
+                    logger.info(f"✅ Found valid session for {phone}")
+                    session['user_phone'] = phone
+                    session['logged_in'] = True
+                    return jsonify({'message': 'Already authorized', 'already_authorized': True})
+
+                # Send OTP
+                sent = await client.send_code_request(phone)
                 session['user_phone'] = phone
-                session['logged_in'] = True
-                return jsonify({'message': 'Already authorized', 'already_authorized': True})
+                session['phone_code_hash'] = sent.phone_code_hash
+                logger.info("✅ OTP sent successfully")
+                return jsonify({'message': 'OTP sent successfully'})
 
-            # Send OTP
-            sent = await client.send_code_request(phone)
-            session['user_phone'] = phone
-            session['phone_code_hash'] = sent.phone_code_hash
-            logger.info("✅ OTP sent successfully")
-            return jsonify({'message': 'OTP sent successfully'})
+            except PhoneNumberInvalidError:
+                logger.error(f"❌ Invalid phone: {phone}")
+                return jsonify({'error': 'Invalid phone number'}), 400
 
-        except PhoneNumberInvalidError:
-            logger.error(f"❌ Invalid phone: {phone}")
-            return jsonify({'error': 'Invalid phone number'}), 400
+            except Exception as e:
+                logger.error(f"❌ Send OTP error: {str(e)}")
+                return jsonify({'error': str(e)}), 500
+
+            finally:
+                # Always disconnect client on completion
+                await telegram_manager.disconnect()
+
         except Exception as e:
-            logger.error(f"❌ Send OTP error: {str(e)}")
-            await telegram_manager.disconnect()
-            telegram_manager.cleanup()
-            return jsonify({'error': str(e)}), 500
+            logger.error(f"❌ Client error: {str(e)}")
+            return jsonify({'error': 'Failed to initialize Telegram client'}), 500
 
     except Exception as e:
         logger.error(f"❌ Critical error in send_otp: {str(e)}")
@@ -462,21 +462,25 @@ def logout():
     try:
         phone = session.get('user_phone')
         if phone:
-            session_file = f"anon.session"
+            session_file = "anon.session"
             if os.path.exists(session_file):
                 try:
                     os.remove(session_file)
-                    logger.info(f"✅ Removed session file")
+                    logger.info("✅ Removed session file")
                 except Exception as e:
                     logger.error(f"❌ Cleanup error: {str(e)}")
 
-        # Cleanup Telegram manager
-        telegram_manager.cleanup()
+        # Clean up resources
+        try:
+            telegram_manager.cleanup()
+            DBSession.remove()  # Remove the current session
+            session.clear()   # Clear Flask session
+        except Exception as e:
+            logger.error(f"❌ Cleanup error: {str(e)}")
 
-        session.clear()
         return redirect(url_for('login'))
     except Exception as e:
-        logger.error(f"❌ Error in logout route: {str(e)}")
+        logger.error(f"❌ Error in logout: {str(e)}")
         return redirect(url_for('login'))
 
 
@@ -535,9 +539,6 @@ def update_channels():
             logger.info(f"✅ Channel config updated - Source: {source}, Destination: {destination}")
             return jsonify({'message': 'Channel configuration updated successfully'})
 
-        except psycopg2.Error as e:
-            logger.error(f"❌ Database error: {e}")
-            return jsonify({'error': 'Database error updating channels'}), 500
         except Exception as e:
             logger.error(f"❌ Channel update error: {e}")
             return jsonify({'error': str(e)}), 500
