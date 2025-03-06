@@ -13,7 +13,7 @@ from sqlalchemy.pool import QueuePool
 from flask_session import Session
 from datetime import timedelta
 from flask_sqlalchemy import SQLAlchemy
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 
 # Configure logging
 logging.basicConfig(
@@ -26,17 +26,31 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
+# Create Base for SQLAlchemy models
+Base = declarative_base()
+
+# Database models
+class FlaskSession(Base):
+    __tablename__ = 'session'
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String(255), unique=True, nullable=False)
+    data = Column(LargeBinary)
+    expiry = Column(DateTime)
+
 # Configure database engine with proper pooling
 engine = create_engine(
     os.getenv('DATABASE_URL'),
     poolclass=QueuePool,
     pool_size=3,
-    max_overflow=5,
+    max_overflow=2,
     pool_timeout=30,
-    pool_recycle=1800,
+    pool_recycle=300,
     pool_pre_ping=True,
     echo=True
 )
+
+# Create tables
+Base.metadata.create_all(engine)
 
 # Configure Flask application
 app.config.update(
@@ -47,9 +61,9 @@ app.config.update(
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
     SQLALCHEMY_ENGINE_OPTIONS={
         'pool_size': 3,
-        'max_overflow': 5,
+        'max_overflow': 2,
         'pool_timeout': 30,
-        'pool_recycle': 1800,
+        'pool_recycle': 300,
         'pool_pre_ping': True
     }
 )
@@ -58,22 +72,12 @@ app.config.update(
 db = SQLAlchemy(app)
 DBSession = scoped_session(sessionmaker(bind=engine))
 
-# Define models
-Base = declarative_base()
-
-class FlaskSession(Base):
-    __tablename__ = 'session'
-    id = Column(Integer, primary_key=True)
-    session_id = Column(String(255), unique=True, nullable=False)
-    data = Column(LargeBinary)
-    expiry = Column(DateTime)
-
-# Create tables
-Base.metadata.create_all(engine)
-
 # Configure Flask-Session
 app.config['SESSION_SQLALCHEMY'] = db
 Session(app)
+
+# Event for bot status
+bot_running = Event()
 
 class TelegramManager:
     _instance = None
@@ -312,6 +316,7 @@ def logout():
         # Clean up resources
         try:
             telegram_manager.cleanup()
+            bot_running.clear()
             DBSession.remove()
             session.clear()
         except Exception as e:
@@ -435,6 +440,75 @@ def update_channels():
         logger.error(f"❌ Route error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/bot/toggle', methods=['POST'])
+@login_required
+def toggle_bot():
+    """Toggle bot status and manage Telegram client"""
+    try:
+        status = request.form.get('status') == 'true'
+        source = session.get('source_channel')
+        destination = session.get('dest_channel')
+
+        if not source or not destination:
+            logger.error("❌ Channel configuration missing")
+            return jsonify({'error': 'Please configure source and destination channels first'}), 400
+
+        try:
+            import main
+            main.SOURCE_CHANNEL = source
+            main.DESTINATION_CHANNEL = destination
+
+            if status and not bot_running.is_set():
+                logger.info("🔄 Starting bot...")
+
+                def start_bot():
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(main.setup_client())
+                            loop.run_until_complete(main.setup_handlers())
+                            bot_running.set()
+                            loop.run_until_complete(main.client.run_until_disconnected())
+                        except Exception as e:
+                            logger.error(f"❌ Bot error: {str(e)}")
+                        finally:
+                            bot_running.clear()
+                            loop.close()
+                            asyncio.set_event_loop(None)
+                    except Exception as e:
+                        logger.error(f"❌ Thread error: {str(e)}")
+
+                bot_thread = Thread(target=start_bot, daemon=True)
+                bot_thread.start()
+                logger.info("✅ Started Telegram client in new thread")
+
+            elif not status and bot_running.is_set():
+                logger.info("🔄 Stopping bot...")
+                if hasattr(main, 'client') and main.client:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(main.client.disconnect())
+                        main.client = None
+                        bot_running.clear()
+                        logger.info("✅ Bot stopped successfully")
+                    finally:
+                        loop.close()
+
+            return jsonify({
+                'status': bot_running.is_set(),
+                'message': f"Bot is now {'running' if bot_running.is_set() else 'stopped'}"
+            })
+
+        except Exception as e:
+            logger.error(f"❌ Bot toggle error: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+
+    except Exception as e:
+        logger.error(f"❌ Route error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/get-replacements')
 @login_required
 def get_replacements():
@@ -459,73 +533,6 @@ def get_replacements():
 
     except Exception as e:
         logger.error(f"❌ Error getting replacements: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/bot/toggle', methods=['POST'])
-@login_required
-def toggle_bot():
-    """Toggle bot status and manage Telegram client"""
-    try:
-        status = request.form.get('status') == 'true'
-        source = session.get('source_channel')
-        destination = session.get('dest_channel')
-
-        if not source or not destination:
-            logger.error("❌ Channel configuration missing")
-            return jsonify({'error': 'Please configure source and destination channels first'}), 400
-
-        try:
-            import main
-            main.SOURCE_CHANNEL = source
-            main.DESTINATION_CHANNEL = destination
-
-            if status:
-                logger.info("🔄 Starting bot...")
-                if not hasattr(main, 'client') or not main.client:
-                    def start_bot():
-                        try:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            try:
-                                loop.run_until_complete(main.setup_client())
-                                loop.run_until_complete(main.setup_handlers())
-                                loop.run_until_complete(main.client.run_until_disconnected())
-                            except Exception as e:
-                                logger.error(f"❌ Bot error: {str(e)}")
-                            finally:
-                                loop.close()
-                                asyncio.set_event_loop(None)
-                        except Exception as e:
-                            logger.error(f"❌ Thread error: {str(e)}")
-
-                    bot_thread = Thread(target=start_bot, daemon=True)
-                    bot_thread.start()
-                    logger.info("✅ Started Telegram client in new thread")
-
-            else:
-                logger.info("🔄 Stopping bot...")
-                if hasattr(main, 'client') and main.client:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(main.client.disconnect())
-                        main.client = None
-                        logger.info("✅ Bot stopped successfully")
-                    finally:
-                        loop.close()
-
-            session['bot_running'] = status
-            return jsonify({
-                'status': status,
-                'message': f"Bot is now {'running' if status else 'stopped'}"
-            })
-
-        except Exception as e:
-            logger.error(f"❌ Bot toggle error: {str(e)}")
-            return jsonify({'error': str(e)}), 500
-
-    except Exception as e:
-        logger.error(f"❌ Route error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/static/<path:filename>')

@@ -35,9 +35,9 @@ engine = create_engine(
     os.getenv('DATABASE_URL'),
     poolclass=QueuePool,
     pool_size=3,
-    max_overflow=5,
+    max_overflow=2,
     pool_timeout=30,
-    pool_recycle=1800,
+    pool_recycle=300,
     pool_pre_ping=True
 )
 
@@ -121,18 +121,14 @@ async def setup_handlers():
 
     try:
         # Clear existing handlers
-        if client.list_event_handlers():
-            for handler in client.list_event_handlers():
-                client.remove_event_handler(handler)
-            logger.info("🔄 Cleared existing handlers")
+        client.remove_event_handler(handle_new_message)
+        logger.info("🔄 Cleared existing handlers")
 
         # Add message handler
         @client.on(events.NewMessage())
         async def handle_new_message(event):
             try:
                 logger.info("\n📨 New message received")
-                logger.info(f"- Chat ID: {event.chat_id}")
-                logger.info(f"- Message: {event.message.text}")
 
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
                     logger.warning("❌ Channels not configured")
@@ -194,33 +190,6 @@ async def setup_handlers():
 
     except Exception as e:
         logger.error(f"❌ Handler setup error: {str(e)}")
-        return False
-
-def load_user_replacements(user_id):
-    """Load text replacements for user from database"""
-    global TEXT_REPLACEMENTS, CURRENT_USER_ID
-    try:
-        session = get_db()
-        sql = text("""
-            SELECT original_text as orig, replacement_text as repl
-            FROM text_replacements 
-            WHERE user_id = :user_id
-            ORDER BY LENGTH(original_text) DESC
-        """)
-        result = session.execute(sql, {"user_id": user_id})
-
-        TEXT_REPLACEMENTS = {row.orig: row.repl for row in result}
-        CURRENT_USER_ID = user_id
-
-        logger.info(f"👤 Loaded replacements for user {user_id}")
-        logger.info(f"📚 Found {len(TEXT_REPLACEMENTS)} replacements")
-        for original, replacement in TEXT_REPLACEMENTS.items():
-            logger.info(f"📝 Loaded: '{original}' → '{replacement}'")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Error loading replacements: {str(e)}")
-        TEXT_REPLACEMENTS = {}
-        CURRENT_USER_ID = None
         return False
 
 def apply_text_replacements(text):
