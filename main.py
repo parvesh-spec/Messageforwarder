@@ -7,7 +7,7 @@ import asyncio
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, AuthKeyUnregisteredError
 from telethon.sessions import StringSession
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -60,12 +60,13 @@ def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
     try:
         session = get_db()
-        result = session.execute("""
+        sql = text("""
             SELECT source_channel, destination_channel 
             FROM channel_config 
             ORDER BY updated_at DESC 
             LIMIT 1
         """)
+        result = session.execute(sql)
         config = result.fetchone()
 
         if config:
@@ -85,12 +86,13 @@ def load_user_replacements(user_id):
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
     try:
         session = get_db()
-        result = session.execute("""
+        sql = text("""
             SELECT original_text, replacement_text 
             FROM text_replacements 
             WHERE user_id = :user_id
             ORDER BY LENGTH(original_text) DESC
-        """, {"user_id": user_id})
+        """)
+        result = session.execute(sql, {"user_id": user_id})
 
         TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in result}
         CURRENT_USER_ID = user_id

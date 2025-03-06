@@ -6,7 +6,7 @@ from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
 import asyncio
 from functools import wraps
 from asgiref.sync import async_to_sync
-from sqlalchemy import create_engine, Integer, String, LargeBinary, DateTime, Column
+from sqlalchemy import create_engine, Integer, String, LargeBinary, DateTime, Column, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import QueuePool
@@ -22,6 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Initialize Flask
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
@@ -29,8 +30,8 @@ app.secret_key = os.urandom(24)
 engine = create_engine(
     os.getenv('DATABASE_URL'),
     poolclass=QueuePool,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=5,
+    max_overflow=10,
     pool_timeout=30,
     pool_recycle=1800
 )
@@ -43,7 +44,8 @@ app.config.update(
     SQLALCHEMY_DATABASE_URI=os.getenv('DATABASE_URL'),
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
     SQLALCHEMY_ENGINE_OPTIONS={
-        'pool_size': 10,
+        'pool_size': 5,
+        'max_overflow': 10,
         'pool_timeout': 30,
         'pool_recycle': 1800,
     }
@@ -70,57 +72,89 @@ Base.metadata.create_all(engine)
 app.config['SESSION_SQLALCHEMY'] = db
 Session(app)
 
-# Database lock for concurrent operations
-db_lock = Lock()
-
 class TelegramManager:
-    def __init__(self, session_name, api_id, api_hash):
-        self.session_name = session_name
-        self.api_id = api_id
-        self.api_hash = api_hash
-        self.client = None
-        self.loop = None
-        self._lock = Lock()
+    _instance = None
+    _lock = Lock()
+
+    def __new__(cls, *args, **kwargs):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+            return cls._instance
+
+    def __init__(self, session_name=None, api_id=None, api_hash=None):
+        if not hasattr(self, 'initialized'):
+            self.session_name = session_name or 'anon'
+            self.api_id = api_id or int(os.getenv('API_ID', '27202142'))
+            self.api_hash = api_hash or os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
+            self.client = None
+            self.initialized = True
+            self._client_lock = Lock()
+            self._loop = None
 
     async def get_client(self):
-        with self._lock:
-            if not self.client:
-                if not self.loop:
-                    self.loop = asyncio.get_event_loop()
-                self.client = TelegramClient(
-                    self.session_name,
-                    self.api_id,
-                    self.api_hash,
-                    device_model="Replit Web",
-                    system_version="Linux",
-                    app_version="1.0",
-                    loop=self.loop
-                )
+        """Get or create a Telegram client with proper event loop management"""
+        try:
+            with self._client_lock:
+                if not self.client:
+                    if not self._loop:
+                        self._loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(self._loop)
+                    self.client = TelegramClient(
+                        self.session_name,
+                        self.api_id,
+                        self.api_hash,
+                        device_model="Replit Web",
+                        system_version="Linux",
+                        app_version="1.0",
+                        loop=self._loop
+                    )
 
-            if not self.client.is_connected():
-                await self.client.connect()
+                if not self.client.is_connected():
+                    await self.client.connect()
 
-            return self.client
+                return self.client
+        except Exception as e:
+            logger.error(f"❌ Client initialization error: {str(e)}")
+            if self.client:
+                await self.disconnect()
+            raise
 
     async def disconnect(self):
-        with self._lock:
-            if self.client and self.client.is_connected():
-                await self.client.disconnect()
-                self.client = None
+        """Safely disconnect the client and cleanup resources"""
+        try:
+            with self._client_lock:
+                if self.client:
+                    if self.client.is_connected():
+                        await self.client.disconnect()
+                    self.client = None
+        except Exception as e:
+            logger.error(f"❌ Disconnect error: {str(e)}")
+            self.client = None
 
     def cleanup(self):
-        with self._lock:
-            self.client = None
-            self.loop = None
+        """Complete cleanup of all resources"""
+        with self._client_lock:
+            if self.client:
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self.disconnect())
+                    loop.close()
+                except Exception as e:
+                    logger.error(f"❌ Cleanup error: {str(e)}")
+                finally:
+                    self.client = None
+                    if self._loop:
+                        try:
+                            self._loop.close()
+                        except:
+                            pass
+                        self._loop = None
 
-# Create global Telegram manager
-telegram_manager = TelegramManager(
-    'anon',
-    int(os.getenv('API_ID', '27202142')),
-    os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
-)
+# Create singleton Telegram manager
+telegram_manager = TelegramManager()
 
-# Database connection management
 def get_db():
     """Get SQLAlchemy session with proper error handling"""
     if not hasattr(g, 'db_session'):
@@ -172,7 +206,6 @@ async def send_otp():
             logger.error(f"❌ Invalid phone format: {phone}")
             return jsonify({'error': 'Phone number must start with +91'}), 400
 
-        client = None
         try:
             client = await telegram_manager.get_client()
 
@@ -193,12 +226,13 @@ async def send_otp():
         except PhoneNumberInvalidError:
             logger.error(f"❌ Invalid phone: {phone}")
             return jsonify({'error': 'Invalid phone number'}), 400
+
         except Exception as e:
             logger.error(f"❌ Send OTP error: {str(e)}")
             return jsonify({'error': str(e)}), 500
+
         finally:
-            if client:
-                await telegram_manager.disconnect()
+            await telegram_manager.disconnect()
 
     except Exception as e:
         logger.error(f"❌ Critical error in send_otp: {str(e)}")
@@ -222,7 +256,6 @@ async def verify_otp():
             logger.error("❌ OTP missing")
             return jsonify({'error': 'OTP is required'}), 400
 
-        client = None
         try:
             client = await telegram_manager.get_client()
 
@@ -261,16 +294,6 @@ async def verify_otp():
 def logout():
     """Handle user logout and cleanup resources"""
     try:
-        phone = session.get('user_phone')
-        if phone:
-            session_file = "anon.session"
-            if os.path.exists(session_file):
-                try:
-                    os.remove(session_file)
-                    logger.info("✅ Removed session file")
-                except Exception as e:
-                    logger.error(f"❌ Cleanup error: {str(e)}")
-
         # Clean up resources
         try:
             telegram_manager.cleanup()
@@ -301,14 +324,15 @@ async def dashboard():
                         'name': dialog.name
                     })
 
-            # Get last selected channels from database
+            # Get last selected channels from database using proper SQL formatting
             with get_db() as session:
-                result = session.execute("""
+                sql = text("""
                     SELECT source_channel, destination_channel 
                     FROM channel_config 
                     ORDER BY updated_at DESC 
                     LIMIT 1
                 """)
+                result = session.execute(sql)
                 last_config = result.fetchone()
 
             return render_template('dashboard.html', 
@@ -332,7 +356,7 @@ def serve_static(filename):
     """Serve static files"""
     return send_from_directory('static', filename)
 
-# Ensure required directories exist
+# Create required directories and CSS
 os.makedirs('static/css', exist_ok=True)
 
 # Create default CSS if it doesn't exist
