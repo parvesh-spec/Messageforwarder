@@ -479,12 +479,11 @@ def toggle_bot():
             import asyncio
 
             if status:
-                logger.info("🔄 Starting Telegram bot...")
-
+                logger.info("🔄 Starting Telegram client...")
                 # Stop existing client if running
-                if hasattr(main, 'client') and main.client:
-                    asyncio.run(main.cleanup_client())
-                    logger.info("✅ Cleaned up existing client")
+                if hasattr(main, 'client') and main.client and main.client.is_connected():
+                    asyncio.run(main.client.disconnect())
+                    logger.info("✅ Disconnected existing client")
 
                 # Reset channels
                 main.SOURCE_CHANNEL = source
@@ -492,23 +491,15 @@ def toggle_bot():
 
                 # Start new client
                 asyncio.run(main.main())
-                logger.info("✅ Started Telegram bot")
+                logger.info("✅ Started new Telegram client")
 
             else:
-                logger.info("🔄 Stopping Telegram bot...")
-
-                # Stop monitor thread
-                main.stop_monitor_thread()
-
-                # Cleanup client
+                logger.info("🔄 Stopping bot...")
                 if hasattr(main, 'client') and main.client:
-                    asyncio.run(main.cleanup_client())
-
-                # Reset channels
+                    asyncio.run(main.client.disconnect())
                 main.SOURCE_CHANNEL = None
                 main.DESTINATION_CHANNEL = None
-
-                logger.info("✅ Stopped Telegram bot")
+                logger.info("✅ Bot stopped")
 
             session['bot_running'] = status
             return jsonify({
