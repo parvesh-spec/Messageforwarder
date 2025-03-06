@@ -31,8 +31,9 @@ SESSION_STRING = None
 
 # Check for required environment variables
 if not os.getenv('SESSION_SECRET'):
-    logger.error("❌ No session string provided - SESSION_SECRET environment variable is required")
-    # We'll continue but the app will fail health checks until the secret is set
+    logger.warning("⚠️ No SESSION_SECRET provided - using a temporary one")
+    os.environ['SESSION_SECRET'] = os.urandom(24).hex()
+    # This will work but is not persistent between restarts
 
 # Database connection pool
 db_pool = psycopg2.pool.ThreadedConnectionPool(

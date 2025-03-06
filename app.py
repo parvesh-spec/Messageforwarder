@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # Configure Flask application
 app.config.update(
-    SECRET_KEY=os.urandom(24),
+    SECRET_KEY=os.getenv('SESSION_SECRET', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True
@@ -222,6 +222,10 @@ telegram_manager = TelegramManager(
     int(os.getenv('API_ID', '27202142')),
     os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 )
+
+@app.route('/health')
+def health():
+    return 'OK', 200
 
 @app.route('/')
 def login():
@@ -590,4 +594,5 @@ def clear_replacements():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=5000)
