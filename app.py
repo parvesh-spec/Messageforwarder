@@ -87,27 +87,18 @@ telegram_manager = TelegramManager(
 
 def get_db():
     if 'db' not in g:
-        try:
-            g.db = psycopg2.connect(
-                os.getenv('DATABASE_URL'),
-                application_name='telegram_bot_web',
-                connect_timeout=5
-            )
-            g.db.set_session(autocommit=True)  # Enable autocommit to prevent transaction locks
-        except Exception as e:
-            logger.error(f"❌ Database connection error: {e}")
-            raise
+        g.db = psycopg2.connect(
+            os.getenv('DATABASE_URL'),
+            application_name='telegram_bot_web'
+        )
+        g.db.autocommit = True  # Prevent transaction locks
     return g.db
 
 @app.teardown_appcontext
 def close_db(e=None):
     db = g.pop('db', None)
     if db is not None:
-        try:
-            db.close()
-            logger.info("✅ Database connection closed")
-        except Exception as e:
-            logger.error(f"❌ Error closing database: {e}")
+        db.close()
 
 def login_required(f):
     @wraps(f)
@@ -489,64 +480,23 @@ def toggle_bot():
 
             if status:
                 logger.info("🔄 Starting Telegram client...")
-
-                # Format channel IDs
-                if not source.startswith('-100'):
-                    source = f"-100{source.lstrip('-')}"
-                if not destination.startswith('-100'):
-                    destination = f"-100{destination.lstrip('-')}"
-
                 # Stop existing client if running
-                if hasattr(main, 'client') and main.client:
-                    try:
-                        if main.client.is_connected():
-                            asyncio.run(main.client.disconnect())
-                            logger.info("✅ Disconnected existing client")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error disconnecting client: {e}")
+                if hasattr(main, 'client') and main.client and main.client.is_connected():
+                    asyncio.run(main.client.disconnect())
+                    logger.info("✅ Disconnected existing client")
 
-                # Get database connection first
-                db = get_db()
-                with db.cursor() as cur:
-                    # Verify channel config exists
-                    cur.execute("""
-                        SELECT source_channel, destination_channel 
-                        FROM channel_config 
-                        WHERE source_channel = %s AND destination_channel = %s
-                    """, (source, destination))
-
-                    if not cur.fetchone():
-                        # Insert new configuration if doesn't exist
-                        cur.execute("""
-                            INSERT INTO channel_config (source_channel, destination_channel)
-                            VALUES (%s, %s)
-                        """, (source, destination))
-                        logger.info("✅ Channel configuration saved")
-
-                # Update channels and start client
+                # Reset channels
                 main.SOURCE_CHANNEL = source
                 main.DESTINATION_CHANNEL = destination
 
-                try:
-                    # Start new client
-                    asyncio.run(main.main())
-                    logger.info("✅ Started Telegram client")
-                except Exception as e:
-                    logger.error(f"❌ Failed to start client: {e}")
-                    if hasattr(e, '__cause__') and e.__cause__:
-                        logger.error(f"❌ Cause: {e.__cause__}")
-                    return jsonify({'error': 'Failed to start bot'}), 500
+                # Start new client
+                asyncio.run(main.main())
+                logger.info("✅ Started new Telegram client")
 
             else:
                 logger.info("🔄 Stopping bot...")
                 if hasattr(main, 'client') and main.client:
-                    try:
-                        if main.client.is_connected():
-                            asyncio.run(main.client.disconnect())
-                            logger.info("✅ Disconnected client")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error disconnecting client: {e}")
-
+                    asyncio.run(main.client.disconnect())
                 main.SOURCE_CHANNEL = None
                 main.DESTINATION_CHANNEL = None
                 logger.info("✅ Bot stopped")
