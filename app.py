@@ -172,31 +172,31 @@ async def send_otp():
             logger.error(f"❌ Invalid phone format: {phone}")
             return jsonify({'error': 'Phone number must start with +91'}), 400
 
-        with db_lock:
+        try:
             client = await telegram_manager.get_client()
-            try:
-                # Check existing session
-                if await client.is_user_authorized():
-                    logger.info(f"✅ Found valid session for {phone}")
-                    session['user_phone'] = phone
-                    session['logged_in'] = True
-                    return jsonify({'message': 'Already authorized', 'already_authorized': True})
 
-                # Send OTP
-                sent = await client.send_code_request(phone)
+            # Check existing session
+            if await client.is_user_authorized():
+                logger.info(f"✅ Found valid session for {phone}")
                 session['user_phone'] = phone
-                session['phone_code_hash'] = sent.phone_code_hash
-                logger.info("✅ OTP sent successfully")
-                return jsonify({'message': 'OTP sent successfully'})
+                session['logged_in'] = True
+                return jsonify({'message': 'Already authorized', 'already_authorized': True})
 
-            except PhoneNumberInvalidError:
-                logger.error(f"❌ Invalid phone: {phone}")
-                return jsonify({'error': 'Invalid phone number'}), 400
-            except Exception as e:
-                logger.error(f"❌ Send OTP error: {str(e)}")
-                return jsonify({'error': str(e)}), 500
-            finally:
-                await telegram_manager.disconnect()
+            # Send OTP
+            sent = await client.send_code_request(phone)
+            session['user_phone'] = phone
+            session['phone_code_hash'] = sent.phone_code_hash
+            logger.info("✅ OTP sent successfully")
+            return jsonify({'message': 'OTP sent successfully'})
+
+        except PhoneNumberInvalidError:
+            logger.error(f"❌ Invalid phone: {phone}")
+            return jsonify({'error': 'Invalid phone number'}), 400
+        except Exception as e:
+            logger.error(f"❌ Send OTP error: {str(e)}")
+            await telegram_manager.disconnect()
+            telegram_manager.cleanup()
+            return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         logger.error(f"❌ Critical error in send_otp: {str(e)}")
@@ -255,28 +255,39 @@ class TelegramManager:
         self.api_id = api_id
         self.api_hash = api_hash
         self.client = None
+        self.loop = None
+        self._lock = Lock()
 
     async def get_client(self):
-        if not self.client:
-            self.client = TelegramClient(
-                self.session_name,
-                self.api_id,
-                self.api_hash,
-                device_model="Replit Web",
-                system_version="Linux",
-                app_version="1.0",
-                connection_retries=None  # Infinite retries
-            )
+        with self._lock:
+            if not self.client:
+                if not self.loop:
+                    self.loop = asyncio.get_event_loop()
+                self.client = TelegramClient(
+                    self.session_name,
+                    self.api_id,
+                    self.api_hash,
+                    device_model="Replit Web",
+                    system_version="Linux",
+                    app_version="1.0",
+                    loop=self.loop
+                )
 
-        if not self.client.is_connected():
-            await self.client.connect()
+            if not self.client.is_connected():
+                await self.client.connect()
 
-        return self.client
+            return self.client
 
     async def disconnect(self):
-        if self.client and self.client.is_connected():
-            await self.client.disconnect()
+        with self._lock:
+            if self.client and self.client.is_connected():
+                await self.client.disconnect()
+                self.client = None
+
+    def cleanup(self):
+        with self._lock:
             self.client = None
+            self.loop = None
 
 # Create global Telegram manager
 telegram_manager = TelegramManager(
@@ -451,14 +462,21 @@ def logout():
     try:
         phone = session.get('user_phone')
         if phone:
-            session_file = f"sessions/{phone}"
+            session_file = f"anon.session"
             if os.path.exists(session_file):
-                os.remove(session_file)
-                logger.info(f"Removed session file for {phone}")
+                try:
+                    os.remove(session_file)
+                    logger.info(f"✅ Removed session file")
+                except Exception as e:
+                    logger.error(f"❌ Cleanup error: {str(e)}")
+
+        # Cleanup Telegram manager
+        telegram_manager.cleanup()
+
         session.clear()
         return redirect(url_for('login'))
     except Exception as e:
-        logger.error(f"Error in logout route: {str(e)}")
+        logger.error(f"❌ Error in logout route: {str(e)}")
         return redirect(url_for('login'))
 
 
