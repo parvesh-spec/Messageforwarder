@@ -1,21 +1,20 @@
 import os
 import logging
-from flask import Flask, render_template, request, session, redirect, url_for, jsonify, g
+from flask import Flask, render_template, request, session, redirect, url_for, jsonify, g, send_from_directory
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError, AuthKeyUnregisteredError
+from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
 import asyncio
 from functools import wraps
 from asgiref.sync import async_to_sync
 import psycopg2
 from psycopg2.extras import DictCursor
-import json
 from flask_session import Session
 from datetime import timedelta
 from flask_sqlalchemy import SQLAlchemy
 from threading import Thread, Lock
 from contextlib import contextmanager
 
-# Set up logging
+# Set up logging with more detailed format
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -39,7 +38,65 @@ app.config.update(
     }
 )
 
-# Initialize SQLAlchemy
+# Ensure static folder exists
+os.makedirs('static/css', exist_ok=True)
+
+# Create a basic CSS file if it doesn't exist
+if not os.path.exists('static/css/style.css'):
+    with open('static/css/style.css', 'w') as f:
+        f.write("""
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 20px;
+                background-color: #f0f2f5;
+            }
+            .login-container {
+                max-width: 400px;
+                margin: 50px auto;
+                padding: 20px;
+                background: white;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            }
+            .input-group {
+                margin-bottom: 15px;
+            }
+            input {
+                width: 100%;
+                padding: 8px;
+                margin-bottom: 10px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            }
+            button {
+                width: 100%;
+                padding: 10px;
+                background-color: #0066cc;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+            }
+            button:hover {
+                background-color: #0052a3;
+            }
+            .message {
+                margin-top: 10px;
+                padding: 10px;
+                border-radius: 4px;
+            }
+            .error {
+                background-color: #ffebee;
+                color: #c62828;
+            }
+            .success {
+                background-color: #e8f5e9;
+                color: #2e7d32;
+            }
+        """)
+
+# Initialize database
 db = SQLAlchemy(app)
 
 # Database lock for concurrent operations
@@ -96,7 +153,9 @@ def async_route(f):
 
 @app.route('/')
 def login():
+    logger.info("Accessing login page")
     if 'logged_in' in session and session['logged_in']:
+        logger.info("User already logged in, redirecting to dashboard")
         return redirect(url_for('dashboard'))
     return render_template('login.html')
 
@@ -597,7 +656,12 @@ def toggle_bot():
         logger.error(f"❌ Route error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/static/<path:filename>')
+def serve_static(filename):
+    logger.info(f"Serving static file: {filename}")
+    return send_from_directory('static', filename)
+
 if __name__ == '__main__':
     os.makedirs('sessions', exist_ok=True)
-    # ALWAYS serve the app on port 5000
+    os.makedirs('static/css', exist_ok=True)
     app.run(host='0.0.0.0', port=5000, debug=True)
