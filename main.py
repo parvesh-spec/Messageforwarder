@@ -140,14 +140,14 @@ async def main():
 
         try:
             # Connect and verify
-            await client.connect()
-            logger.info("✅ Connected to Telegram")
+            if not client.is_connected():
+                await client.connect()
+                logger.info("✅ Connected to Telegram")
 
             if not await client.is_user_authorized():
                 logger.error("❌ User not authorized")
                 return
 
-            # Get and verify user info
             me = await client.get_me()
             logger.info(f"✅ Client active as: {me.first_name} (ID: {me.id})")
 
@@ -166,15 +166,15 @@ async def main():
             except Exception as e:
                 logger.error(f"❌ Error reading session: {str(e)}")
 
-            # Load user data and replacements
+            # Load user data
             if session_phone:
                 user_id = get_user_id_by_phone(session_phone)
                 if user_id:
                     logger.info(f"👤 Found user ID: {user_id}")
                     if load_user_replacements(user_id):
-                        logger.info("✅ Successfully loaded text replacements")
+                        logger.info("✅ Loaded text replacements")
                     else:
-                        logger.warning("❌ Failed to load text replacements")
+                        logger.warning("❌ Failed to load replacements")
                 else:
                     logger.warning(f"❌ No user found for phone: {session_phone}")
 
@@ -183,37 +183,30 @@ async def main():
                 logger.error("❌ Failed to load channel configuration")
                 return
 
+            # Reset event handlers
+            for handler in client.list_event_handlers():
+                client.remove_event_handler(handler)
+            logger.info("🔄 Cleared existing handlers")
+
+            # Add event handlers
             logger.info("\n🔄 Setting up event handlers...")
 
-            # Raw event debugger
             @client.on(events.Raw)
             async def debug_raw_events(event):
-                logger.info(f"🔍 Raw event received: {type(event).__name__}")
+                logger.info(f"🔍 Raw event received: {type(event)}")
                 if hasattr(event, 'message'):
-                    logger.info(f"🔍 Raw message: {event.message}")
+                    logger.info(f"🔍 Raw message content: {event.message}")
 
-            # Message update debugger
-            @client.on(events.MessageEdited)
-            async def debug_edited_messages(event):
-                logger.info(f"✏️ Message edited in chat {event.chat_id}")
-
-            # Main message handler with extensive debug info
-            @client.on(events.NewMessage())
+            @client.on(events.NewMessage(pattern=''))
             async def handle_new_message(event):
                 try:
-                    # Detailed event logging
-                    logger.info("\n📨 Message event received:")
+                    logger.info("\n📨 Received message:")
                     logger.info(f"- Chat ID: {event.chat_id}")
-                    logger.info(f"- Message ID: {event.message.id}")
-                    logger.info(f"- Event type: {type(event)}")
-                    logger.info(f"- Message type: {type(event.message)}")
-                    logger.info(f"- Raw text: {event.raw_text}")
-                    logger.info(f"- Message text: {event.message.text if event.message else 'No text'}")
-                    logger.info(f"- Sender ID: {event.sender_id}")
+                    logger.info(f"- Message: {event.message.text}")
+                    logger.info(f"- From: {event.sender_id}")
 
                     if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
                         logger.warning("❌ Channels not configured")
-                        logger.warning(f"Source: {SOURCE_CHANNEL}, Destination: {DESTINATION_CHANNEL}")
                         return
 
                     # Format chat IDs
@@ -225,40 +218,35 @@ async def main():
                     if not source_id.startswith('-100'):
                         source_id = f"-100{source_id.lstrip('-')}"
 
-                    # Channel comparison
-                    logger.info("\n🔍 Channel verification:")
+                    logger.info(f"🔍 Comparing channels:")
                     logger.info(f"- Message from: {chat_id}")
                     logger.info(f"- Source channel: {source_id}")
-                    logger.info(f"- Match: {chat_id == source_id}")
 
                     if chat_id != source_id:
-                        logger.info("👉 Message not from source channel")
+                        logger.info("👉 Not from source channel")
                         return
 
-                    # Process message
-                    logger.info("\n📝 Processing message:")
-                    message_text = event.message.text if event.message.text else ""
-                    logger.info(f"- Original text: '{message_text}'")
+                    logger.info("✅ Message is from source channel")
 
-                    # Apply replacements
-                    if message_text and TEXT_REPLACEMENTS:
-                        logger.info("- Applying replacements:")
-                        for original, replacement in TEXT_REPLACEMENTS.items():
-                            logger.info(f"  - Rule: '{original}' → '{replacement}'")
-                        old_text = message_text
-                        message_text = apply_text_replacements(message_text)
-                        logger.info(f"- Final text: '{message_text}'")
-
-                    # Forward message
                     try:
+                        # Get message text
+                        message_text = event.message.text if event.message.text else ""
+                        logger.info(f"📥 Original message: '{message_text}'")
+
+                        # Apply replacements
+                        if message_text and TEXT_REPLACEMENTS:
+                            old_text = message_text
+                            message_text = apply_text_replacements(message_text)
+                            logger.info(f"📝 After replacements: '{message_text}'")
+
                         # Format destination ID
                         dest_id = str(DESTINATION_CHANNEL)
                         if not dest_id.startswith('-100'):
                             dest_id = f"-100{dest_id.lstrip('-')}"
 
-                        # Get destination
+                        # Get destination channel
                         dest_channel = await client.get_entity(int(dest_id))
-                        logger.info(f"\n📤 Forwarding to: {getattr(dest_channel, 'title', 'Unknown')}")
+                        logger.info(f"📤 Forwarding to: {getattr(dest_channel, 'title', 'Unknown')}")
 
                         # Send message
                         sent_message = await client.send_message(
@@ -284,9 +272,9 @@ async def main():
             handlers = client.list_event_handlers()
             logger.info(f"\n✅ Total handlers: {len(handlers)}")
             for handler in handlers:
-                logger.info(f"📌 Active handler: {handler.__class__.__name__}")
+                logger.info(f"📌 Handler: {handler}")
 
-            # Monitor for changes
+            # Monitor configuration
             def config_monitor():
                 while True:
                     try:
@@ -294,7 +282,7 @@ async def main():
                             logger.info("✅ Channel config refreshed")
                         if CURRENT_USER_ID:
                             if load_user_replacements(CURRENT_USER_ID):
-                                logger.info("✅ Text replacements refreshed")
+                                logger.info("✅ Replacements refreshed")
                         time.sleep(30)
                     except Exception as e:
                         logger.error(f"❌ Monitor error: {str(e)}")
@@ -303,21 +291,27 @@ async def main():
             Thread(target=config_monitor, daemon=True).start()
             logger.info("✅ Started config monitor")
 
-            # Log current state
+            # Log system state
             logger.info("\n🤖 System is ready")
             logger.info(f"📱 Source channel: {source_id}")
             logger.info(f"📱 Destination: {dest_id}")
             logger.info(f"👤 Current user: {CURRENT_USER_ID}")
             logger.info(f"📚 Active replacements: {len(TEXT_REPLACEMENTS)}")
 
-            # Run client
-            await client.run_until_disconnected()
+            # Run client with cleanup handler
+            try:
+                await client.run_until_disconnected()
+            finally:
+                if client.is_connected():
+                    logger.info("🔄 Disconnecting client...")
+                    await client.disconnect()
+                    logger.info("✅ Client disconnected")
 
         except Exception as e:
             logger.error(f"❌ Client error: {str(e)}")
             import traceback
             logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
-            if client and hasattr(client, 'disconnect'):
+            if client and client.is_connected():
                 await client.disconnect()
             raise
 

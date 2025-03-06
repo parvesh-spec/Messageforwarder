@@ -471,28 +471,37 @@ def toggle_bot():
         destination = session.get('dest_channel')
 
         if not source or not destination:
-            logger.error("Channel configuration missing")
+            logger.error("❌ Channel configuration missing")
             return jsonify({'error': 'Please configure source and destination channels first'}), 400
 
         # Configure bot channels
         try:
             import main
-            main.SOURCE_CHANNEL = source
-            main.DESTINATION_CHANNEL = destination
-            logger.info(f"Bot channels configured - Source: {main.SOURCE_CHANNEL}, Destination: {main.DESTINATION_CHANNEL}")
+            # Reset client on status change
+            if status:
+                logger.info("🔄 Starting bot with new configuration")
+                main.SOURCE_CHANNEL = source
+                main.DESTINATION_CHANNEL = destination
+                main.load_channel_config()  # Reload configuration
+            else:
+                logger.info("🔄 Stopping bot")
+                main.SOURCE_CHANNEL = None
+                main.DESTINATION_CHANNEL = None
+
+            session['bot_running'] = status
+            logger.info(f"✅ Bot status changed to: {'running' if status else 'stopped'}")
+
+            return jsonify({
+                'status': status,
+                'message': f"Bot is now {'running' if status else 'stopped'}"
+            })
+
         except Exception as e:
-            logger.error(f"Error configuring bot channels: {e}")
-            return jsonify({'error': 'Failed to configure bot channels'}), 500
+            logger.error(f"❌ Error configuring bot: {e}")
+            return jsonify({'error': 'Failed to configure bot'}), 500
 
-        session['bot_running'] = status
-        logger.info(f"Bot status changed to: {'running' if status else 'stopped'}")
-
-        return jsonify({
-            'status': status,
-            'message': f"Bot is now {'running' if status else 'stopped'}"
-        })
     except Exception as e:
-        logger.error(f"Error toggling bot: {str(e)}")
+        logger.error(f"❌ Error toggling bot: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
