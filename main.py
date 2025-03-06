@@ -160,6 +160,11 @@ async def setup_client():
         logger.error(f"❌ Client setup error: {str(e)}")
         return False
 
+    finally:
+        if client and not client.is_connected():
+            await client.disconnect()
+            client = None
+
 async def setup_handlers():
     """Set up message handlers"""
     global client

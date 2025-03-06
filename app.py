@@ -172,6 +172,10 @@ async def send_otp():
         try:
             client = await telegram_manager.get_auth_client()
 
+            # Clear any existing session data
+            session.pop('phone_code_hash', None)
+            session.pop('session_string', None)
+
             # Check existing session
             if await client.is_user_authorized():
                 session['user_phone'] = phone
@@ -213,6 +217,11 @@ async def verify_otp():
         try:
             client = await telegram_manager.get_auth_client()
             try:
+                # Clear any existing session
+                if await client.is_user_authorized():
+                    await client.log_out()
+
+                # Try signing in
                 await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
             except SessionPasswordNeededError:
                 if not password:
@@ -223,7 +232,18 @@ async def verify_otp():
                 try:
                     await client.sign_in(password=password)
                 except Exception as e:
+                    session.pop('phone_code_hash', None)  # Clear failed OTP
                     return jsonify({'error': 'Invalid 2FA password'}), 400
+            except Exception as e:
+                if "phone code expired" in str(e).lower() or "code expired" in str(e).lower():
+                    # Clear expired OTP from session
+                    session.pop('phone_code_hash', None)
+                    return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
+                elif "invalid" in str(e).lower():
+                    return jsonify({'error': 'Invalid OTP. Please try again.'}), 400
+                else:
+                    logger.error(f"❌ Sign in error: {str(e)}")
+                    return jsonify({'error': str(e)}), 400
 
             if await client.is_user_authorized():
                 # Save session string and mark as logged in
@@ -231,9 +251,13 @@ async def verify_otp():
                 session['session_string'] = client.session.save()
                 return jsonify({'message': 'Login successful'})
             else:
-                return jsonify({'error': 'Invalid OTP'}), 400
+                session.pop('phone_code_hash', None)  # Clear invalid OTP
+                return jsonify({'error': 'Authentication failed. Please try again.'}), 400
 
         except Exception as e:
+            logger.error(f"❌ Verify OTP error: {str(e)}")
+            # Clear failed session
+            session.pop('phone_code_hash', None)
             return jsonify({'error': str(e)}), 500
 
     except Exception as e:
@@ -340,42 +364,62 @@ def toggle_bot():
         if not source or not destination:
             return jsonify({'error': 'Configure channels first'}), 400
 
-        if not session.get('session_string'):
+        session_string = session.get('session_string')
+        if not session_string:
             return jsonify({'error': 'Session expired, please login again'}), 401
 
         import main
         if status:
-            # Share session with main.py
-            main.SESSION_STRING = session.get('session_string')
+            try:
+                # Share session with main.py
+                main.SESSION_STRING = session_string
+                main.SOURCE_CHANNEL = source
+                main.DESTINATION_CHANNEL = destination
 
-            # Start bot
-            def start_bot():
-                try:
-                    main.SOURCE_CHANNEL = source
-                    main.DESTINATION_CHANNEL = destination
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+                # Start bot in a daemon thread
+                def start_bot():
                     try:
-                        loop.run_until_complete(main.main())
-                    finally:
-                        loop.close()
-                except Exception as e:
-                    logger.error(f"❌ Bot error: {str(e)}")
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(main.main())
+                        except Exception as e:
+                            logger.error(f"❌ Bot startup error: {str(e)}")
+                        finally:
+                            loop.close()
+                    except Exception as e:
+                        logger.error(f"❌ Thread error: {str(e)}")
 
-            # Start bot in a daemon thread
-            bot_thread = threading.Thread(target=start_bot, daemon=True)
-            bot_thread.start()
-            session['bot_running'] = True
+                bot_thread = threading.Thread(target=start_bot, daemon=True)
+                bot_thread.start()
+                session['bot_running'] = True
+                logger.info("✅ Bot started successfully")
+
+                return jsonify({
+                    'status': True,
+                    'message': 'Bot is now running'
+                })
+
+            except Exception as e:
+                logger.error(f"❌ Bot start error: {str(e)}")
+                return jsonify({'error': str(e)}), 500
         else:
-            # Stop bot
-            main.SOURCE_CHANNEL = None
-            main.DESTINATION_CHANNEL = None
-            session['bot_running'] = False
+            try:
+                # Stop bot
+                main.SESSION_STRING = None
+                main.SOURCE_CHANNEL = None
+                main.DESTINATION_CHANNEL = None
+                session['bot_running'] = False
+                logger.info("✅ Bot stopped successfully")
 
-        return jsonify({
-            'status': status,
-            'message': f"Bot is now {'running' if status else 'stopped'}"
-        })
+                return jsonify({
+                    'status': False,
+                    'message': 'Bot is now stopped'
+                })
+
+            except Exception as e:
+                logger.error(f"❌ Bot stop error: {str(e)}")
+                return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         logger.error(f"❌ Bot toggle error: {str(e)}")
