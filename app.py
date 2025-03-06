@@ -61,6 +61,7 @@ class EventLoopManager:
     _instance = None
     _lock = threading.Lock()
     _loop = None
+    _client = None
 
     @classmethod
     def get_loop(cls):
@@ -75,6 +76,14 @@ class EventLoopManager:
         return cls._loop
 
     @classmethod
+    def get_client(cls):
+        return cls._client
+
+    @classmethod
+    def set_client(cls, client):
+        cls._client = client
+
+    @classmethod
     def reset(cls):
         with cls._lock:
             if cls._loop:
@@ -83,6 +92,7 @@ class EventLoopManager:
                 except:
                     pass
                 cls._loop = None
+            cls._client = None
 
 # Database connection
 @contextmanager
@@ -128,43 +138,46 @@ class TelegramManager:
         self.session_name = session_name
         self.api_id = api_id
         self.api_hash = api_hash
-        self.client = None
         self._lock = Lock()
 
     async def get_client(self):
+        client = EventLoopManager.get_client()
+        if client and client.is_connected():
+            return client
+
         with self._lock:
-            if not self.client:
-                loop = EventLoopManager.get_loop()
-                self.client = TelegramClient(
-                    self.session_name,
-                    self.api_id,
-                    self.api_hash,
-                    device_model="Replit Web",
-                    system_version="Linux",
-                    app_version="1.0",
-                    loop=loop
-                )
+            loop = EventLoopManager.get_loop()
+            client = TelegramClient(
+                self.session_name,
+                self.api_id,
+                self.api_hash,
+                device_model="Replit Web",
+                system_version="Linux",
+                app_version="1.0",
+                loop=loop
+            )
 
-            if not self.client.is_connected():
-                await self.client.connect()
+            if not client.is_connected():
+                await client.connect()
 
-            return self.client
+            EventLoopManager.set_client(client)
+            return client
 
     async def disconnect(self):
         with self._lock:
-            if self.client and self.client.is_connected():
-                await self.client.disconnect()
-                self.client = None
+            client = EventLoopManager.get_client()
+            if client and client.is_connected():
+                await client.disconnect()
+                EventLoopManager.set_client(None)
 
     def cleanup(self):
         with self._lock:
-            if self.client:
+            loop = EventLoopManager.get_loop()
+            if loop:
                 try:
-                    loop = EventLoopManager.get_loop()
                     loop.run_until_complete(self.disconnect())
                 except:
                     pass
-            self.client = None
             EventLoopManager.reset()
 
 # Create global Telegram manager
@@ -279,11 +292,15 @@ async def verify_otp():
 @login_required
 @async_route
 async def dashboard():
+    """Dashboard route with proper event loop handling"""
     try:
-        # Get and prepare Telegram client
+        # Get client using event loop manager
         client = await telegram_manager.get_client()
-        channels = []
+        if not client:
+            logger.error("❌ Failed to get Telegram client")
+            return redirect(url_for('login'))
 
+        channels = []
         try:
             # Get channels using existing event loop
             async for dialog in client.iter_dialogs():
@@ -547,7 +564,7 @@ def run_async(coro):
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
 def toggle_bot():
-    """Toggle bot status and manage Telegram client"""
+    """Toggle bot status with proper event loop handling"""
     try:
         status = request.form.get('status') == 'true'
         source = session.get('source_channel')
@@ -569,47 +586,27 @@ def toggle_bot():
             if status:
                 logger.info("🔄 Starting bot...")
 
-                # Stop existing client if running
-                if hasattr(main, 'client') and main.client:
-                    try:
-                        run_async(main.client.disconnect())
-                        logger.info("✅ Disconnected existing client")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error disconnecting client: {e}")
-
-                # Reset channels
-                main.SOURCE_CHANNEL = None
-                main.DESTINATION_CHANNEL = None
-
-                # Update channels
-                main.SOURCE_CHANNEL = source
-                main.DESTINATION_CHANNEL = destination
-                logger.info(f"✅ Updated channels - Source: {source}, Destination: {destination}")
-
                 # Start bot in a new thread
                 def start_bot():
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            loop.run_until_complete(main.main())
-                        except Exception as e:
-                            logger.error(f"❌ Bot error: {str(e)}")
-                        finally:
-                            loop.close()
-                            asyncio.set_event_loop(None)
+                        main.SOURCE_CHANNEL = source
+                        main.DESTINATION_CHANNEL = destination
+                        loop = EventLoopManager.get_loop()
+                        loop.run_until_complete(main.main())
                     except Exception as e:
-                        logger.error(f"❌ Thread error: {str(e)}")
+                        logger.error(f"❌ Bot error: {str(e)}")
 
                 bot_thread = Thread(target=start_bot, daemon=True)
                 bot_thread.start()
-                logger.info("✅ Started Telegram client in new thread")
+                logger.info("✅ Started bot thread")
 
             else:
                 logger.info("🔄 Stopping bot...")
-                if hasattr(main, 'client') and main.client:
+                client = EventLoopManager.get_client()
+                if client:
                     try:
-                        run_async(main.client.disconnect())
+                        loop = EventLoopManager.get_loop()
+                        loop.run_until_complete(client.disconnect())
                         logger.info("✅ Disconnected client")
                     except Exception as e:
                         logger.warning(f"⚠️ Error disconnecting client: {e}")
@@ -631,9 +628,7 @@ def toggle_bot():
             return jsonify({'error': 'Bot module not found'}), 500
         except Exception as e:
             logger.error(f"❌ Bot toggle error: {str(e)}")
-            import traceback
-            logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
-            return jsonify({'error': 'Failed to toggle bot status'}), 500
+            return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         logger.error(f"❌ Route error: {str(e)}")

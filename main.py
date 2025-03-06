@@ -2,7 +2,7 @@ import os
 import logging
 import json
 import time
-from threading import Thread
+from threading import Thread, Lock
 import psycopg2
 from psycopg2.extras import DictCursor
 import asyncio
@@ -42,6 +42,7 @@ def get_db():
         return None
 
 def load_channel_config():
+    """Load channel configuration from database"""
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
     try:
         conn = get_db()
@@ -56,6 +57,7 @@ def load_channel_config():
                 LIMIT 1
             """)
             result = cur.fetchone()
+
             if result:
                 SOURCE_CHANNEL = result['source_channel']
                 DESTINATION_CHANNEL = result['destination_channel']
@@ -64,6 +66,7 @@ def load_channel_config():
             else:
                 logger.warning("❌ No channel configuration found")
                 return False
+
     except Exception as e:
         logger.error(f"❌ Error loading channels: {str(e)}")
         return False
@@ -72,6 +75,7 @@ def load_channel_config():
             conn.close()
 
 def load_user_replacements(user_id):
+    """Load text replacements for user"""
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
     try:
         conn = get_db()
@@ -87,11 +91,13 @@ def load_user_replacements(user_id):
             """, (user_id,))
             TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
             CURRENT_USER_ID = user_id
+
             logger.info(f"👤 Loaded replacements for user {user_id}")
             logger.info(f"📚 Found {len(TEXT_REPLACEMENTS)} replacements")
             for original, replacement in TEXT_REPLACEMENTS.items():
                 logger.info(f"📝 Loaded: '{original}' → '{replacement}'")
             return True
+
     except Exception as e:
         logger.error(f"❌ Error loading replacements: {str(e)}")
         TEXT_REPLACEMENTS = {}
@@ -102,11 +108,8 @@ def load_user_replacements(user_id):
             conn.close()
 
 def apply_text_replacements(text):
-    if not text:
-        return text
-
-    if not TEXT_REPLACEMENTS:
-        logger.info("❌ No replacements configured")
+    """Apply text replacements to message"""
+    if not text or not TEXT_REPLACEMENTS:
         return text
 
     result = text
@@ -117,6 +120,7 @@ def apply_text_replacements(text):
     return result
 
 async def setup_client():
+    """Initialize Telegram client"""
     global client
 
     try:
@@ -150,6 +154,7 @@ async def setup_client():
         return False
 
 async def setup_handlers():
+    """Set up message handlers for Telegram client"""
     global client
 
     try:
@@ -163,8 +168,10 @@ async def setup_handlers():
         @client.on(events.NewMessage())
         async def handle_new_message(event):
             try:
+                # Log message details
                 logger.info("\n📨 New message received")
                 logger.info(f"- Chat ID: {event.chat_id}")
+                logger.info(f"- Message ID: {event.message.id}")
                 logger.info(f"- Message: {event.message.text}")
 
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
@@ -174,31 +181,23 @@ async def setup_handlers():
                 # Format chat IDs
                 chat_id = str(event.chat_id)
                 source_id = str(SOURCE_CHANNEL)
-
                 if not chat_id.startswith('-100'):
                     chat_id = f"-100{chat_id.lstrip('-')}"
                 if not source_id.startswith('-100'):
                     source_id = f"-100{source_id.lstrip('-')}"
 
-                logger.info(f"🔍 Comparing channels:")
-                logger.info(f"- Source: {source_id}")
-                logger.info(f"- Message from: {chat_id}")
-
+                # Verify source channel
                 if chat_id != source_id:
-                    logger.info("👉 Not from source channel")
                     return
 
                 logger.info("✅ Message is from source channel")
 
                 # Process message
                 message_text = event.message.text if event.message.text else ""
-                logger.info(f"📥 Original message: {message_text}")
-
                 if message_text and TEXT_REPLACEMENTS:
                     message_text = apply_text_replacements(message_text)
-                    logger.info(f"📝 After replacements: {message_text}")
 
-                # Format destination ID
+                # Format destination channel ID
                 dest_id = str(DESTINATION_CHANNEL)
                 if not dest_id.startswith('-100'):
                     dest_id = f"-100{dest_id.lstrip('-')}"
@@ -206,37 +205,51 @@ async def setup_handlers():
                 # Send to destination
                 try:
                     dest_channel = await client.get_entity(int(dest_id))
-                    logger.info(f"📤 Forwarding to: {getattr(dest_channel, 'title', 'Unknown')}")
-
                     sent_message = await client.send_message(
                         dest_channel,
                         message_text,
                         formatting_entities=event.message.entities
                     )
-
                     MESSAGE_IDS[event.message.id] = sent_message.id
                     logger.info("✅ Message forwarded successfully")
 
                 except Exception as e:
                     logger.error(f"❌ Forward error: {str(e)}")
-                    import traceback
-                    logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
 
             except Exception as e:
                 logger.error(f"❌ Handler error: {str(e)}")
-                import traceback
-                logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
+
+        # Add edit handler
+        @client.on(events.MessageEdited())
+        async def handle_edit(event):
+            try:
+                if event.chat_id != int(SOURCE_CHANNEL):
+                    return
+
+                dest_msg_id = MESSAGE_IDS.get(event.message.id)
+                if not dest_msg_id:
+                    return
+
+                message_text = event.message.text
+                if message_text and TEXT_REPLACEMENTS:
+                    message_text = apply_text_replacements(message_text)
+
+                dest_channel = await client.get_entity(int(DESTINATION_CHANNEL))
+                await client.edit_message(
+                    dest_channel,
+                    dest_msg_id,
+                    message_text,
+                    formatting_entities=event.message.entities
+                )
+                logger.info("✅ Message edit synced successfully")
+
+            except Exception as e:
+                logger.error(f"❌ Edit sync error: {str(e)}")
 
         # Add debug handler
         @client.on(events.Raw)
         async def debug_raw_events(event):
-            logger.info(f"🔍 Raw event: {type(event).__name__}")
-
-        # Verify handlers
-        handlers = client.list_event_handlers()
-        logger.info(f"\n✅ Total handlers: {len(handlers)}")
-        for handler in handlers:
-            logger.info(f"📌 Handler: {handler}")
+            logger.debug(f"🔍 Raw event: {type(event).__name__}")
 
         return True
 
@@ -245,6 +258,7 @@ async def setup_handlers():
         return False
 
 async def main():
+    """Main function to run the bot"""
     global client
 
     try:
@@ -276,8 +290,6 @@ async def main():
 
     except Exception as e:
         logger.error(f"❌ Critical error: {str(e)}")
-        import traceback
-        logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
         if client and client.is_connected():
             await client.disconnect()
         return False

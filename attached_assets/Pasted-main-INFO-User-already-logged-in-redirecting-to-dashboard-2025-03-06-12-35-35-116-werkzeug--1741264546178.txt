@@ -1,0 +1,20 @@
+main__ - INFO - User already logged in, redirecting to dashboard
+2025-03-06 12:35:35,116 - werkzeug - INFO - 172.31.128.19 - - [06/Mar/2025 12:35:35] "GET / HTTP/1.1" 302 -
+2025-03-06 12:35:35,566 - asyncio - DEBUG - Using selector: EpollSelector
+2025-03-06 12:35:35,567 - __main__ - ERROR - Error loading dashboard data: The asyncio event loop must not change after connection (see the FAQ for details)
+2025-03-06 12:35:35,567 - __main__ - ERROR - Critical error in dashboard: The asyncio event loop must not change after connection (see the FAQ for details)
+2025-03-06 12:35:35,785 - werkzeug - INFO - 172.31.128.19 - - [06/Mar/2025 12:35:35] "GET /dashboard HTTP/1.1" 302 -
+2025-03-06 12:35:36,211 - __main__ - INFO - Accessing login page
+2025-03-06 12:35:36,211 - __main__ - INFO - User already logged in, redirecting to dashboard
+2025-03-06 12:35:36,429 - werkzeug - INFO - 172.31.128.19 - - [06/Mar/2025 12:35:36] "GET / HTTP/1.1" 302 -
+2025-03-06 12:35:36,867 - asyncio - DEBUG - Using selector: EpollSelector
+2025-03-06 12:35:36,868 - __main__ - ERROR - Error loading dashboard data: The asyncio event loop must not change after connection (see the FAQ for details)
+2025-03-06 12:35:36,868 - __main__ - ERROR - Critical error in dashboard: The asyncio event loop must not change after connection (see the FAQ for details)
+2025-03-06 12:35:37,086 - werkzeug - INFO - 172.31.128.19 - - [06/Mar/2025 12:35:37] "GET /dashboard HTTP/1.1" 302 -
+2025-03-06 12:35:37,540 - __main__ - INFO - Accessing login page
+2025-03-06 12:35:37,540 - __main__ - INFO - User already logged in, redirecting to dashboard
+2025-03-06 12:35:37,758 - werkzeug - INFO - 172.31.128.19 - - [06/Mar/2025 12:35:37] "GET / HTTP/1.1" 302 -
+2025-03-06 12:35:38,218 - asyncio - DEBUG - Using selector: EpollSelector
+2025-03-06 12:35:38,218 - __main__ - ERROR - Error loading dashboard data: The asyncio event loop must not change after connection (see the FAQ for details)
+2025-03-06 12:35:38,218 - __main__ - ERROR - Critical error in dashboard: The asyncio event loop must not change after connection (see the FAQ for details)
+2025-03-06 12:35:38,438 - werkzeug - INFO - 172.31.128.19 - - [06/Mar/2025 12:35:38] "GET /dashboard HTTP/1.1" 302 -
