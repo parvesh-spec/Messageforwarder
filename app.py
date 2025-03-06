@@ -219,7 +219,7 @@ async def verify_otp():
             logger.error("❌ OTP missing")
             return jsonify({'error': 'OTP is required'}), 400
 
-        with db_lock:
+        try:
             client = await telegram_manager.get_client()
             try:
                 await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
@@ -236,17 +236,27 @@ async def verify_otp():
                     logger.info("✅ 2FA verification successful")
                 except Exception as e:
                     logger.error(f"❌ 2FA failed: {e}")
+                    await telegram_manager.disconnect()
+                    telegram_manager.cleanup()
                     return jsonify({'error': 'Invalid 2FA password'}), 400
 
             if await client.is_user_authorized():
                 session['logged_in'] = True
                 return jsonify({'message': 'Login successful'})
             else:
+                await telegram_manager.disconnect()
+                telegram_manager.cleanup()
                 return jsonify({'error': 'Invalid OTP'}), 400
 
+        except Exception as e:
+            logger.error(f"❌ Verify OTP error: {str(e)}")
+            await telegram_manager.disconnect()
+            telegram_manager.cleanup()
+            return jsonify({'error': str(e)}), 500
+
     except Exception as e:
-        logger.error(f"❌ Verify OTP error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"❌ Critical error in verify_otp: {str(e)}")
+        return jsonify({'error': 'Server error'}), 500
 
 #Telegram client manager
 class TelegramManager:
@@ -261,28 +271,43 @@ class TelegramManager:
     async def get_client(self):
         with self._lock:
             if not self.client:
-                if not self.loop:
-                    self.loop = asyncio.get_event_loop()
-                self.client = TelegramClient(
-                    self.session_name,
-                    self.api_id,
-                    self.api_hash,
-                    device_model="Replit Web",
-                    system_version="Linux",
-                    app_version="1.0",
-                    loop=self.loop
-                )
+                try:
+                    if not self.loop:
+                        self.loop = asyncio.get_event_loop()
+                    self.client = TelegramClient(
+                        self.session_name,
+                        self.api_id,
+                        self.api_hash,
+                        device_model="Replit Web",
+                        system_version="Linux",
+                        app_version="1.0",
+                        loop=self.loop
+                    )
+                except Exception as e:
+                    logger.error(f"❌ Client creation error: {e}")
+                    self.cleanup()
+                    raise
 
-            if not self.client.is_connected():
-                await self.client.connect()
+            try:
+                if not self.client.is_connected():
+                    await self.client.connect()
+            except Exception as e:
+                logger.error(f"❌ Connection error: {e}")
+                self.cleanup()
+                raise
 
             return self.client
 
     async def disconnect(self):
         with self._lock:
-            if self.client and self.client.is_connected():
-                await self.client.disconnect()
-                self.client = None
+            if self.client:
+                try:
+                    if self.client.is_connected():
+                        await self.client.disconnect()
+                except Exception as e:
+                    logger.error(f"❌ Disconnect error: {e}")
+                finally:
+                    self.client = None
 
     def cleanup(self):
         with self._lock:
