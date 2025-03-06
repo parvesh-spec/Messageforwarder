@@ -327,28 +327,38 @@ async def dashboard():
             # Get last selected channels from database using proper SQL formatting
             with get_db() as session:
                 sql = text("""
-                    SELECT source_channel, destination_channel 
+                    SELECT source_channel as src, destination_channel as dst
                     FROM channel_config 
                     ORDER BY updated_at DESC 
                     LIMIT 1
                 """)
-                result = session.execute(sql)
-                last_config = result.fetchone()
+                result = session.execute(sql).first()
+
+                # Handle result properly
+                last_source = None
+                last_dest = None
+                if result:
+                    # Access by column aliases
+                    last_source = result.src
+                    last_dest = result.dst
+                    logger.info(f"✅ Loaded last config - Source: {last_source}, Dest: {last_dest}")
+                else:
+                    logger.info("ℹ️ No previous channel configuration found")
 
             return render_template('dashboard.html', 
                                 channels=channels,
-                                last_source=last_config['source_channel'] if last_config else None,
-                                last_dest=last_config['destination_channel'] if last_config else None)
+                                last_source=last_source,
+                                last_dest=last_dest)
 
         except Exception as e:
-            logger.error(f"Error loading dashboard data: {str(e)}")
+            logger.error(f"❌ Error loading dashboard data: {str(e)}")
             raise
 
         finally:
             await telegram_manager.disconnect()
 
     except Exception as e:
-        logger.error(f"Critical error in dashboard: {str(e)}")
+        logger.error(f"❌ Critical error in dashboard: {str(e)}")
         return redirect(url_for('login'))
 
 @app.route('/static/<path:filename>')

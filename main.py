@@ -61,17 +61,16 @@ def load_channel_config():
     try:
         session = get_db()
         sql = text("""
-            SELECT source_channel, destination_channel 
+            SELECT source_channel as src, destination_channel as dst
             FROM channel_config 
             ORDER BY updated_at DESC 
             LIMIT 1
         """)
-        result = session.execute(sql)
-        config = result.fetchone()
+        result = session.execute(sql).first()
 
-        if config:
-            SOURCE_CHANNEL = config['source_channel']
-            DESTINATION_CHANNEL = config['destination_channel']
+        if result:
+            SOURCE_CHANNEL = result.src
+            DESTINATION_CHANNEL = result.dst
             logger.info(f"📱 Loaded channels - Source: {SOURCE_CHANNEL}, Dest: {DESTINATION_CHANNEL}")
             return True
         else:
@@ -87,14 +86,14 @@ def load_user_replacements(user_id):
     try:
         session = get_db()
         sql = text("""
-            SELECT original_text, replacement_text 
+            SELECT original_text as orig, replacement_text as repl
             FROM text_replacements 
             WHERE user_id = :user_id
             ORDER BY LENGTH(original_text) DESC
         """)
         result = session.execute(sql, {"user_id": user_id})
 
-        TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in result}
+        TEXT_REPLACEMENTS = {row.orig: row.repl for row in result}
         CURRENT_USER_ID = user_id
 
         logger.info(f"👤 Loaded replacements for user {user_id}")
