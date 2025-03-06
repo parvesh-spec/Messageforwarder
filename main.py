@@ -3,12 +3,13 @@ import logging
 import json
 import time
 from threading import Thread
-import psycopg2
-from psycopg2.extras import DictCursor
 import asyncio
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, AuthKeyUnregisteredError
 from telethon.sessions import StringSession
+from sqlalchemy import create_engine
+from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy.pool import QueuePool
 
 # Set up logging
 logging.basicConfig(
@@ -29,86 +30,84 @@ client = None
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
-def get_db():
-    conn = psycopg2.connect(
-        os.getenv('DATABASE_URL'),
-        application_name='telegram_bot_main'
-    )
-    conn.autocommit = True
-    return conn
+# Configure database engine with proper pooling
+engine = create_engine(
+    os.getenv('DATABASE_URL'),
+    poolclass=QueuePool,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800
+)
 
-def get_user_id_by_phone(phone):
+# Create session factory
+Session = scoped_session(sessionmaker(bind=engine))
+
+def get_db():
+    """Get a database session with proper error handling"""
+    session = Session()
     try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
-            result = cur.fetchone()
-            if result:
-                return result[0]
-            logger.warning(f"❌ No user found for phone: {phone}")
-            return None
+        return session
     except Exception as e:
         logger.error(f"❌ Database error: {str(e)}")
-        return None
+        session.rollback()
+        raise
     finally:
-        if conn:
-            conn.close()
+        session.close()
 
 def load_channel_config():
+    """Load channel configuration from database"""
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
     try:
-        conn = get_db()
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("""
-                SELECT source_channel, destination_channel 
-                FROM channel_config 
-                ORDER BY updated_at DESC 
-                LIMIT 1
-            """)
-            result = cur.fetchone()
-            if result:
-                SOURCE_CHANNEL = result['source_channel']
-                DESTINATION_CHANNEL = result['destination_channel']
-                logger.info(f"📱 Loaded channels - Source: {SOURCE_CHANNEL}, Dest: {DESTINATION_CHANNEL}")
-                return True
-            else:
-                logger.warning("❌ No channel configuration found")
-                return False
+        session = get_db()
+        result = session.execute("""
+            SELECT source_channel, destination_channel 
+            FROM channel_config 
+            ORDER BY updated_at DESC 
+            LIMIT 1
+        """)
+        config = result.fetchone()
+
+        if config:
+            SOURCE_CHANNEL = config['source_channel']
+            DESTINATION_CHANNEL = config['destination_channel']
+            logger.info(f"📱 Loaded channels - Source: {SOURCE_CHANNEL}, Dest: {DESTINATION_CHANNEL}")
+            return True
+        else:
+            logger.warning("❌ No channel configuration found")
+            return False
     except Exception as e:
         logger.error(f"❌ Error loading channels: {str(e)}")
         return False
-    finally:
-        if conn:
-            conn.close()
 
 def load_user_replacements(user_id):
+    """Load text replacements for user from database"""
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
     try:
-        conn = get_db()
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("""
-                SELECT original_text, replacement_text 
-                FROM text_replacements 
-                WHERE user_id = %s
-                ORDER BY LENGTH(original_text) DESC
-            """, (user_id,))
-            TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
-            CURRENT_USER_ID = user_id
-            logger.info(f"👤 Loaded replacements for user {user_id}")
-            logger.info(f"📚 Found {len(TEXT_REPLACEMENTS)} replacements")
-            for original, replacement in TEXT_REPLACEMENTS.items():
-                logger.info(f"📝 Loaded: '{original}' → '{replacement}'")
-            return True
+        session = get_db()
+        result = session.execute("""
+            SELECT original_text, replacement_text 
+            FROM text_replacements 
+            WHERE user_id = :user_id
+            ORDER BY LENGTH(original_text) DESC
+        """, {"user_id": user_id})
+
+        TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in result}
+        CURRENT_USER_ID = user_id
+
+        logger.info(f"👤 Loaded replacements for user {user_id}")
+        logger.info(f"📚 Found {len(TEXT_REPLACEMENTS)} replacements")
+        for original, replacement in TEXT_REPLACEMENTS.items():
+            logger.info(f"📝 Loaded: '{original}' → '{replacement}'")
+        return True
     except Exception as e:
         logger.error(f"❌ Error loading replacements: {str(e)}")
         TEXT_REPLACEMENTS = {}
         CURRENT_USER_ID = None
         return False
-    finally:
-        if conn:
-            conn.close()
 
 def apply_text_replacements(text):
+    """Apply text replacements to message"""
     if not text:
         return text
 
@@ -124,6 +123,7 @@ def apply_text_replacements(text):
     return result
 
 async def setup_client():
+    """Initialize and setup Telegram client"""
     global client
 
     try:
@@ -157,6 +157,7 @@ async def setup_client():
         return False
 
 async def setup_handlers():
+    """Setup message handlers for the client"""
     global client
 
     try:
@@ -187,10 +188,6 @@ async def setup_handlers():
                 if not source_id.startswith('-100'):
                     source_id = f"-100{source_id.lstrip('-')}"
 
-                logger.info(f"🔍 Comparing channels:")
-                logger.info(f"- Source: {source_id}")
-                logger.info(f"- Message from: {chat_id}")
-
                 if chat_id != source_id:
                     logger.info("👉 Not from source channel")
                     return
@@ -203,7 +200,6 @@ async def setup_handlers():
                     logger.info(f"📥 Original message: {message_text}")
 
                     if message_text and TEXT_REPLACEMENTS:
-                        old_text = message_text
                         message_text = apply_text_replacements(message_text)
                         logger.info(f"📝 After replacements: {message_text}")
 
@@ -253,6 +249,7 @@ async def setup_handlers():
         return False
 
 async def main():
+    """Main function to run the Telegram bot"""
     global client
 
     try:

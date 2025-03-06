@@ -70,185 +70,9 @@ Base.metadata.create_all(engine)
 app.config['SESSION_SQLALCHEMY'] = db
 Session(app)
 
-# Database connection management
-@app.teardown_appcontext
-def shutdown_session(exception=None):
-    DBSession.remove()
+# Database lock for concurrent operations
+db_lock = Lock()
 
-def get_db():
-    if not hasattr(g, 'db_session'):
-        g.db_session = DBSession()
-    return g.db_session
-
-@app.teardown_appcontext
-def close_db(e=None):
-    db_session = g.pop('db_session', None)
-    if db_session is not None:
-        db_session.close()
-
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_phone' not in session:
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-def async_route(f):
-    @wraps(f)
-    def wrapped(*args, **kwargs):
-        return async_to_sync(f)(*args, **kwargs)
-    return wrapped
-
-# Ensure static folder exists
-os.makedirs('static/css', exist_ok=True)
-
-# Create a basic CSS file if it doesn't exist
-if not os.path.exists('static/css/style.css'):
-    with open('static/css/style.css', 'w') as f:
-        f.write("""
-            body {
-                font-family: Arial, sans-serif;
-                margin: 0;
-                padding: 20px;
-                background-color: #f0f2f5;
-            }
-            .login-container {
-                max-width: 400px;
-                margin: 50px auto;
-                padding: 20px;
-                background: white;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-            }
-            input {
-                width: 100%;
-                padding: 8px;
-                margin-bottom: 10px;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-            }
-            button {
-                width: 100%;
-                padding: 10px;
-                background-color: #0066cc;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-            }
-            button:hover {
-                background-color: #0052a3;
-            }
-        """)
-
-@app.route('/')
-def login():
-    logger.info("Accessing login page")
-    if 'logged_in' in session and session['logged_in']:
-        logger.info("User already logged in, redirecting to dashboard")
-        return redirect(url_for('dashboard'))
-    return render_template('login.html')
-
-@app.route('/send-otp', methods=['POST'])
-@async_route
-async def send_otp():
-    try:
-        phone = request.form.get('phone')
-        if not phone:
-            logger.error("❌ Phone number missing")
-            return jsonify({'error': 'Phone number is required'}), 400
-
-        if not phone.startswith('+91'):
-            logger.error(f"❌ Invalid phone format: {phone}")
-            return jsonify({'error': 'Phone number must start with +91'}), 400
-
-        try:
-            # Get Telegram client
-            client = await telegram_manager.get_client()
-
-            try:
-                # Check existing session
-                if await client.is_user_authorized():
-                    logger.info(f"✅ Found valid session for {phone}")
-                    session['user_phone'] = phone
-                    session['logged_in'] = True
-                    return jsonify({'message': 'Already authorized', 'already_authorized': True})
-
-                # Send OTP
-                sent = await client.send_code_request(phone)
-                session['user_phone'] = phone
-                session['phone_code_hash'] = sent.phone_code_hash
-                logger.info("✅ OTP sent successfully")
-                return jsonify({'message': 'OTP sent successfully'})
-
-            except PhoneNumberInvalidError:
-                logger.error(f"❌ Invalid phone: {phone}")
-                return jsonify({'error': 'Invalid phone number'}), 400
-
-            except Exception as e:
-                logger.error(f"❌ Send OTP error: {str(e)}")
-                return jsonify({'error': str(e)}), 500
-
-            finally:
-                # Always disconnect client on completion
-                await telegram_manager.disconnect()
-
-        except Exception as e:
-            logger.error(f"❌ Client error: {str(e)}")
-            return jsonify({'error': 'Failed to initialize Telegram client'}), 500
-
-    except Exception as e:
-        logger.error(f"❌ Critical error in send_otp: {str(e)}")
-        return jsonify({'error': 'Server error'}), 500
-
-@app.route('/verify-otp', methods=['POST'])
-@async_route
-async def verify_otp():
-    try:
-        phone = session.get('user_phone')
-        phone_code_hash = session.get('phone_code_hash')
-        otp = request.form.get('otp')
-        password = request.form.get('password')
-
-        if not phone or not phone_code_hash:
-            logger.error("❌ Missing session data")
-            return jsonify({'error': 'Session expired. Please try again.'}), 400
-
-        if not otp:
-            logger.error("❌ OTP missing")
-            return jsonify({'error': 'OTP is required'}), 400
-
-        with db_lock:
-            client = await telegram_manager.get_client()
-            try:
-                await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
-                logger.info("✅ Sign in successful")
-            except SessionPasswordNeededError:
-                logger.info("⚠️ 2FA needed")
-                if not password:
-                    return jsonify({
-                        'error': 'two_factor_needed',
-                        'message': 'Two-factor authentication required'
-                    })
-                try:
-                    await client.sign_in(password=password)
-                    logger.info("✅ 2FA verification successful")
-                except Exception as e:
-                    logger.error(f"❌ 2FA failed: {e}")
-                    return jsonify({'error': 'Invalid 2FA password'}), 400
-
-            if await client.is_user_authorized():
-                session['logged_in'] = True
-                return jsonify({'message': 'Login successful'})
-            else:
-                return jsonify({'error': 'Invalid OTP'}), 400
-
-    except Exception as e:
-        logger.error(f"❌ Verify OTP error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-#Telegram client manager
 class TelegramManager:
     def __init__(self, session_name, api_id, api_hash):
         self.session_name = session_name
@@ -296,169 +120,146 @@ telegram_manager = TelegramManager(
     os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 )
 
-def get_user_id(phone):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
-                result = cur.fetchone()
-                if result:
-                    return result[0]
-                cur.execute("INSERT INTO users (phone) VALUES (%s) RETURNING id", (phone,))
-                conn.commit()
-                return cur.fetchone()[0]
-    except Exception as e:
-        logger.error(f"Error getting user ID: {str(e)}")
-        return None
+# Database connection management
+def get_db():
+    """Get SQLAlchemy session with proper error handling"""
+    if not hasattr(g, 'db_session'):
+        g.db_session = DBSession()
+    return g.db_session
 
-@app.route('/dashboard')
-@login_required
+@app.teardown_appcontext
+def cleanup_session(exception=None):
+    """Cleanup database session and client on request end"""
+    db_session = g.pop('db_session', None)
+    if db_session is not None:
+        db_session.close()
+    DBSession.remove()
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_phone' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def async_route(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        return async_to_sync(f)(*args, **kwargs)
+    return wrapped
+
+@app.route('/')
+def login():
+    """Render login page or redirect to dashboard if already logged in"""
+    logger.info("Accessing login page")
+    if 'logged_in' in session and session['logged_in']:
+        logger.info("User already logged in, redirecting to dashboard")
+        return redirect(url_for('dashboard'))
+    return render_template('login.html')
+
+@app.route('/send-otp', methods=['POST'])
 @async_route
-async def dashboard():
+async def send_otp():
+    """Handle OTP request and send code"""
     try:
-        client = await telegram_manager.get_client()
-        channels = []
+        phone = request.form.get('phone')
+        if not phone:
+            logger.error("❌ Phone number missing")
+            return jsonify({'error': 'Phone number is required'}), 400
 
+        if not phone.startswith('+91'):
+            logger.error(f"❌ Invalid phone format: {phone}")
+            return jsonify({'error': 'Phone number must start with +91'}), 400
+
+        client = None
         try:
-            async for dialog in client.iter_dialogs():
-                if dialog.is_channel:
-                    channels.append({
-                        'id': dialog.id,
-                        'name': dialog.name
-                    })
+            client = await telegram_manager.get_client()
 
-            # Get last selected channels from database
-            with get_db() as db:
-                with db.cursor(cursor_factory=DictCursor) as cur:
-                    cur.execute("""
-                        SELECT source_channel, destination_channel 
-                        FROM channel_config 
-                        ORDER BY updated_at DESC 
-                        LIMIT 1
-                    """)
-                    last_config = cur.fetchone()
+            # Check existing session
+            if await client.is_user_authorized():
+                logger.info(f"✅ Found valid session for {phone}")
+                session['user_phone'] = phone
+                session['logged_in'] = True
+                return jsonify({'message': 'Already authorized', 'already_authorized': True})
 
-            return render_template('dashboard.html', 
-                                    channels=channels,
-                                    last_source=last_config['source_channel'] if last_config else None,
-                                    last_dest=last_config['destination_channel'] if last_config else None)
+            # Send OTP
+            sent = await client.send_code_request(phone)
+            session['user_phone'] = phone
+            session['phone_code_hash'] = sent.phone_code_hash
+            logger.info("✅ OTP sent successfully")
+            return jsonify({'message': 'OTP sent successfully'})
 
+        except PhoneNumberInvalidError:
+            logger.error(f"❌ Invalid phone: {phone}")
+            return jsonify({'error': 'Invalid phone number'}), 400
         except Exception as e:
-            logger.error(f"Error loading dashboard data: {str(e)}")
-            raise
+            logger.error(f"❌ Send OTP error: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+        finally:
+            if client:
+                await telegram_manager.disconnect()
+
+    except Exception as e:
+        logger.error(f"❌ Critical error in send_otp: {str(e)}")
+        return jsonify({'error': 'Server error'}), 500
+
+@app.route('/verify-otp', methods=['POST'])
+@async_route
+async def verify_otp():
+    """Verify OTP and handle 2FA if needed"""
+    try:
+        phone = session.get('user_phone')
+        phone_code_hash = session.get('phone_code_hash')
+        otp = request.form.get('otp')
+        password = request.form.get('password')
+
+        if not phone or not phone_code_hash:
+            logger.error("❌ Missing session data")
+            return jsonify({'error': 'Session expired. Please try again.'}), 400
+
+        if not otp:
+            logger.error("❌ OTP missing")
+            return jsonify({'error': 'OTP is required'}), 400
+
+        client = None
+        try:
+            client = await telegram_manager.get_client()
+
+            try:
+                await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
+                logger.info("✅ Sign in successful")
+            except SessionPasswordNeededError:
+                logger.info("⚠️ 2FA needed")
+                if not password:
+                    return jsonify({
+                        'error': 'two_factor_needed',
+                        'message': 'Two-factor authentication required'
+                    })
+                try:
+                    await client.sign_in(password=password)
+                    logger.info("✅ 2FA verification successful")
+                except Exception as e:
+                    logger.error(f"❌ 2FA failed: {e}")
+                    return jsonify({'error': 'Invalid 2FA password'}), 400
+
+            if await client.is_user_authorized():
+                session['logged_in'] = True
+                return jsonify({'message': 'Login successful'})
+            else:
+                return jsonify({'error': 'Invalid OTP'}), 400
 
         finally:
-            await telegram_manager.disconnect()
+            if client:
+                await telegram_manager.disconnect()
 
     except Exception as e:
-        logger.error(f"Critical error in dashboard: {str(e)}")
-        return redirect(url_for('login'))
-
-@app.route('/add-replacement', methods=['POST'])
-@login_required
-def add_replacement():
-    try:
-        original = request.form.get('original')
-        replacement = request.form.get('replacement')
-        user_phone = session.get('user_phone')
-
-        if not original or not replacement:
-            logger.error("Missing replacement text parameters")
-            return jsonify({'error': 'Both original and replacement text are required'}), 400
-
-        user_id = get_user_id(user_phone)
-        if user_id is None:
-            return jsonify({'error': 'Failed to get user ID'}), 500
-
-        logger.info(f"Adding replacement for user {user_id}: '{original}' → '{replacement}'")
-
-        with get_db() as db:
-            with db.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO text_replacements (user_id, original_text, replacement_text)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (user_id, original_text) 
-                    DO UPDATE SET replacement_text = EXCLUDED.replacement_text
-                """, (user_id, original, replacement))
-                db.commit()
-
-        import main
-        main.CURRENT_USER_ID = user_id
-        main.load_user_replacements(user_id)
-        logger.info(f"Reloaded replacements for user {user_id}")
-
-        return jsonify({'message': 'Replacement added successfully'})
-    except Exception as e:
-        logger.error(f"Error adding replacement: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/get-replacements')
-@login_required
-def get_replacements():
-    try:
-        user_phone = session.get('user_phone')
-        user_id = get_user_id(user_phone)
-        if user_id is None:
-            return jsonify({'error': 'Failed to get user ID'}), 500
-        logger.info(f"Fetching replacements for user {user_id}")
-
-        with get_db() as db:
-            with db.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute("""
-                    SELECT original_text, replacement_text 
-                    FROM text_replacements 
-                    WHERE user_id = %s
-                    ORDER BY LENGTH(original_text) DESC
-                """, (user_id,))
-                replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
-                logger.info(f"Retrieved {len(replacements)} replacements for user {user_id}")
-
-        # Ensure text replacements are loaded in main.py
-        import main
-        main.CURRENT_USER_ID = user_id
-        main.load_user_replacements(user_id)
-
-        return jsonify(replacements)
-    except Exception as e:
-        logger.error(f"Error getting replacements: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/remove-replacement', methods=['POST'])
-@login_required
-def remove_replacement():
-    try:
-        original = request.form.get('original')
-        user_phone = session.get('user_phone')
-
-        if not original:
-            return jsonify({'error': 'Original text is required'}), 400
-
-        user_id = get_user_id(user_phone)
-        if user_id is None:
-            return jsonify({'error': 'Failed to get user ID'}), 500
-
-        with get_db() as db:
-            with db.cursor() as cur:
-                cur.execute("""
-                    DELETE FROM text_replacements 
-                    WHERE user_id = %s AND original_text = %s
-                """, (user_id, original))
-                deleted = cur.rowcount > 0
-                db.commit()
-
-        if deleted:
-            import main
-            main.load_user_replacements(user_id)
-            return jsonify({'message': 'Replacement removed successfully'})
-        else:
-            return jsonify({'error': 'Replacement not found'}), 404
-
-    except Exception as e:
-        logger.error(f"Error removing replacement: {str(e)}")
+        logger.error(f"❌ Verify OTP error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/logout')
 def logout():
+    """Handle user logout and cleanup resources"""
     try:
         phone = session.get('user_phone')
         if phone:
@@ -473,8 +274,8 @@ def logout():
         # Clean up resources
         try:
             telegram_manager.cleanup()
-            DBSession.remove()  # Remove the current session
-            session.clear()   # Clear Flask session
+            DBSession.remove()
+            session.clear()
         except Exception as e:
             logger.error(f"❌ Cleanup error: {str(e)}")
 
@@ -483,204 +284,107 @@ def logout():
         logger.error(f"❌ Error in logout: {str(e)}")
         return redirect(url_for('login'))
 
-
-@app.route('/update-channels', methods=['POST'])
-def update_channels():
-    """Update channel configuration in database"""
+@app.route('/dashboard')
+@login_required
+@async_route
+async def dashboard():
+    """Render dashboard with channel list and configuration"""
     try:
-        source = request.form.get('source')
-        destination = request.form.get('destination')
-
-        if not source or not destination:
-            logger.error("❌ Missing channel IDs")
-            return jsonify({'error': 'Both source and destination channels are required'}), 400
-
-        if source == destination:
-            logger.error("❌ Source and destination channels are same")
-            return jsonify({'error': 'Source and destination channels must be different'}), 400
+        client = await telegram_manager.get_client()
+        channels = []
 
         try:
-            # Format channel IDs
-            if not source.startswith('-100'):
-                source = f"-100{source.lstrip('-')}"
-            if not destination.startswith('-100'):
-                destination = f"-100{destination.lstrip('-')}"
+            async for dialog in client.iter_dialogs():
+                if dialog.is_channel:
+                    channels.append({
+                        'id': dialog.id,
+                        'name': dialog.name
+                    })
 
-            # Update session
-            session['source_channel'] = source
-            session['dest_channel'] = destination
+            # Get last selected channels from database
+            with get_db() as session:
+                result = session.execute("""
+                    SELECT source_channel, destination_channel 
+                    FROM channel_config 
+                    ORDER BY updated_at DESC 
+                    LIMIT 1
+                """)
+                last_config = result.fetchone()
 
-            # Save to database
-            with get_db() as db:
-                with db.cursor() as cur:
-                    # Create table if not exists
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS channel_config (
-                            id SERIAL PRIMARY KEY,
-                            source_channel TEXT NOT NULL,
-                            destination_channel TEXT NOT NULL,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """)
-
-                    # Insert new configuration
-                    cur.execute("""
-                        INSERT INTO channel_config (source_channel, destination_channel)
-                        VALUES (%s, %s)
-                    """, (source, destination))
-
-            # Update bot if running
-            if session.get('bot_running'):
-                import main
-                main.SOURCE_CHANNEL = source
-                main.DESTINATION_CHANNEL = destination
-                logger.info("✅ Updated running bot configuration")
-
-            logger.info(f"✅ Channel config updated - Source: {source}, Destination: {destination}")
-            return jsonify({'message': 'Channel configuration updated successfully'})
+            return render_template('dashboard.html', 
+                                channels=channels,
+                                last_source=last_config['source_channel'] if last_config else None,
+                                last_dest=last_config['destination_channel'] if last_config else None)
 
         except Exception as e:
-            logger.error(f"❌ Channel update error: {e}")
-            return jsonify({'error': str(e)}), 500
+            logger.error(f"Error loading dashboard data: {str(e)}")
+            raise
+
+        finally:
+            await telegram_manager.disconnect()
 
     except Exception as e:
-        logger.error(f"❌ Route error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/clear-replacements', methods=['POST'])
-@login_required
-def clear_replacements():
-    try:
-        user_phone = session.get('user_phone')
-        user_id = get_user_id(user_phone)
-        if user_id is None:
-            return jsonify({'error': 'Failed to get user ID'}), 500
-
-        with get_db() as db:
-            with db.cursor() as cur:
-                cur.execute("DELETE FROM text_replacements WHERE user_id = %s", (user_id,))
-                db.commit()
-
-        logger.info("Cleared all text replacements for user")
-        return jsonify({'message': 'All replacements cleared'})
-    except Exception as e:
-        logger.error(f"Error clearing replacements: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-def run_async(coro):
-    """Run an async function in a new event loop"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    except Exception as e:
-        logger.error(f"❌ Async error: {str(e)}")
-        raise
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
-
-@app.route('/bot/toggle', methods=['POST'])
-@login_required
-def toggle_bot():
-    """Toggle bot status and manage Telegram client"""
-    try:
-        status = request.form.get('status') == 'true'
-        source = session.get('source_channel')
-        destination = session.get('dest_channel')
-
-        if not source or not destination:
-            logger.error("❌ Channel configuration missing")
-            return jsonify({'error': 'Please configure source and destination channels first'}), 400
-
-        try:
-            import main
-
-            # Test database connection first
-            with get_db() as db:
-                with db.cursor() as cur:
-                    cur.execute("SELECT 1")
-            logger.info("✅ Database connection verified")
-
-            if status:
-                logger.info("🔄 Starting bot...")
-
-                # Stop existing client if running
-                if hasattr(main, 'client') and main.client:
-                    try:
-                        run_async(main.client.disconnect())
-                        logger.info("✅ Disconnected existing client")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error disconnecting client: {e}")
-
-                # Reset channels
-                main.SOURCE_CHANNEL = None
-                main.DESTINATION_CHANNEL = None
-
-                # Update channels
-                main.SOURCE_CHANNEL = source
-                main.DESTINATION_CHANNEL = destination
-                logger.info(f"✅ Updated channels - Source: {source}, Destination: {destination}")
-
-                # Start bot in a new thread
-                def start_bot():
-                    try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            loop.run_until_complete(main.main())
-                        except Exception as e:
-                            logger.error(f"❌ Bot error: {str(e)}")
-                        finally:
-                            loop.close()
-                            asyncio.set_event_loop(None)
-                    except Exception as e:
-                        logger.error(f"❌ Thread error: {str(e)}")
-
-                bot_thread = Thread(target=start_bot, daemon=True)
-                bot_thread.start()
-                logger.info("✅ Started Telegram client in new thread")
-
-            else:
-                logger.info("🔄 Stopping bot...")
-                if hasattr(main, 'client') and main.client:
-                    try:
-                        run_async(main.client.disconnect())
-                        logger.info("✅ Disconnected client")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error disconnecting client: {e}")
-
-                main.SOURCE_CHANNEL = None
-                main.DESTINATION_CHANNEL = None
-
-            # Update session
-            session['bot_running'] = status
-            logger.info(f"✅ Bot status changed to: {'running' if status else 'stopped'}")
-
-            return jsonify({
-                'status': status,
-                'message': f"Bot is now {'running' if status else 'stopped'}"
-            })
-
-        except ImportError:
-            logger.error("❌ Failed to import main module")
-            return jsonify({'error': 'Bot module not found'}), 500
-        except Exception as e:
-            logger.error(f"❌ Bot toggle error: {str(e)}")
-            import traceback
-            logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
-            return jsonify({'error': 'Failed to toggle bot status'}), 500
-
-    except Exception as e:
-        logger.error(f"❌ Route error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Critical error in dashboard: {str(e)}")
+        return redirect(url_for('login'))
 
 @app.route('/static/<path:filename>')
 def serve_static(filename):
-    logger.info(f"Serving static file: {filename}")
+    """Serve static files"""
     return send_from_directory('static', filename)
 
+# Ensure required directories exist
+os.makedirs('static/css', exist_ok=True)
+
+# Create default CSS if it doesn't exist
+if not os.path.exists('static/css/style.css'):
+    with open('static/css/style.css', 'w') as f:
+        f.write("""
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 20px;
+                background-color: #f0f2f5;
+            }
+            .login-container {
+                max-width: 400px;
+                margin: 50px auto;
+                padding: 20px;
+                background: white;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            }
+            input {
+                width: 100%;
+                padding: 8px;
+                margin-bottom: 10px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            }
+            button {
+                width: 100%;
+                padding: 10px;
+                background-color: #0066cc;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                margin-bottom: 10px;
+            }
+            button:hover {
+                background-color: #0052a3;
+            }
+            #message {
+                padding: 10px;
+                margin-top: 10px;
+                border-radius: 4px;
+            }
+            .error {
+                color: red;
+            }
+            .success {
+                color: green;
+            }
+        """)
+
 if __name__ == '__main__':
-    os.makedirs('sessions', exist_ok=True)
-    os.makedirs('static/css', exist_ok=True)
     app.run(host='0.0.0.0', port=5000, debug=True)
