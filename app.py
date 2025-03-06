@@ -480,10 +480,13 @@ def clear_replacements():
 
 def run_async(coro):
     """Run an async function in a new event loop"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         return loop.run_until_complete(coro)
+    except Exception as e:
+        logger.error(f"❌ Async error: {str(e)}")
+        raise
     finally:
         loop.close()
         asyncio.set_event_loop(None)
@@ -530,9 +533,20 @@ def toggle_bot():
                 main.DESTINATION_CHANNEL = destination
                 logger.info(f"✅ Updated channels - Source: {source}, Destination: {destination}")
 
-                # Start bot in a new thread with its own event loop
+                # Start bot in a new thread
                 def start_bot():
-                    run_async(main.main())
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(main.main())
+                        except Exception as e:
+                            logger.error(f"❌ Bot error: {str(e)}")
+                        finally:
+                            loop.close()
+                            asyncio.set_event_loop(None)
+                    except Exception as e:
+                        logger.error(f"❌ Thread error: {str(e)}")
 
                 bot_thread = Thread(target=start_bot, daemon=True)
                 bot_thread.start()
