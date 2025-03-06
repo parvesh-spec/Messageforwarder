@@ -30,10 +30,12 @@ app.secret_key = os.urandom(24)
 engine = create_engine(
     os.getenv('DATABASE_URL'),
     poolclass=QueuePool,
-    pool_size=5,
-    max_overflow=10,
+    pool_size=3,
+    max_overflow=5,
     pool_timeout=30,
-    pool_recycle=1800
+    pool_recycle=1800,
+    pool_pre_ping=True,
+    echo=True
 )
 
 # Configure Flask application
@@ -44,10 +46,11 @@ app.config.update(
     SQLALCHEMY_DATABASE_URI=os.getenv('DATABASE_URL'),
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
     SQLALCHEMY_ENGINE_OPTIONS={
-        'pool_size': 5,
-        'max_overflow': 10,
+        'pool_size': 3,
+        'max_overflow': 5,
         'pool_timeout': 30,
         'pool_recycle': 1800,
+        'pool_pre_ping': True
     }
 )
 
@@ -75,6 +78,7 @@ Session(app)
 class TelegramManager:
     _instance = None
     _lock = Lock()
+    _initialized = False
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:
@@ -83,14 +87,15 @@ class TelegramManager:
             return cls._instance
 
     def __init__(self, session_name=None, api_id=None, api_hash=None):
-        if not hasattr(self, 'initialized'):
-            self.session_name = session_name or 'anon'
-            self.api_id = api_id or int(os.getenv('API_ID', '27202142'))
-            self.api_hash = api_hash or os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
-            self.client = None
-            self.initialized = True
-            self._client_lock = Lock()
-            self._loop = None
+        with self._lock:
+            if not self._initialized:
+                self.session_name = session_name or 'anon'
+                self.api_id = api_id or int(os.getenv('API_ID', '27202142'))
+                self.api_hash = api_hash or os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
+                self.client = None
+                self._client_lock = Lock()
+                self._loop = None
+                self._initialized = True
 
     async def get_client(self):
         """Get or create a Telegram client with proper event loop management"""
@@ -135,7 +140,7 @@ class TelegramManager:
     def cleanup(self):
         """Complete cleanup of all resources"""
         with self._client_lock:
-            if self.client:
+            if self._loop:
                 try:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
@@ -209,34 +214,39 @@ async def send_otp():
         try:
             client = await telegram_manager.get_client()
 
-            # Check existing session
-            if await client.is_user_authorized():
-                logger.info(f"✅ Found valid session for {phone}")
+            try:
+                # Check existing session
+                if await client.is_user_authorized():
+                    logger.info(f"✅ Found valid session for {phone}")
+                    session['user_phone'] = phone
+                    session['logged_in'] = True
+                    return jsonify({'message': 'Already authorized', 'already_authorized': True})
+
+                # Send OTP
+                sent = await client.send_code_request(phone)
                 session['user_phone'] = phone
-                session['logged_in'] = True
-                return jsonify({'message': 'Already authorized', 'already_authorized': True})
+                session['phone_code_hash'] = sent.phone_code_hash
+                logger.info("✅ OTP sent successfully")
+                return jsonify({'message': 'OTP sent successfully'})
 
-            # Send OTP
-            sent = await client.send_code_request(phone)
-            session['user_phone'] = phone
-            session['phone_code_hash'] = sent.phone_code_hash
-            logger.info("✅ OTP sent successfully")
-            return jsonify({'message': 'OTP sent successfully'})
+            except PhoneNumberInvalidError:
+                logger.error(f"❌ Invalid phone: {phone}")
+                return jsonify({'error': 'Invalid phone number'}), 400
 
-        except PhoneNumberInvalidError:
-            logger.error(f"❌ Invalid phone: {phone}")
-            return jsonify({'error': 'Invalid phone number'}), 400
+            except Exception as e:
+                logger.error(f"❌ Send OTP error: {str(e)}")
+                return jsonify({'error': str(e)}), 500
+
+            finally:
+                await telegram_manager.disconnect()
 
         except Exception as e:
-            logger.error(f"❌ Send OTP error: {str(e)}")
-            return jsonify({'error': str(e)}), 500
-
-        finally:
-            await telegram_manager.disconnect()
+            logger.error(f"❌ Client error: {str(e)}")
+            return jsonify({'error': 'Failed to initialize Telegram client'}), 500
 
     except Exception as e:
         logger.error(f"❌ Critical error in send_otp: {str(e)}")
-        return jsonify({'error': 'Server error'}), 500
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/verify-otp', methods=['POST'])
 @async_route
@@ -313,10 +323,12 @@ def logout():
 async def dashboard():
     """Render dashboard with channel list and configuration"""
     try:
+        # Initialize client
         client = await telegram_manager.get_client()
         channels = []
 
         try:
+            # Get channels list
             async for dialog in client.iter_dialogs():
                 if dialog.is_channel:
                     channels.append({
@@ -324,7 +336,7 @@ async def dashboard():
                         'name': dialog.name
                     })
 
-            # Get last selected channels from database using proper SQL formatting
+            # Get last selected channels from database
             with get_db() as session:
                 sql = text("""
                     SELECT source_channel as src, destination_channel as dst
@@ -338,7 +350,6 @@ async def dashboard():
                 last_source = None
                 last_dest = None
                 if result:
-                    # Access by column aliases
                     last_source = result.src
                     last_dest = result.dst
                     logger.info(f"✅ Loaded last config - Source: {last_source}, Dest: {last_dest}")
