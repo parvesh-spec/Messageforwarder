@@ -85,7 +85,6 @@ telegram_manager = TelegramManager(
     os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 )
 
-# Database connection with better connection handling
 def get_db():
     if 'db' not in g:
         g.db = psycopg2.connect(
@@ -109,22 +108,33 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def async_route(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        return async_to_sync(f)(*args, **kwargs)
+    return wrapped
+
 def get_user_id(phone):
-    db = get_db()
-    with db.cursor() as cur:
-        cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
-        result = cur.fetchone()
-        if result:
-            return result[0]
-        cur.execute("INSERT INTO users (phone) VALUES (%s) RETURNING id", (phone,))
-        db.commit()
-        return cur.fetchone()[0]
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
+            result = cur.fetchone()
+            if result:
+                return result[0]
+            cur.execute("INSERT INTO users (phone) VALUES (%s) RETURNING id", (phone,))
+            conn.commit() # Corrected to use conn, not db
+            return cur.fetchone()[0]
+    except Exception as e:
+        logger.error(f"Error getting user ID: {str(e)}")
+        return None
 
 @app.route('/')
 def login():
     return render_template('login.html')
 
 @app.route('/send-otp', methods=['POST'])
+@async_route
 async def send_otp():
     phone = request.form.get('phone')
     if not phone:
@@ -138,33 +148,38 @@ async def send_otp():
     try:
         client = await telegram_manager.get_client()
 
-        # If session exists, check if it's valid
-        if await client.is_user_authorized():
-            logger.info(f"Found valid session for {phone}")
-            session['user_phone'] = phone
-            session['logged_in'] = True
-            await telegram_manager.disconnect()
-            return jsonify({'message': 'Already authorized', 'already_authorized': True})
-
         try:
+            # If session exists, check if it's valid
+            if await client.is_user_authorized():
+                logger.info(f"Found valid session for {phone}")
+                session['user_phone'] = phone
+                session['logged_in'] = True
+                return jsonify({'message': 'Already authorized', 'already_authorized': True})
+
             # Send code and get the phone_code_hash
             sent = await client.send_code_request(phone)
             session['user_phone'] = phone
             session['phone_code_hash'] = sent.phone_code_hash
             logger.info("Code request sent successfully")
             return jsonify({'message': 'OTP sent successfully'})
+
         except PhoneNumberInvalidError:
             logger.error(f"Invalid phone number: {phone}")
             return jsonify({'error': 'Invalid phone number'}), 400
+
+        except Exception as e:
+            logger.error(f"Error in send_otp: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+
         finally:
             await telegram_manager.disconnect()
 
     except Exception as e:
-        logger.error(f"Error in send_otp route: {str(e)}")
-        await telegram_manager.disconnect()
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Critical error in send-otp: {str(e)}")
+        return jsonify({'error': 'Server error'}), 500
 
 @app.route('/verify-otp', methods=['POST'])
+@async_route
 async def verify_otp():
     phone = session.get('user_phone')
     phone_code_hash = session.get('phone_code_hash')
@@ -207,46 +222,54 @@ async def verify_otp():
             return jsonify({'error': 'Invalid OTP'}), 400
 
     except Exception as e:
-        logger.error(f"Error in verify_otp route: {str(e)}")
+        logger.error(f"Error in verify_otp: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
     finally:
         await telegram_manager.disconnect()
 
 @app.route('/dashboard')
 @login_required
+@async_route
 async def dashboard():
-    phone = session.get('user_phone')
     try:
         client = await telegram_manager.get_client()
         channels = []
-        async for dialog in client.iter_dialogs():
-            if dialog.is_channel:
-                channels.append({
-                    'id': dialog.id,
-                    'name': dialog.name
-                })
 
-        # Get last selected channels from database
-        db = get_db()
-        with db.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("""
-                SELECT source_channel, destination_channel 
-                FROM channel_config 
-                ORDER BY updated_at DESC 
-                LIMIT 1
-            """)
-            last_config = cur.fetchone()
+        try:
+            async for dialog in client.iter_dialogs():
+                if dialog.is_channel:
+                    channels.append({
+                        'id': dialog.id,
+                        'name': dialog.name
+                    })
 
-        return render_template('dashboard.html', 
-                             channels=channels,
-                             last_source=last_config['source_channel'] if last_config else None,
-                             last_dest=last_config['destination_channel'] if last_config else None)
+            # Get last selected channels from database
+            db = get_db()
+            with db.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT source_channel, destination_channel 
+                    FROM channel_config 
+                    ORDER BY updated_at DESC 
+                    LIMIT 1
+                """)
+                last_config = cur.fetchone()
+
+            return render_template('dashboard.html', 
+                                channels=channels,
+                                last_source=last_config['source_channel'] if last_config else None,
+                                last_dest=last_config['destination_channel'] if last_config else None)
+
+        except Exception as e:
+            logger.error(f"Error loading dashboard data: {str(e)}")
+            raise
+
+        finally:
+            await telegram_manager.disconnect()
+
     except Exception as e:
-        logger.error(f"Error fetching channels: {str(e)}")
+        logger.error(f"Critical error in dashboard: {str(e)}")
         return redirect(url_for('login'))
-    finally:
-        await telegram_manager.disconnect()
-
 
 @app.route('/add-replacement', methods=['POST'])
 @login_required
@@ -261,6 +284,9 @@ def add_replacement():
             return jsonify({'error': 'Both original and replacement text are required'}), 400
 
         user_id = get_user_id(user_phone)
+        if user_id is None:
+            return jsonify({'error': 'Failed to get user ID'}), 500
+
         logger.info(f"Adding replacement for user {user_id}: '{original}' → '{replacement}'")
 
         db = get_db()
@@ -289,6 +315,8 @@ def get_replacements():
     try:
         user_phone = session.get('user_phone')
         user_id = get_user_id(user_phone)
+        if user_id is None:
+            return jsonify({'error': 'Failed to get user ID'}), 500
         logger.info(f"Fetching replacements for user {user_id}")
 
         db = get_db()
@@ -323,6 +351,8 @@ def remove_replacement():
             return jsonify({'error': 'Original text is required'}), 400
 
         user_id = get_user_id(user_phone)
+        if user_id is None:
+            return jsonify({'error': 'Failed to get user ID'}), 500
 
         db = get_db()
         with db.cursor() as cur:
@@ -418,6 +448,8 @@ def clear_replacements():
     try:
         user_phone = session.get('user_phone')
         user_id = get_user_id(user_phone)
+        if user_id is None:
+            return jsonify({'error': 'Failed to get user ID'}), 500
 
         db = get_db()
         with db.cursor() as cur:
