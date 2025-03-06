@@ -116,20 +116,25 @@ def apply_text_replacements(text):
 
     with text_replacement_lock:
         if not TEXT_REPLACEMENTS:
+            logger.debug("No text replacements available")
             return text
 
         result = text
         logger.debug(f"Applying replacements to text: {text}")
         logger.debug(f"Available replacements: {TEXT_REPLACEMENTS}")
 
-        for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
-            if original in result:
-                old_text = result
-                result = result.replace(original, replacement)
-                logger.info(f"Replaced '{original}' with '{replacement}'")
-                logger.debug(f"Text changed from '{old_text}' to '{result}'")
+        try:
+            for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
+                if original in result:
+                    old_text = result
+                    result = result.replace(original, replacement)
+                    logger.info(f"Replaced '{original}' with '{replacement}'")
+                    logger.debug(f"Text changed from '{old_text}' to '{result}'")
 
-        return result
+            return result
+        except Exception as e:
+            logger.error(f"Error applying replacements: {str(e)}")
+            return text
 
 def config_monitor():
     while True:
@@ -198,7 +203,10 @@ async def main():
 
                     # Get message text and apply replacements
                     message_text = event.message.text if event.message.text else ""
-                    message_text = apply_text_replacements(message_text)
+                    if message_text:
+                        logger.debug(f"Original message text: {message_text}")
+                        message_text = apply_text_replacements(message_text)
+                        logger.debug(f"Text after replacements: {message_text}")
 
                     # Send message
                     try:
