@@ -1,19 +1,17 @@
 import os
 import logging
 import threading
-from flask import Flask, render_template, request, session, redirect, url_for, jsonify, g, send_from_directory
+from flask import Flask, render_template, request, session, redirect, url_for, jsonify, send_from_directory
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
+from telethon.sessions import StringSession
 import asyncio
 from functools import wraps
-from asgiref.sync import async_to_sync
 import psycopg2
 from psycopg2.extras import DictCursor
 from psycopg2 import pool
 from flask_session import Session
 from datetime import timedelta
-from flask_sqlalchemy import SQLAlchemy
-from threading import Thread, Lock
 from contextlib import contextmanager
 
 # Set up logging
@@ -24,45 +22,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
 
 # Configure Flask application
 app.config.update(
-    SESSION_TYPE='sqlalchemy',
+    SECRET_KEY=os.urandom(24),
+    SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
-    SESSION_PERMANENT=True,
-    SQLALCHEMY_DATABASE_URI=os.getenv('DATABASE_URL'),
-    SQLALCHEMY_TRACK_MODIFICATIONS=False,
-    SQLALCHEMY_ENGINE_OPTIONS={
-        'pool_size': 10,
-        'pool_timeout': 30,
-        'pool_recycle': 1800,
-    }
+    SESSION_PERMANENT=True
 )
 
-# Initialize database
-db = SQLAlchemy(app)
+# Initialize session
+Session(app)
 
-# Database pool for other connections
+# Database pool for connections
 db_pool = psycopg2.pool.ThreadedConnectionPool(
     minconn=1,
-    maxconn=20,
+    maxconn=10,
     dsn=os.getenv('DATABASE_URL')
 )
 
-# Database lock for concurrent operations
-db_lock = Lock()
-
-# Configure session
-class FlaskSession(db.Model):
-    __tablename__ = 'session'
-    id = db.Column(db.Integer, primary_key=True)
-    session_id = db.Column(db.String(255), unique=True, nullable=False)
-    data = db.Column(db.LargeBinary)
-    expiry = db.Column(db.DateTime)
-
-app.config['SESSION_SQLALCHEMY'] = db
-Session(app)
+# Database lock for thread safety
+db_lock = threading.Lock()
 
 # Event Loop Manager
 class EventLoopManager:
@@ -102,7 +82,7 @@ class EventLoopManager:
                 cls._loop = None
             cls._client = None
 
-# Database connection
+# Database connection context manager
 @contextmanager
 def get_db():
     conn = db_pool.getconn()
@@ -136,35 +116,35 @@ class TelegramManager:
     def __init__(self, api_id, api_hash):
         self.api_id = api_id
         self.api_hash = api_hash
-        self._lock = Lock()
+        self._lock = threading.Lock()
 
     async def get_auth_client(self):
-        """Client for authentication only"""
+        """Get a client for authentication or dashboard operations"""
         with self._lock:
-            client = TelegramClient(
-                'auth_session',
-                self.api_id,
-                self.api_hash,
-                device_model="Replit Web Auth",
-                system_version="Linux",
-                app_version="1.0",
-                loop=EventLoopManager.get_loop()
-            )
+            try:
+                session_string = session.get('session_string')
+                client = TelegramClient(
+                    StringSession(session_string) if session_string else StringSession(),
+                    self.api_id,
+                    self.api_hash,
+                    device_model="Replit Web",
+                    system_version="Linux",
+                    app_version="1.0",
+                    loop=EventLoopManager.get_loop()
+                )
 
-            if not client.is_connected():
-                await client.connect()
+                if not client.is_connected():
+                    await client.connect()
 
-            return client
+                EventLoopManager.set_client(client)
+                return client
+            except Exception as e:
+                logger.error(f"❌ Client creation error: {str(e)}")
+                raise
 
     def cleanup(self):
-        """Clean up authentication resources"""
+        """Clean up resources"""
         EventLoopManager.reset()
-        for session_file in ['auth_session.session', 'auth_session.session-journal']:
-            if os.path.exists(session_file):
-                try:
-                    os.remove(session_file)
-                except:
-                    pass
 
 # Create global Telegram manager
 telegram_manager = TelegramManager(
@@ -196,6 +176,7 @@ async def send_otp():
             if await client.is_user_authorized():
                 session['user_phone'] = phone
                 session['logged_in'] = True
+                session['session_string'] = client.session.save()
                 return jsonify({'message': 'Already authorized', 'already_authorized': True})
 
             # Send OTP
@@ -245,7 +226,9 @@ async def verify_otp():
                     return jsonify({'error': 'Invalid 2FA password'}), 400
 
             if await client.is_user_authorized():
+                # Save session string and mark as logged in
                 session['logged_in'] = True
+                session['session_string'] = client.session.save()
                 return jsonify({'message': 'Login successful'})
             else:
                 return jsonify({'error': 'Invalid OTP'}), 400
@@ -262,10 +245,16 @@ async def verify_otp():
 @async_route
 async def dashboard():
     try:
-        client = await telegram_manager.get_auth_client()
-        channels = []
+        # Verify session string exists
+        if not session.get('session_string'):
+            return redirect(url_for('login'))
 
-        # Get channels
+        # Get client using event loop manager
+        client = await telegram_manager.get_auth_client()
+        if not await client.is_user_authorized():
+            return redirect(url_for('login'))
+
+        channels = []
         async for dialog in client.iter_dialogs():
             if dialog.is_channel:
                 channels.append({
@@ -285,9 +274,9 @@ async def dashboard():
                 last_config = cur.fetchone()
 
         return render_template('dashboard.html', 
-                            channels=channels,
-                            last_source=last_config['source_channel'] if last_config else None,
-                            last_dest=last_config['destination_channel'] if last_config else None)
+                          channels=channels,
+                          last_source=last_config['source_channel'] if last_config else None,
+                          last_dest=last_config['destination_channel'] if last_config else None)
 
     except Exception as e:
         logger.error(f"❌ Dashboard error: {str(e)}")
@@ -330,6 +319,10 @@ def update_channels():
                     VALUES (%s, %s)
                 """, (source, destination))
 
+        # Update session
+        session['source_channel'] = source
+        session['dest_channel'] = destination
+
         return jsonify({'message': 'Channels updated successfully'})
 
     except Exception as e:
@@ -347,8 +340,14 @@ def toggle_bot():
         if not source or not destination:
             return jsonify({'error': 'Configure channels first'}), 400
 
+        if not session.get('session_string'):
+            return jsonify({'error': 'Session expired, please login again'}), 401
+
         import main
         if status:
+            # Share session with main.py
+            main.SESSION_STRING = session.get('session_string')
+
             # Start bot
             def start_bot():
                 try:
@@ -363,7 +362,8 @@ def toggle_bot():
                 except Exception as e:
                     logger.error(f"❌ Bot error: {str(e)}")
 
-            bot_thread = Thread(target=start_bot, daemon=True)
+            # Start bot in a daemon thread
+            bot_thread = threading.Thread(target=start_bot, daemon=True)
             bot_thread.start()
             session['bot_running'] = True
         else:
@@ -389,7 +389,7 @@ if __name__ == '__main__':
     # Ensure directories exist
     os.makedirs('static/css', exist_ok=True)
 
-    # Create default CSS
+    # Create default CSS if not exists
     if not os.path.exists('static/css/style.css'):
         with open('static/css/style.css', 'w') as f:
             f.write("""
@@ -431,4 +431,4 @@ if __name__ == '__main__':
                 }
             """)
 
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000)

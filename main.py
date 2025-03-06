@@ -26,26 +26,22 @@ client = None
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
-# Database connection pool
-db_pool = None
-db_lock = threading.Lock()
+# Telegram session string (to be set by app.py)
+SESSION_STRING = None
 
-def init_db_pool():
-    """Initialize database connection pool"""
-    global db_pool
-    if not db_pool:
-        with db_lock:
-            if not db_pool:
-                db_pool = psycopg2.pool.ThreadedConnectionPool(
-                    minconn=1,
-                    maxconn=10,
-                    dsn=os.getenv('DATABASE_URL')
-                )
+# Database connection pool
+db_pool = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dsn=os.getenv('DATABASE_URL')
+)
+
+# Lock for thread safety
+db_lock = threading.Lock()
 
 def get_db():
     """Get database connection from pool"""
     try:
-        init_db_pool()
         return db_pool.getconn()
     except Exception as e:
         logger.error(f"❌ Database connection error: {str(e)}")
@@ -53,7 +49,7 @@ def get_db():
 
 def release_db(conn):
     """Release connection back to pool"""
-    if conn and db_pool:
+    if conn:
         db_pool.putconn(conn)
 
 def load_channel_config():
@@ -130,13 +126,17 @@ def apply_text_replacements(text):
     return result
 
 async def setup_client():
-    """Initialize Telegram client for bot operations"""
+    """Initialize Telegram client with session string"""
     global client
 
     try:
-        logger.info("🔄 Starting bot client...")
+        if not SESSION_STRING:
+            logger.error("❌ No session string provided")
+            return False
+
+        logger.info("🔄 Starting Telegram client...")
         client = TelegramClient(
-            'bot_session',
+            StringSession(SESSION_STRING),
             API_ID,
             API_HASH,
             device_model="Replit Bot",
@@ -171,7 +171,7 @@ async def setup_handlers():
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
                     return
 
-                # Verify source channel
+                # Format channel IDs
                 chat_id = str(event.chat_id)
                 source_id = str(SOURCE_CHANNEL)
                 if not chat_id.startswith('-100'):
@@ -179,6 +179,7 @@ async def setup_handlers():
                 if not source_id.startswith('-100'):
                     source_id = f"-100{source_id.lstrip('-')}"
 
+                # Verify source channel
                 if chat_id != source_id:
                     return
 
@@ -187,23 +188,20 @@ async def setup_handlers():
                 if message_text and TEXT_REPLACEMENTS:
                     message_text = apply_text_replacements(message_text)
 
-                # Send to destination
+                # Format destination channel ID
                 dest_id = str(DESTINATION_CHANNEL)
                 if not dest_id.startswith('-100'):
                     dest_id = f"-100{dest_id.lstrip('-')}"
 
-                try:
-                    dest_channel = await client.get_entity(int(dest_id))
-                    sent_message = await client.send_message(
-                        dest_channel,
-                        message_text,
-                        formatting_entities=event.message.entities
-                    )
-                    MESSAGE_IDS[event.message.id] = sent_message.id
-                    logger.info("✅ Message forwarded")
-
-                except Exception as e:
-                    logger.error(f"❌ Forward error: {str(e)}")
+                # Send to destination
+                dest_channel = await client.get_entity(int(dest_id))
+                sent_message = await client.send_message(
+                    dest_channel,
+                    message_text,
+                    formatting_entities=event.message.entities
+                )
+                MESSAGE_IDS[event.message.id] = sent_message.id
+                logger.info("✅ Message forwarded")
 
             except Exception as e:
                 logger.error(f"❌ Message handler error: {str(e)}")
@@ -293,15 +291,6 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        # Clean up old sessions
-        for session_file in ['bot_session.session', 'bot_session.session-journal']:
-            if os.path.exists(session_file):
-                try:
-                    os.remove(session_file)
-                    logger.info(f"✅ Cleaned: {session_file}")
-                except Exception as e:
-                    logger.error(f"❌ Cleanup error: {str(e)}")
-
         # Run bot
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -310,6 +299,8 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             logger.info("👋 Bot stopped by user")
         finally:
+            if client and client.is_connected():
+                loop.run_until_complete(client.disconnect())
             loop.close()
 
     except Exception as e:
