@@ -238,27 +238,8 @@
             });
         }
 
-        function loadChannelSelections() {
-            console.log('Loading last channel selections...');
-            fetch('/get-channels')
-            .then(response => response.json())
-            .then(data => {
-                console.log('Channel config loaded:', data);
-                if (data.source_channel && data.dest_channel) {
-                    document.getElementById('source-channel').value = data.source_channel;
-                    document.getElementById('dest-channel').value = data.dest_channel;
-                }
-            })
-            .catch(error => {
-                console.error('Error loading channel selections:', error);
-            });
-        }
-
-        // Load channels and replacements when page loads
-        document.addEventListener('DOMContentLoaded', () => {
-            loadReplacements();
-            loadChannelSelections();
-        });
+        // Load replacements when page loads
+        document.addEventListener('DOMContentLoaded', loadReplacements);
     </script>
     <style>
         .header {
