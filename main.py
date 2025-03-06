@@ -29,6 +29,11 @@ API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 # Telegram session string (to be set by app.py)
 SESSION_STRING = None
 
+# Check for required environment variables
+if not os.getenv('SESSION_SECRET'):
+    logger.error("❌ No session string provided - SESSION_SECRET environment variable is required")
+    # We'll continue but the app will fail health checks until the secret is set
+
 # Database connection pool
 db_pool = psycopg2.pool.ThreadedConnectionPool(
     minconn=1,
