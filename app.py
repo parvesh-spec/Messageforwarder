@@ -384,23 +384,32 @@ def update_channels():
         if not destination.startswith('-100'):
             destination = f"-100{destination.lstrip('-')}"
 
-        # Store channel IDs in session and file
+        # Store channel IDs in session for the current user
         session['source_channel'] = source
         session['dest_channel'] = destination
 
-        # Save to configuration file
-        config = {
-            'source_channel': source,
-            'destination_channel': destination
-        }
+        # Save to database
+        db = get_db()
+        with db.cursor() as cur:
+            # First create the table if it doesn't exist
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS channel_config (
+                    id SERIAL PRIMARY KEY,
+                    source_channel TEXT NOT NULL,
+                    destination_channel TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        with open('channel_config.json', 'w') as f:
-            import json
-            json.dump(config, f)
+            # Insert new configuration
+            cur.execute("""
+                INSERT INTO channel_config (source_channel, destination_channel)
+                VALUES (%s, %s)
+            """, (source, destination))
+
+            db.commit()
 
         logger.info(f"Updated channel configuration - Source: {source}, Destination: {destination}")
-        logger.info("Configuration saved to channel_config.json")
-
         return jsonify({'message': 'Channel configuration updated successfully'})
     except Exception as e:
         logger.error(f"Error updating channels: {str(e)}")

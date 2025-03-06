@@ -36,7 +36,6 @@ DESTINATION_CHANNEL = None
 TEXT_REPLACEMENTS = {}
 CURRENT_USER_ID = None
 
-# Database connection with better connection handling
 def get_db():
     conn = psycopg2.connect(
         os.getenv('DATABASE_URL'),
@@ -48,13 +47,31 @@ def get_db():
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
     try:
-        with open('channel_config.json', 'r') as f:
-            config = json.load(f)
-            SOURCE_CHANNEL = config.get('source_channel')
-            DESTINATION_CHANNEL = config.get('destination_channel')
-            logger.info(f"Loaded channel configuration - Source: {SOURCE_CHANNEL}, Destination: {DESTINATION_CHANNEL}")
-    except FileNotFoundError:
-        logger.warning("No channel configuration file found")
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                # Create channels table if it doesn't exist
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS channel_config (
+                        id SERIAL PRIMARY KEY,
+                        source_channel TEXT NOT NULL,
+                        destination_channel TEXT NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+
+                # Get the latest channel configuration
+                cur.execute("SELECT source_channel, destination_channel FROM channel_config ORDER BY updated_at DESC LIMIT 1")
+                row = cur.fetchone()
+
+                if row:
+                    SOURCE_CHANNEL = row['source_channel']
+                    DESTINATION_CHANNEL = row['destination_channel']
+                    logger.info(f"Loaded channel configuration from DB - Source: {SOURCE_CHANNEL}, Destination: {DESTINATION_CHANNEL}")
+                else:
+                    logger.warning("No channel configuration found in database")
+        finally:
+            conn.close()
     except Exception as e:
         logger.error(f"Error loading channel configuration: {str(e)}")
 
@@ -72,20 +89,17 @@ def load_user_replacements(user_id):
                     ORDER BY LENGTH(original_text) DESC
                 """, (user_id,))
                 TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
-                logger.info(f"Loaded text replacements for user {user_id}: {TEXT_REPLACEMENTS}")
 
-                # Verify data was loaded
-                if not TEXT_REPLACEMENTS:
-                    logger.warning(f"No text replacements found for user {user_id}")
-                else:
-                    logger.info(f"Successfully loaded {len(TEXT_REPLACEMENTS)} replacements")
+                if TEXT_REPLACEMENTS:
+                    logger.info(f"Loaded {len(TEXT_REPLACEMENTS)} text replacements for user {user_id}")
                     for original, replacement in TEXT_REPLACEMENTS.items():
                         logger.debug(f"Loaded replacement: '{original}' -> '{replacement}'")
+                else:
+                    logger.warning(f"No text replacements found for user {user_id}")
         finally:
             conn.close()
     except Exception as e:
-        logger.error(f"Error loading text replacements for user {user_id}: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error loading text replacements: {str(e)}")
         TEXT_REPLACEMENTS = {}
 
 def config_monitor():
@@ -94,19 +108,19 @@ def config_monitor():
             load_channel_config()
             if CURRENT_USER_ID:
                 load_user_replacements(CURRENT_USER_ID)
-            time.sleep(5)  # Check every 5 seconds
+            time.sleep(30)  # Check every 30 seconds instead of 5
         except Exception as e:
             logger.error(f"Error in config monitor: {str(e)}")
-            time.sleep(1)  # Wait a bit before retrying on error
+            time.sleep(1)
 
 async def main():
     try:
         # Start config monitoring in background
         Thread(target=config_monitor, daemon=True).start()
-        logger.info("Started channel configuration monitor")
+        logger.info("Started configuration monitor")
 
         # Start the client
-        logger.debug("Starting Telegram client...")
+        logger.info("Starting Telegram client...")
         client = TelegramClient('anon', API_ID, API_HASH)
         await client.start()
 
@@ -137,11 +151,8 @@ async def main():
                 if not chat_id.startswith('-100'):
                     chat_id = f"-100{chat_id.lstrip('-')}"
 
-                logger.debug(f"Comparing chat_id: {chat_id} with source_id: {source_id}")
-
                 # Check if message is from source channel
                 if chat_id != source_id:
-                    logger.debug(f"Message not from source channel. Got: {chat_id}, Expected: {source_id}")
                     return
 
                 logger.info(f"Processing message from source channel {source_id}")
@@ -153,9 +164,8 @@ async def main():
                         dest_id = f"-100{dest_id.lstrip('-')}"
 
                     # Get destination channel entity
-                    logger.debug(f"Getting entity for destination channel: {dest_id}")
                     dest_channel = await client.get_entity(int(dest_id))
-                    logger.info(f"Destination channel found: {getattr(dest_channel, 'title', 'Unknown')}")
+                    logger.info(f"Found destination channel: {getattr(dest_channel, 'title', 'Unknown')}")
 
                     # Create a new message
                     message_text = event.message.text if event.message.text else ""
@@ -164,27 +174,12 @@ async def main():
                     # Apply text replacements if any
                     if TEXT_REPLACEMENTS and message_text:
                         logger.debug("Starting text replacement process...")
-                        logger.debug(f"Current TEXT_REPLACEMENTS dictionary: {TEXT_REPLACEMENTS}")
-                        logger.debug(f"Original text before replacements: {message_text}")
-
-                        # Sort replacements by length (longest first) to handle overlapping patterns
                         for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
-                            logger.debug(f"Checking replacement: '{original}' -> '{replacement}'")
                             if original in message_text:
                                 old_text = message_text
                                 message_text = message_text.replace(original, replacement)
                                 logger.info(f"Replaced '{original}' with '{replacement}'")
                                 logger.debug(f"Text changed from '{old_text}' to '{message_text}'")
-                            else:
-                                logger.debug(f"Text '{original}' not found in message")
-
-                        logger.debug(f"Final text after all replacements: {message_text}")
-                    else:
-                        logger.debug("No text replacements to apply")
-                        if not TEXT_REPLACEMENTS:
-                            logger.debug("TEXT_REPLACEMENTS dictionary is empty")
-                        if not message_text:
-                            logger.debug("No message text to process")
 
                     # Handle media
                     media = None
@@ -255,7 +250,6 @@ async def main():
 
                 # Check if message is from source channel
                 if chat_id != source_id:
-                    logger.debug(f"Edit not from source channel. Got: {chat_id}, Expected: {source_id}")
                     return
 
                 if event.message.id not in MESSAGE_IDS:
@@ -315,16 +309,17 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        # Clean up old configuration file if it exists
+        if os.path.exists('channel_config.json'):
+            try:
+                os.remove('channel_config.json')
+                logger.info("Removed old channel_config.json file")
+            except Exception as e:
+                logger.error(f"Error removing channel_config.json: {str(e)}")
+
+        # Start the bot
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("\nBot stopped by user.")
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
-
-# Clean up old files if they exist
-if os.path.exists('text_replacements.json'):
-    try:
-        os.remove('text_replacements.json')
-        logger.info("Removed old text_replacements.json file")
-    except Exception as e:
-        logger.error(f"Error removing text_replacements.json: {str(e)}")
