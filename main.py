@@ -278,8 +278,18 @@ async def main():
         logger.info(f"👤 Current user: {CURRENT_USER_ID}")
         logger.info(f"📚 Active replacements: {len(TEXT_REPLACEMENTS)}")
 
-        # Run client
-        await client.run_until_disconnected()
+        # Run client with proper cleanup
+        try:
+            await client.run_until_disconnected()
+        except Exception as e:
+            logger.error(f"❌ Client run error: {e}")
+            raise
+        finally:
+            if client and client.is_connected():
+                await client.disconnect()
+                logger.info("✅ Client disconnected")
+            client = None  # Clear global client
+
         return True
 
     except Exception as e:
@@ -288,6 +298,7 @@ async def main():
         logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
         if client and client.is_connected():
             await client.disconnect()
+        client = None
         return False
 
 if __name__ == "__main__":
@@ -300,13 +311,16 @@ if __name__ == "__main__":
             except Exception as e:
                 logger.error(f"❌ Cleanup error: {str(e)}")
 
-        # Run main function
+        # Run with proper event loop handling
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
+        try:
+            loop.run_until_complete(main())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)  # Clear event loop
+
     except KeyboardInterrupt:
         logger.info("\n👋 System stopped by user")
     except Exception as e:
         logger.error(f"❌ Startup error: {str(e)}")
-    finally:
-        loop.close()

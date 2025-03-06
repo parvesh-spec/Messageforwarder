@@ -12,7 +12,7 @@ import json
 from flask_session import Session
 from datetime import timedelta
 from flask_sqlalchemy import SQLAlchemy
-from threading import Thread
+from threading import Thread, Lock
 from contextlib import contextmanager
 
 # Set up logging
@@ -488,10 +488,16 @@ def run_async(coro):
         loop.close()
         asyncio.set_event_loop(None)
 
+# Global state management
+bot_state_lock = Lock()
+bot_thread = None
+
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
 def toggle_bot():
     """Toggle bot status and manage Telegram client"""
+    global bot_thread
+
     try:
         status = request.form.get('status') == 'true'
         source = session.get('source_channel')
@@ -501,72 +507,97 @@ def toggle_bot():
             logger.error("❌ Channel configuration missing")
             return jsonify({'error': 'Please configure source and destination channels first'}), 400
 
-        try:
-            import main
+        with bot_state_lock:  # Thread-safe state management
+            try:
+                import main
 
-            # Test database connection first
-            db = get_db()
-            with db.cursor() as cur:
-                cur.execute("SELECT 1")
-            logger.info("✅ Database connection verified")
+                # Test database connection first
+                db = get_db()
+                with db.cursor() as cur:
+                    cur.execute("SELECT 1")
+                logger.info("✅ Database connection verified")
 
-            if status:
-                logger.info("🔄 Starting bot...")
+                if status:
+                    logger.info("🔄 Starting bot...")
 
-                # Stop existing client if running
-                if hasattr(main, 'client') and main.client:
-                    try:
+                    # Stop existing client if running
+                    if hasattr(main, 'client') and main.client:
+                        try:
+                            run_async(main.client.disconnect())
+                            logger.info("✅ Disconnected existing client")
+                            # Give time for cleanup
+                            import time
+                            time.sleep(1)
+                        except Exception as e:
+                            logger.warning(f"⚠️ Error disconnecting client: {e}")
+
+                    # Reset channels first
+                    main.SOURCE_CHANNEL = None
+                    main.DESTINATION_CHANNEL = None
+                    main.client = None  # Reset client
+
+                    # Update channels
+                    main.SOURCE_CHANNEL = source
+                    main.DESTINATION_CHANNEL = destination
+                    logger.info(f"✅ Updated channels - Source: {source}, Destination: {destination}")
+
+                    # Stop existing thread if running
+                    if bot_thread and bot_thread.is_alive():
+                        logger.info("🔄 Stopping existing bot thread")
                         run_async(main.client.disconnect())
-                        logger.info("✅ Disconnected existing client")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error disconnecting client: {e}")
+                        bot_thread.join(timeout=5)
 
-                # Reset channels
-                main.SOURCE_CHANNEL = None
-                main.DESTINATION_CHANNEL = None
+                    # Start new client in thread
+                    def start_bot():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(main.main())
+                        except Exception as e:
+                            logger.error(f"❌ Bot thread error: {e}")
+                        finally:
+                            loop.close()
 
-                # Update channels
-                main.SOURCE_CHANNEL = source
-                main.DESTINATION_CHANNEL = destination
-                logger.info(f"✅ Updated channels - Source: {source}, Destination: {destination}")
+                    bot_thread = Thread(target=start_bot, daemon=True)
+                    bot_thread.start()
+                    logger.info("✅ Started bot in new thread")
 
-                # Start bot in a new thread with its own event loop
-                def start_bot():
-                    run_async(main.main())
+                else:
+                    logger.info("🔄 Stopping bot...")
+                    if hasattr(main, 'client') and main.client:
+                        try:
+                            run_async(main.client.disconnect())
+                            logger.info("✅ Disconnected client")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Error disconnecting client: {e}")
 
-                bot_thread = Thread(target=start_bot, daemon=True)
-                bot_thread.start()
-                logger.info("✅ Started Telegram client in new thread")
+                    # Reset state
+                    main.SOURCE_CHANNEL = None
+                    main.DESTINATION_CHANNEL = None
+                    main.client = None
 
-            else:
-                logger.info("🔄 Stopping bot...")
-                if hasattr(main, 'client') and main.client:
-                    try:
-                        run_async(main.client.disconnect())
-                        logger.info("✅ Disconnected client")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error disconnecting client: {e}")
+                    # Stop thread
+                    if bot_thread and bot_thread.is_alive():
+                        bot_thread.join(timeout=5)
+                    bot_thread = None
 
-                main.SOURCE_CHANNEL = None
-                main.DESTINATION_CHANNEL = None
+                # Update session
+                session['bot_running'] = status
+                logger.info(f"✅ Bot status changed to: {'running' if status else 'stopped'}")
 
-            # Update session
-            session['bot_running'] = status
-            logger.info(f"✅ Bot status changed to: {'running' if status else 'stopped'}")
+                return jsonify({
+                    'status': status,
+                    'message': f"Bot is now {'running' if status else 'stopped'}"
+                })
 
-            return jsonify({
-                'status': status,
-                'message': f"Bot is now {'running' if status else 'stopped'}"
-            })
-
-        except ImportError:
-            logger.error("❌ Failed to import main module")
-            return jsonify({'error': 'Bot module not found'}), 500
-        except Exception as e:
-            logger.error(f"❌ Bot toggle error: {str(e)}")
-            import traceback
-            logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
-            return jsonify({'error': 'Failed to toggle bot status'}), 500
+            except ImportError:
+                logger.error("❌ Failed to import main module")
+                return jsonify({'error': 'Bot module not found'}), 500
+            except Exception as e:
+                logger.error(f"❌ Bot toggle error: {str(e)}")
+                import traceback
+                logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
+                return jsonify({'error': 'Failed to toggle bot status'}), 500
 
     except Exception as e:
         logger.error(f"❌ Route error: {str(e)}")
