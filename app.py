@@ -9,6 +9,7 @@ from functools import wraps
 from asgiref.sync import async_to_sync
 import psycopg2
 from psycopg2.extras import DictCursor
+from psycopg2 import pool
 from flask_session import Session
 from datetime import timedelta
 from flask_sqlalchemy import SQLAlchemy
@@ -41,6 +42,13 @@ app.config.update(
 
 # Initialize database
 db = SQLAlchemy(app)
+
+# Database pool for other connections
+db_pool = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=20,
+    dsn=os.getenv('DATABASE_URL')
+)
 
 # Database lock for concurrent operations
 db_lock = Lock()
@@ -97,26 +105,12 @@ class EventLoopManager:
 # Database connection
 @contextmanager
 def get_db():
-    if hasattr(g, '_db'):
-        yield g._db
-    else:
-        conn = psycopg2.connect(
-            os.getenv('DATABASE_URL'),
-            application_name='telegram_bot_web'
-        )
+    conn = db_pool.getconn()
+    try:
         conn.autocommit = True
-        g._db = conn
-        try:
-            yield g._db
-        finally:
-            conn.close()
-            g.pop('_db', None)
-
-@app.teardown_appcontext
-def close_db(e=None):
-    db = g.pop('_db', None)
-    if db is not None:
-        db.close()
+        yield conn
+    finally:
+        db_pool.putconn(conn)
 
 def login_required(f):
     @wraps(f)
@@ -129,27 +123,32 @@ def login_required(f):
 def async_route(f):
     @wraps(f)
     def wrapped(*args, **kwargs):
-        return async_to_sync(f)(*args, **kwargs)
+        try:
+            loop = EventLoopManager.get_loop()
+            return loop.run_until_complete(f(*args, **kwargs))
+        except Exception as e:
+            logger.error(f"❌ Async route error: {str(e)}")
+            raise
     return wrapped
 
 # Telegram client manager
 class TelegramManager:
-    def __init__(self, session_name, api_id, api_hash):
-        self.session_name = session_name
+    def __init__(self, api_id, api_hash):
         self.api_id = api_id
         self.api_hash = api_hash
         self._lock = Lock()
 
-    async def get_client(self):
-        """Only for authentication purposes"""
+    async def get_auth_client(self):
+        """Client for authentication only"""
         with self._lock:
             client = TelegramClient(
-                'auth_session',  # Different session file for auth
+                'auth_session',
                 self.api_id,
                 self.api_hash,
                 device_model="Replit Web Auth",
                 system_version="Linux",
-                app_version="1.0"
+                app_version="1.0",
+                loop=EventLoopManager.get_loop()
             )
 
             if not client.is_connected():
@@ -157,37 +156,25 @@ class TelegramManager:
 
             return client
 
-    async def disconnect(self):
-        """Clean up authentication client"""
-        with self._lock:
-            client = EventLoopManager.get_client()
-            if client and client.is_connected():
-                await client.disconnect()
-                EventLoopManager.set_client(None)
-
     def cleanup(self):
         """Clean up authentication resources"""
-        with self._lock:
-            loop = EventLoopManager.get_loop()
-            if loop:
+        EventLoopManager.reset()
+        for session_file in ['auth_session.session', 'auth_session.session-journal']:
+            if os.path.exists(session_file):
                 try:
-                    loop.run_until_complete(self.disconnect())
+                    os.remove(session_file)
                 except:
                     pass
-            EventLoopManager.reset()
 
 # Create global Telegram manager
 telegram_manager = TelegramManager(
-    'anon',
     int(os.getenv('API_ID', '27202142')),
     os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 )
 
 @app.route('/')
 def login():
-    logger.info("Accessing login page")
     if session.get('logged_in'):
-        logger.info("User already logged in, redirecting to dashboard")
         return redirect(url_for('dashboard'))
     return render_template('login.html')
 
@@ -197,19 +184,16 @@ async def send_otp():
     try:
         phone = request.form.get('phone')
         if not phone:
-            logger.error("❌ Phone number missing")
             return jsonify({'error': 'Phone number is required'}), 400
 
         if not phone.startswith('+91'):
-            logger.error(f"❌ Invalid phone format: {phone}")
             return jsonify({'error': 'Phone number must start with +91'}), 400
 
         try:
-            client = await telegram_manager.get_client()
+            client = await telegram_manager.get_auth_client()
 
             # Check existing session
             if await client.is_user_authorized():
-                logger.info(f"✅ Found valid session for {phone}")
                 session['user_phone'] = phone
                 session['logged_in'] = True
                 return jsonify({'message': 'Already authorized', 'already_authorized': True})
@@ -218,21 +202,17 @@ async def send_otp():
             sent = await client.send_code_request(phone)
             session['user_phone'] = phone
             session['phone_code_hash'] = sent.phone_code_hash
-            logger.info("✅ OTP sent successfully")
             return jsonify({'message': 'OTP sent successfully'})
 
         except PhoneNumberInvalidError:
-            logger.error(f"❌ Invalid phone: {phone}")
             return jsonify({'error': 'Invalid phone number'}), 400
         except Exception as e:
             logger.error(f"❌ Send OTP error: {str(e)}")
-            await telegram_manager.disconnect()
-            telegram_manager.cleanup()
             return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         logger.error(f"❌ Critical error in send_otp: {str(e)}")
-        return jsonify({'error': 'Server error'}), 500
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/verify-otp', methods=['POST'])
 @async_route
@@ -244,20 +224,16 @@ async def verify_otp():
         password = request.form.get('password')
 
         if not phone or not phone_code_hash:
-            logger.error("❌ Missing session data")
             return jsonify({'error': 'Session expired. Please try again.'}), 400
 
         if not otp:
-            logger.error("❌ OTP missing")
             return jsonify({'error': 'OTP is required'}), 400
 
         try:
-            client = await telegram_manager.get_client()
+            client = await telegram_manager.get_auth_client()
             try:
                 await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
-                logger.info("✅ Sign in successful")
             except SessionPasswordNeededError:
-                logger.info("⚠️ 2FA needed")
                 if not password:
                     return jsonify({
                         'error': 'two_factor_needed',
@@ -265,9 +241,7 @@ async def verify_otp():
                     })
                 try:
                     await client.sign_in(password=password)
-                    logger.info("✅ 2FA verification successful")
                 except Exception as e:
-                    logger.error(f"❌ 2FA failed: {e}")
                     return jsonify({'error': 'Invalid 2FA password'}), 400
 
             if await client.is_user_authorized():
@@ -277,7 +251,6 @@ async def verify_otp():
                 return jsonify({'error': 'Invalid OTP'}), 400
 
         except Exception as e:
-            logger.error(f"❌ Verify OTP error: {str(e)}")
             return jsonify({'error': str(e)}), 500
 
     except Exception as e:
@@ -288,382 +261,135 @@ async def verify_otp():
 @login_required
 @async_route
 async def dashboard():
-    """Dashboard route with proper event loop handling"""
     try:
-        # Get client using event loop manager
-        client = await telegram_manager.get_client()
-        if not client:
-            logger.error("❌ Failed to get Telegram client")
-            return redirect(url_for('login'))
-
+        client = await telegram_manager.get_auth_client()
         channels = []
-        try:
-            # Get channels using existing event loop
-            async for dialog in client.iter_dialogs():
-                if dialog.is_channel:
-                    channels.append({
-                        'id': dialog.id,
-                        'name': dialog.name
-                    })
 
-            # Get last selected channels from database
-            with get_db() as db:
-                with db.cursor(cursor_factory=DictCursor) as cur:
-                    cur.execute("""
-                        SELECT source_channel, destination_channel 
-                        FROM channel_config 
-                        ORDER BY updated_at DESC 
-                        LIMIT 1
-                    """)
-                    last_config = cur.fetchone()
+        # Get channels
+        async for dialog in client.iter_dialogs():
+            if dialog.is_channel:
+                channels.append({
+                    'id': dialog.id,
+                    'name': dialog.name
+                })
 
-            return render_template('dashboard.html', 
-                                channels=channels,
-                                last_source=last_config['source_channel'] if last_config else None,
-                                last_dest=last_config['destination_channel'] if last_config else None)
+        # Get last selected channels
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT source_channel, destination_channel 
+                    FROM channel_config 
+                    ORDER BY updated_at DESC 
+                    LIMIT 1
+                """)
+                last_config = cur.fetchone()
 
-        except Exception as e:
-            logger.error(f"Error loading dashboard data: {str(e)}")
-            raise
+        return render_template('dashboard.html', 
+                            channels=channels,
+                            last_source=last_config['source_channel'] if last_config else None,
+                            last_dest=last_config['destination_channel'] if last_config else None)
 
     except Exception as e:
-        logger.error(f"Critical error in dashboard: {str(e)}")
+        logger.error(f"❌ Dashboard error: {str(e)}")
         return redirect(url_for('login'))
-
-@app.route('/add-replacement', methods=['POST'])
-@login_required
-def add_replacement():
-    try:
-        original = request.form.get('original')
-        replacement = request.form.get('replacement')
-        user_phone = session.get('user_phone')
-
-        if not original or not replacement:
-            logger.error("Missing replacement text parameters")
-            return jsonify({'error': 'Both original and replacement text are required'}), 400
-
-        user_id = get_user_id(user_phone)
-        if user_id is None:
-            return jsonify({'error': 'Failed to get user ID'}), 500
-
-        logger.info(f"Adding replacement for user {user_id}: '{original}' → '{replacement}'")
-
-        with get_db() as db:
-            with db.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO text_replacements (user_id, original_text, replacement_text)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (user_id, original_text) 
-                    DO UPDATE SET replacement_text = EXCLUDED.replacement_text
-                """, (user_id, original, replacement))
-                db.commit()
-
-        import main
-        main.CURRENT_USER_ID = user_id
-        main.load_user_replacements(user_id)
-        logger.info(f"Reloaded replacements for user {user_id}")
-
-        return jsonify({'message': 'Replacement added successfully'})
-    except Exception as e:
-        logger.error(f"Error adding replacement: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/get-replacements')
-@login_required
-def get_replacements():
-    try:
-        user_phone = session.get('user_phone')
-        user_id = get_user_id(user_phone)
-        if user_id is None:
-            return jsonify({'error': 'Failed to get user ID'}), 500
-        logger.info(f"Fetching replacements for user {user_id}")
-
-        with get_db() as db:
-            with db.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute("""
-                    SELECT original_text, replacement_text 
-                    FROM text_replacements 
-                    WHERE user_id = %s
-                    ORDER BY LENGTH(original_text) DESC
-                """, (user_id,))
-                replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
-                logger.info(f"Retrieved {len(replacements)} replacements for user {user_id}")
-
-        # Ensure text replacements are loaded in main.py
-        import main
-        main.CURRENT_USER_ID = user_id
-        main.load_user_replacements(user_id)
-
-        return jsonify(replacements)
-    except Exception as e:
-        logger.error(f"Error getting replacements: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/remove-replacement', methods=['POST'])
-@login_required
-def remove_replacement():
-    try:
-        original = request.form.get('original')
-        user_phone = session.get('user_phone')
-
-        if not original:
-            return jsonify({'error': 'Original text is required'}), 400
-
-        user_id = get_user_id(user_phone)
-        if user_id is None:
-            return jsonify({'error': 'Failed to get user ID'}), 500
-
-        with get_db() as db:
-            with db.cursor() as cur:
-                cur.execute("""
-                    DELETE FROM text_replacements 
-                    WHERE user_id = %s AND original_text = %s
-                """, (user_id, original))
-                deleted = cur.rowcount > 0
-                db.commit()
-
-        if deleted:
-            import main
-            main.load_user_replacements(user_id)
-            return jsonify({'message': 'Replacement removed successfully'})
-        else:
-            return jsonify({'error': 'Replacement not found'}), 404
-
-    except Exception as e:
-        logger.error(f"Error removing replacement: {str(e)}")
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/logout')
 def logout():
     try:
-        # Cleanup existing session
-        phone = session.get('user_phone')
-        if phone:
-            session_file = "anon.session"
-            if os.path.exists(session_file):
-                try:
-                    os.remove(session_file)
-                    logger.info("✅ Removed session file")
-                except Exception as e:
-                    logger.error(f"❌ Cleanup error: {str(e)}")
-
-        # Cleanup Telegram manager and reset event loop
+        # Clean up sessions
         telegram_manager.cleanup()
-        EventLoopManager.reset()
 
-        # Clear session
+        # Clear flask session
         session.clear()
         return redirect(url_for('login'))
     except Exception as e:
-        logger.error(f"❌ Error in logout route: {str(e)}")
+        logger.error(f"❌ Logout error: {str(e)}")
         return redirect(url_for('login'))
 
 @app.route('/update-channels', methods=['POST'])
+@login_required
 def update_channels():
-    """Update channel configuration in database"""
     try:
         source = request.form.get('source')
         destination = request.form.get('destination')
 
         if not source or not destination:
-            logger.error("❌ Missing channel IDs")
-            return jsonify({'error': 'Both source and destination channels are required'}), 400
+            return jsonify({'error': 'Both channels required'}), 400
 
-        if source == destination:
-            logger.error("❌ Source and destination channels are same")
-            return jsonify({'error': 'Source and destination channels must be different'}), 400
+        # Format channel IDs
+        if not source.startswith('-100'):
+            source = f"-100{source.lstrip('-')}"
+        if not destination.startswith('-100'):
+            destination = f"-100{destination.lstrip('-')}"
 
-        try:
-            # Format channel IDs
-            if not source.startswith('-100'):
-                source = f"-100{source.lstrip('-')}"
-            if not destination.startswith('-100'):
-                destination = f"-100{destination.lstrip('-')}"
+        # Save to database
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO channel_config (source_channel, destination_channel)
+                    VALUES (%s, %s)
+                """, (source, destination))
 
-            # Update session
-            session['source_channel'] = source
-            session['dest_channel'] = destination
-
-            # Save to database
-            with get_db() as db:
-                with db.cursor() as cur:
-                    # Create table if not exists
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS channel_config (
-                            id SERIAL PRIMARY KEY,
-                            source_channel TEXT NOT NULL,
-                            destination_channel TEXT NOT NULL,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """)
-
-                    # Insert new configuration
-                    cur.execute("""
-                        INSERT INTO channel_config (source_channel, destination_channel)
-                        VALUES (%s, %s)
-                    """, (source, destination))
-
-            # Update bot if running
-            if session.get('bot_running'):
-                import main
-                main.SOURCE_CHANNEL = source
-                main.DESTINATION_CHANNEL = destination
-                logger.info("✅ Updated running bot configuration")
-
-            logger.info(f"✅ Channel config updated - Source: {source}, Destination: {destination}")
-            return jsonify({'message': 'Channel configuration updated successfully'})
-
-        except psycopg2.Error as e:
-            logger.error(f"❌ Database error: {e}")
-            return jsonify({'error': 'Database error updating channels'}), 500
-        except Exception as e:
-            logger.error(f"❌ Channel update error: {e}")
-            return jsonify({'error': str(e)}), 500
+        return jsonify({'message': 'Channels updated successfully'})
 
     except Exception as e:
-        logger.error(f"❌ Route error: {str(e)}")
+        logger.error(f"❌ Channel update error: {str(e)}")
         return jsonify({'error': str(e)}), 500
-
-@app.route('/clear-replacements', methods=['POST'])
-@login_required
-def clear_replacements():
-    try:
-        user_phone = session.get('user_phone')
-        user_id = get_user_id(user_phone)
-        if user_id is None:
-            return jsonify({'error': 'Failed to get user ID'}), 500
-
-        with get_db() as db:
-            with db.cursor() as cur:
-                cur.execute("DELETE FROM text_replacements WHERE user_id = %s", (user_id,))
-                db.commit()
-
-        logger.info("Cleared all text replacements for user")
-        return jsonify({'message': 'All replacements cleared'})
-    except Exception as e:
-        logger.error(f"Error clearing replacements: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-def run_async(coro):
-    """Run an async function in a new event loop"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    except Exception as e:
-        logger.error(f"❌ Async error: {str(e)}")
-        raise
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
 
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
 def toggle_bot():
-    """Toggle bot status with proper event loop handling"""
     try:
         status = request.form.get('status') == 'true'
         source = session.get('source_channel')
         destination = session.get('dest_channel')
 
         if not source or not destination:
-            logger.error("❌ Channel configuration missing")
-            return jsonify({'error': 'Please configure source and destination channels first'}), 400
+            return jsonify({'error': 'Configure channels first'}), 400
 
-        try:
-            import main
-
-            # Test database connection first
-            with get_db() as db:
-                with db.cursor() as cur:
-                    cur.execute("SELECT 1")
-            logger.info("✅ Database connection verified")
-
-            if status:
-                logger.info("🔄 Starting bot...")
-
-                # Start bot in a new thread
-                def start_bot():
-                    try:
-                        # Initialize event loop for this thread
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-
-                        # Configure bot
-                        main.SOURCE_CHANNEL = source
-                        main.DESTINATION_CHANNEL = destination
-
-                        # Run bot
-                        try:
-                            loop.run_until_complete(main.main())
-                        except Exception as e:
-                            logger.error(f"❌ Bot error: {str(e)}")
-                        finally:
-                            loop.stop()
-                            loop.close()
-                    except Exception as e:
-                        logger.error(f"❌ Thread error: {str(e)}")
-
-                bot_thread = Thread(target=start_bot, daemon=True)
-                bot_thread.start()
-                logger.info("✅ Started bot thread")
-
-                # Update session
-                session['bot_running'] = True
-                logger.info("✅ Bot status changed to: running")
-
-            else:
-                logger.info("🔄 Stopping bot...")
+        import main
+        if status:
+            # Start bot
+            def start_bot():
                 try:
-                    # Just update flags, main.py will handle cleanup
-                    main.SOURCE_CHANNEL = None
-                    main.DESTINATION_CHANNEL = None
-                    session['bot_running'] = False
-                    logger.info("✅ Bot stopped successfully")
+                    main.SOURCE_CHANNEL = source
+                    main.DESTINATION_CHANNEL = destination
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(main.main())
+                    finally:
+                        loop.close()
                 except Exception as e:
-                    logger.error(f"❌ Stop error: {str(e)}")
-                    raise
+                    logger.error(f"❌ Bot error: {str(e)}")
 
-            return jsonify({
-                'status': status,
-                'message': f"Bot is now {'running' if status else 'stopped'}"
-            })
+            bot_thread = Thread(target=start_bot, daemon=True)
+            bot_thread.start()
+            session['bot_running'] = True
+        else:
+            # Stop bot
+            main.SOURCE_CHANNEL = None
+            main.DESTINATION_CHANNEL = None
+            session['bot_running'] = False
 
-        except ImportError:
-            logger.error("❌ Failed to import main module")
-            return jsonify({'error': 'Bot module not found'}), 500
-        except Exception as e:
-            logger.error(f"❌ Bot toggle error: {str(e)}")
-            return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'status': status,
+            'message': f"Bot is now {'running' if status else 'stopped'}"
+        })
 
     except Exception as e:
-        logger.error(f"❌ Route error: {str(e)}")
+        logger.error(f"❌ Bot toggle error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/static/<path:filename>')
 def serve_static(filename):
     return send_from_directory('static', filename)
 
-def get_user_id(phone):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
-                result = cur.fetchone()
-                if result:
-                    return result[0]
-                cur.execute("INSERT INTO users (phone) VALUES (%s) RETURNING id", (phone,))
-                conn.commit()
-                return cur.fetchone()[0]
-    except Exception as e:
-        logger.error(f"Error getting user ID: {str(e)}")
-        return None
-
 if __name__ == '__main__':
-    # Ensure required directories exist
+    # Ensure directories exist
     os.makedirs('static/css', exist_ok=True)
 
-    # Create default CSS if not exists
+    # Create default CSS
     if not os.path.exists('static/css/style.css'):
         with open('static/css/style.css', 'w') as f:
             f.write("""
