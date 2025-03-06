@@ -516,16 +516,7 @@ def toggle_bot():
                 # Stop existing client if running
                 if hasattr(main, 'client') and main.client:
                     try:
-                        def disconnect_client():
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            try:
-                                loop.run_until_complete(main.client.disconnect())
-                            finally:
-                                loop.close()
-                                asyncio.set_event_loop(None)
-
-                        Thread(target=disconnect_client).start()
+                        run_async(main.client.disconnect())
                         logger.info("✅ Disconnected existing client")
                     except Exception as e:
                         logger.warning(f"⚠️ Error disconnecting client: {e}")
@@ -533,50 +524,31 @@ def toggle_bot():
                 # Reset channels
                 main.SOURCE_CHANNEL = None
                 main.DESTINATION_CHANNEL = None
-                main.client = None
 
                 # Update channels
                 main.SOURCE_CHANNEL = source
                 main.DESTINATION_CHANNEL = destination
                 logger.info(f"✅ Updated channels - Source: {source}, Destination: {destination}")
 
-                # Start new client
+                # Start bot in a new thread with its own event loop
                 def start_bot():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(main.main())
-                    except Exception as e:
-                        logger.error(f"❌ Bot thread error: {e}")
-                    finally:
-                        loop.close()
+                    run_async(main.main())
 
-                Thread(target=start_bot, daemon=True).start()
-                logger.info("✅ Started bot in new thread")
+                bot_thread = Thread(target=start_bot, daemon=True)
+                bot_thread.start()
+                logger.info("✅ Started Telegram client in new thread")
 
             else:
                 logger.info("🔄 Stopping bot...")
-
                 if hasattr(main, 'client') and main.client:
                     try:
-                        def stop_client():
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            try:
-                                loop.run_until_complete(main.client.disconnect())
-                            finally:
-                                loop.close()
-                                asyncio.set_event_loop(None)
-
-                        Thread(target=stop_client).start()
+                        run_async(main.client.disconnect())
                         logger.info("✅ Disconnected client")
                     except Exception as e:
                         logger.warning(f"⚠️ Error disconnecting client: {e}")
 
-                # Reset state
                 main.SOURCE_CHANNEL = None
                 main.DESTINATION_CHANNEL = None
-                main.client = None
 
             # Update session
             session['bot_running'] = status

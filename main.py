@@ -43,7 +43,10 @@ def get_user_id_by_phone(phone):
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
             result = cur.fetchone()
-            return result[0] if result else None
+            if result:
+                return result[0]
+            logger.warning(f"❌ No user found for phone: {phone}")
+            return None
     except Exception as e:
         logger.error(f"❌ Database error: {str(e)}")
         return None
@@ -91,7 +94,10 @@ def load_user_replacements(user_id):
             """, (user_id,))
             TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
             CURRENT_USER_ID = user_id
-            logger.info(f"👤 Loaded {len(TEXT_REPLACEMENTS)} replacements for user {user_id}")
+            logger.info(f"👤 Loaded replacements for user {user_id}")
+            logger.info(f"📚 Found {len(TEXT_REPLACEMENTS)} replacements")
+            for original, replacement in TEXT_REPLACEMENTS.items():
+                logger.info(f"📝 Loaded: '{original}' → '{replacement}'")
             return True
     except Exception as e:
         logger.error(f"❌ Error loading replacements: {str(e)}")
@@ -103,25 +109,26 @@ def load_user_replacements(user_id):
             conn.close()
 
 def apply_text_replacements(text):
-    if not text or not TEXT_REPLACEMENTS:
+    if not text:
+        return text
+
+    if not TEXT_REPLACEMENTS:
+        logger.info("❌ No replacements configured")
         return text
 
     result = text
     for original, replacement in TEXT_REPLACEMENTS.items():
         if original in result:
             result = result.replace(original, replacement)
-            logger.info(f"✅ Applied: '{original}' → '{replacement}'")
+            logger.info(f"✅ Replaced '{original}' with '{replacement}'")
     return result
 
 async def setup_client():
     global client
 
     try:
-        if client and client.is_connected():
-            await client.disconnect()
-            await asyncio.sleep(1)
-
-        logger.info("🔄 Starting client...")
+        # Initialize client
+        logger.info("🔄 Starting Telegram client...")
         client = TelegramClient(
             'anon',
             API_ID,
@@ -131,8 +138,10 @@ async def setup_client():
             app_version="1.0"
         )
 
-        await client.connect()
-        logger.info("✅ Connected to Telegram")
+        # Connect to Telegram
+        if not client.is_connected():
+            await client.connect()
+            logger.info("✅ Connected to Telegram")
 
         if not await client.is_user_authorized():
             logger.error("❌ User not authorized")
@@ -140,31 +149,25 @@ async def setup_client():
 
         me = await client.get_me()
         logger.info(f"✅ Client active as: {me.first_name} (ID: {me.id})")
+
         return True
 
     except Exception as e:
         logger.error(f"❌ Setup error: {str(e)}")
-        if client:
-            await client.disconnect()
-            client = None
         return False
 
-async def main():
+async def setup_handlers():
     global client
 
     try:
-        # Setup client
-        if not await setup_client():
-            logger.error("❌ Failed to setup client")
-            return False
+        # Clear existing handlers
+        if client.list_event_handlers():
+            for handler in client.list_event_handlers():
+                client.remove_event_handler(handler)
+            logger.info("🔄 Cleared existing handlers")
 
-        # Load channel config
-        if not load_channel_config():
-            logger.error("❌ Failed to load channel configuration")
-            return False
-
-        # Setup message handler
-        @client.on(events.NewMessage())
+        # Add message handler
+        @client.on(events.NewMessage(pattern=''))
         async def handle_new_message(event):
             try:
                 logger.info("\n📨 New message received")
@@ -185,8 +188,8 @@ async def main():
                     source_id = f"-100{source_id.lstrip('-')}"
 
                 logger.info(f"🔍 Comparing channels:")
+                logger.info(f"- Source: {source_id}")
                 logger.info(f"- Message from: {chat_id}")
-                logger.info(f"- Source channel: {source_id}")
 
                 if chat_id != source_id:
                     logger.info("👉 Not from source channel")
@@ -194,39 +197,79 @@ async def main():
 
                 logger.info("✅ Message is from source channel")
 
-                # Process message
-                message_text = event.message.text if event.message.text else ""
-                logger.info(f"📥 Original message: {message_text}")
+                try:
+                    # Process message
+                    message_text = event.message.text if event.message.text else ""
+                    logger.info(f"📥 Original message: {message_text}")
 
-                if message_text and TEXT_REPLACEMENTS:
-                    message_text = apply_text_replacements(message_text)
-                    logger.info(f"📝 Final message: {message_text}")
+                    if message_text and TEXT_REPLACEMENTS:
+                        old_text = message_text
+                        message_text = apply_text_replacements(message_text)
+                        logger.info(f"📝 After replacements: {message_text}")
 
-                # Format destination ID
-                dest_id = str(DESTINATION_CHANNEL)
-                if not dest_id.startswith('-100'):
-                    dest_id = f"-100{dest_id.lstrip('-')}"
+                    # Format destination ID
+                    dest_id = str(DESTINATION_CHANNEL)
+                    if not dest_id.startswith('-100'):
+                        dest_id = f"-100{dest_id.lstrip('-')}"
 
-                # Send to destination
-                dest_channel = await client.get_entity(int(dest_id))
-                logger.info(f"📤 Forwarding to: {getattr(dest_channel, 'title', 'Unknown')}")
+                    # Send to destination
+                    dest_channel = await client.get_entity(int(dest_id))
+                    logger.info(f"📤 Forwarding to: {getattr(dest_channel, 'title', 'Unknown')}")
 
-                sent_message = await client.send_message(
-                    dest_channel,
-                    message_text,
-                    formatting_entities=event.message.entities
-                )
-                MESSAGE_IDS[event.message.id] = sent_message.id
-                logger.info("✅ Message forwarded successfully")
+                    sent_message = await client.send_message(
+                        dest_channel,
+                        message_text,
+                        formatting_entities=event.message.entities
+                    )
+
+                    MESSAGE_IDS[event.message.id] = sent_message.id
+                    logger.info("✅ Message forwarded successfully")
+
+                except Exception as e:
+                    logger.error(f"❌ Forward error: {str(e)}")
+                    import traceback
+                    logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
 
             except Exception as e:
-                logger.error(f"❌ Message handler error: {str(e)}")
+                logger.error(f"❌ Handler error: {str(e)}")
                 import traceback
                 logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
 
+        # Add debug handler
         @client.on(events.Raw)
         async def debug_raw_events(event):
             logger.info(f"🔍 Raw event: {type(event).__name__}")
+
+        # Verify handlers
+        handlers = client.list_event_handlers()
+        logger.info(f"\n✅ Total handlers: {len(handlers)}")
+        for handler in handlers:
+            logger.info(f"📌 Handler: {handler}")
+
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Handler setup error: {str(e)}")
+        return False
+
+async def main():
+    global client
+
+    try:
+        # Setup client
+        if not await setup_client():
+            logger.error("❌ Failed to setup client")
+            return False
+
+        # Load channel config
+        if not load_channel_config():
+            logger.error("❌ Failed to load channel configuration")
+            return False
+
+        # Setup handlers
+        if not await setup_handlers():
+            logger.error("❌ Failed to setup handlers")
+            return False
 
         # Log system state
         logger.info("\n🤖 System is ready")
@@ -236,17 +279,7 @@ async def main():
         logger.info(f"📚 Active replacements: {len(TEXT_REPLACEMENTS)}")
 
         # Run client
-        try:
-            await client.run_until_disconnected()
-        except Exception as e:
-            logger.error(f"❌ Client run error: {e}")
-            raise
-        finally:
-            if client and client.is_connected():
-                await client.disconnect()
-                logger.info("✅ Client disconnected")
-                client = None
-
+        await client.run_until_disconnected()
         return True
 
     except Exception as e:
@@ -255,7 +288,6 @@ async def main():
         logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
         if client and client.is_connected():
             await client.disconnect()
-            client = None
         return False
 
 if __name__ == "__main__":
@@ -268,17 +300,13 @@ if __name__ == "__main__":
             except Exception as e:
                 logger.error(f"❌ Cleanup error: {str(e)}")
 
-        # Set up event loop
+        # Run main function
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-
-        try:
-            loop.run_until_complete(main())
-        finally:
-            loop.close()
-            asyncio.set_event_loop(None)
-
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("\n👋 System stopped by user")
     except Exception as e:
         logger.error(f"❌ Startup error: {str(e)}")
+    finally:
+        loop.close()
