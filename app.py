@@ -8,10 +8,10 @@ from functools import wraps
 from asgiref.sync import async_to_sync
 import psycopg2
 from psycopg2.extras import DictCursor
+import json
+from flask_session import Session
 from datetime import timedelta
-import tempfile
-from telethon.sessions import StringSession
-import os
+from flask_sqlalchemy import SQLAlchemy
 
 # Set up logging
 logging.basicConfig(
@@ -21,21 +21,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-# Use a fixed secret key for development
-app.secret_key = 'dev-secret-key'  # In production, use environment variable
-app.permanent_session_lifetime = timedelta(days=7)
+app.secret_key = os.urandom(24)
 
-# Telegram API credentials
-API_ID = int(os.getenv('API_ID', '27202142'))
-API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
+# Update the session configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_size': 10,
+    'pool_timeout': 30,
+    'pool_recycle': 1800,
+}
+db = SQLAlchemy(app)
 
+# Configure Flask-Session with SQLAlchemy
+class FlaskSession(db.Model):
+    __tablename__ = 'session'
+
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.String(255), unique=True, nullable=False)
+    data = db.Column(db.LargeBinary)
+    expiry = db.Column(db.DateTime)
+
+app.config['SESSION_TYPE'] = 'sqlalchemy'
+app.config['SESSION_SQLALCHEMY'] = db
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+app.config['SESSION_PERMANENT'] = True
+Session(app)
+
+# Database connection with better connection handling
 def get_db():
     if 'db' not in g:
         g.db = psycopg2.connect(
             os.getenv('DATABASE_URL'),
             application_name='telegram_bot_web'
         )
-        g.db.autocommit = True
+        g.db.autocommit = True  # Prevent transaction locks
     return g.db
 
 @app.teardown_appcontext
@@ -44,111 +64,113 @@ def close_db(e=None):
     if db is not None:
         db.close()
 
+# Telegram API credentials
+API_ID = int(os.getenv('API_ID', '27202142'))
+API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        logger.info(f"Checking auth - Session data: {dict(session)}")
-        if not session.get('user_id'):
-            logger.warning("No user_id in session, redirecting to login")
+        if 'user_phone' not in session:
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
 def get_user_id(phone):
-    conn = get_db()
-    with conn.cursor() as cur:
+    db = get_db()
+    with db.cursor() as cur:
         cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
         result = cur.fetchone()
         if result:
             return result[0]
         cur.execute("INSERT INTO users (phone) VALUES (%s) RETURNING id", (phone,))
-        conn.commit()
+        db.commit()
         return cur.fetchone()[0]
 
 @app.route('/')
-def index():
-    logger.info(f"Index route - Session data: {dict(session)}")
-    if session.get('user_id'):
-        return redirect(url_for('dashboard'))
-    return redirect(url_for('login'))
-
-@app.route('/login')
 def login():
-    logger.info(f"Login route - Session data: {dict(session)}")
-    if session.get('user_id'):
-        return redirect(url_for('dashboard'))
     return render_template('login.html')
-
-def get_temp_session_path(phone):
-    temp_dir = tempfile.gettempdir()
-    return os.path.join(temp_dir, f"telegram_session_{phone}")
 
 @app.route('/send-otp', methods=['POST'])
 def send_otp():
     phone = request.form.get('phone')
     if not phone:
+        logger.error("Phone number missing in request")
         return jsonify({'error': 'Phone number is required'}), 400
 
     if not phone.startswith('+91'):
+        logger.error(f"Invalid phone number format: {phone}")
         return jsonify({'error': 'Phone number must start with +91'}), 400
 
     try:
         async def send_code():
-            logger.info(f"Sending OTP to phone: {phone}")
-            session_path = get_temp_session_path(phone)
-            client = TelegramClient(session_path, API_ID, API_HASH)
+            logger.info(f"Initializing Telegram client for phone: {phone}")
+            session_file = f"sessions/{phone}"
 
-            try:
-                await client.connect()
+            # If session exists, check if it's valid
+            if os.path.exists(session_file):
                 try:
-                    sent = await client.send_code_request(phone)
-                    session.clear()  # Clear any old session data
-                    session.permanent = True
-                    session['phone'] = phone
-                    session['phone_code_hash'] = sent.phone_code_hash
-                    session['temp_session_path'] = session_path
-                    logger.info(f"OTP sent - Session data: {dict(session)}")
-
-                    if client.is_connected():
+                    client = TelegramClient(session_file, API_ID, API_HASH)
+                    await client.connect()
+                    if await client.is_user_authorized():
+                        logger.info(f"Found valid session for {phone}")
+                        session['user_phone'] = phone
+                        session['logged_in'] = True
                         await client.disconnect()
-                    return {'message': 'OTP sent successfully'}
+                        return {'message': 'Already authorized', 'already_authorized': True}
+                    else:
+                        logger.info(f"Session exists but not authorized for {phone}")
+                        os.remove(session_file)
+                except Exception as e:
+                    logger.error(f"Error checking existing session: {e}")
+                    if os.path.exists(session_file):
+                        os.remove(session_file)
 
+            # Create new session
+            client = TelegramClient(session_file, API_ID, API_HASH)
+            try:
+                logger.info("Connecting to Telegram...")
+                await client.connect()
+
+                try:
+                    # Send code and get the phone_code_hash
+                    sent = await client.send_code_request(phone)
+                    session['user_phone'] = phone
+                    session['phone_code_hash'] = sent.phone_code_hash
+                    logger.info("Code request sent successfully")
+                    await client.disconnect()
+                    return {'message': 'OTP sent successfully'}
                 except PhoneNumberInvalidError:
                     logger.error(f"Invalid phone number: {phone}")
-                    if client.is_connected():
-                        await client.disconnect()
-                    if os.path.exists(session_path):
-                        os.remove(session_path)
+                    await client.disconnect()
+                    if os.path.exists(session_file):
+                        os.remove(session_file)
                     return {'error': 'Invalid phone number'}, 400
 
             except Exception as e:
                 logger.error(f"Error in send_code: {str(e)}")
-                if client.is_connected():
+                if client and client.connected:
                     await client.disconnect()
-                if os.path.exists(session_path):
-                    os.remove(session_path)
+                if os.path.exists(session_file):
+                    os.remove(session_file)
                 raise e
 
         result = asyncio.run(send_code())
         if isinstance(result, tuple):
             return jsonify(result[0]), result[1]
         return jsonify(result)
-
     except Exception as e:
         logger.error(f"Error in send_otp route: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/verify-otp', methods=['POST'])
 def verify_otp():
-    phone = session.get('phone')
+    phone = session.get('user_phone')
     phone_code_hash = session.get('phone_code_hash')
-    temp_session_path = session.get('temp_session_path')
     otp = request.form.get('otp')
-    password = request.form.get('password')
+    password = request.form.get('password')  # For 2FA
 
-    logger.info(f"Verifying OTP - Current session data: {dict(session)}")
-
-    if not phone or not phone_code_hash or not temp_session_path:
+    if not phone or not phone_code_hash:
         logger.error("Missing session data")
         return jsonify({'error': 'Session expired. Please try again.'}), 400
 
@@ -158,62 +180,45 @@ def verify_otp():
 
     try:
         async def verify():
-            logger.info(f"Starting verification for phone: {phone}")
-            client = TelegramClient(temp_session_path, API_ID, API_HASH)
+            logger.info(f"Verifying OTP for phone: {phone}")
+            session_file = f"sessions/{phone}"
+            client = TelegramClient(session_file, API_ID, API_HASH)
 
             try:
                 await client.connect()
+                logger.info("Connected to Telegram")
+
                 try:
+                    # Sign in with phone code hash
                     await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
+                    logger.info("Sign in successful")
                 except SessionPasswordNeededError:
+                    logger.info("2FA password needed")
                     if not password:
-                        if client.is_connected():
-                            await client.disconnect()
-                        return {'error': 'two_factor_needed', 'message': 'Two-factor authentication is required'}
+                        await client.disconnect()
+                        return {
+                            'error': 'two_factor_needed',
+                            'message': 'Two-factor authentication is required'
+                        }
                     try:
                         await client.sign_in(password=password)
+                        logger.info("2FA verification successful")
                     except Exception as e:
                         logger.error(f"2FA verification failed: {e}")
-                        if client.is_connected():
-                            await client.disconnect()
+                        await client.disconnect()
                         return {'error': 'Invalid 2FA password'}, 400
 
                 if await client.is_user_authorized():
-                    session_string = StringSession.save(client.session)
-                    user_id = get_user_id(phone)
-
-                    conn = get_db()
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            INSERT INTO user_sessions (user_id, session_string)
-                            VALUES (%s, %s)
-                            ON CONFLICT (user_id) 
-                            DO UPDATE SET session_string = EXCLUDED.session_string
-                        """, (user_id, session_string))
-                        conn.commit()
-                        logger.info("Saved session string to database")
-
-                    # Set session data
-                    session.clear()
-                    session.permanent = True
-                    session['user_id'] = user_id
-                    session['phone'] = phone
-                    logger.info(f"Login successful - New session data: {dict(session)}")
-
-                    if client.is_connected():
-                        await client.disconnect()
-                    if os.path.exists(temp_session_path):
-                        os.remove(temp_session_path)
-
-                    return {'message': 'Login successful', 'redirect': url_for('dashboard')}
+                    session['logged_in'] = True
+                    await client.disconnect()
+                    return {'message': 'Login successful'}
                 else:
-                    if client.is_connected():
-                        await client.disconnect()
+                    await client.disconnect()
                     return {'error': 'Invalid OTP'}, 400
 
             except Exception as e:
                 logger.error(f"Error during verification: {str(e)}")
-                if client.is_connected():
+                if client and client.connected:
                     await client.disconnect()
                 raise e
 
@@ -221,23 +226,39 @@ def verify_otp():
         if isinstance(result, tuple):
             return jsonify(result[0]), result[1]
         return jsonify(result)
-
     except Exception as e:
         logger.error(f"Error in verify_otp route: {str(e)}")
-        if temp_session_path and os.path.exists(temp_session_path):
-            os.remove(temp_session_path)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/dashboard')
 @login_required
 def dashboard():
+    async def get_channels():
+        phone = session.get('user_phone')
+        client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
+
+        try:
+            await client.connect()
+            channels = []
+            async for dialog in client.iter_dialogs():
+                if dialog.is_channel:
+                    channels.append({
+                        'id': dialog.id,
+                        'name': dialog.name
+                    })
+            await client.disconnect()
+            return channels
+        except Exception as e:
+            logger.error(f"Error fetching channels: {str(e)}")
+            if client and client.connected:
+                await client.disconnect()
+            raise e
+
     try:
-        logger.info(f"Dashboard access - Session data: {dict(session)}")
         channels = asyncio.run(get_channels())
         return render_template('dashboard.html', channels=channels)
     except Exception as e:
         logger.error(f"Error in dashboard route: {str(e)}")
-        session.clear()
         return redirect(url_for('login'))
 
 @app.route('/add-replacement', methods=['POST'])
@@ -246,23 +267,24 @@ def add_replacement():
     try:
         original = request.form.get('original')
         replacement = request.form.get('replacement')
-        user_phone = session.get('phone')
+        user_phone = session.get('user_phone')
 
         if not original or not replacement:
             return jsonify({'error': 'Both original and replacement text are required'}), 400
 
         user_id = get_user_id(user_phone)
 
-        conn = get_db()
-        with conn.cursor() as cur:
+        db = get_db()
+        with db.cursor() as cur:
             cur.execute("""
                 INSERT INTO text_replacements (user_id, original_text, replacement_text)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (user_id, original_text) 
                 DO UPDATE SET replacement_text = EXCLUDED.replacement_text
             """, (user_id, original, replacement))
-            conn.commit()
+            db.commit()
 
+        # Update TEXT_REPLACEMENTS in main.py
         import main
         main.load_user_replacements(user_id)
 
@@ -275,11 +297,11 @@ def add_replacement():
 @login_required
 def get_replacements():
     try:
-        user_phone = session.get('phone')
+        user_phone = session.get('user_phone')
         user_id = get_user_id(user_phone)
 
-        conn = get_db()
-        with conn.cursor(cursor_factory=DictCursor) as cur:
+        db = get_db()
+        with db.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
                 SELECT original_text, replacement_text 
                 FROM text_replacements 
@@ -297,23 +319,24 @@ def get_replacements():
 def remove_replacement():
     try:
         original = request.form.get('original')
-        user_phone = session.get('phone')
+        user_phone = session.get('user_phone')
 
         if not original:
             return jsonify({'error': 'Original text is required'}), 400
 
         user_id = get_user_id(user_phone)
 
-        conn = get_db()
-        with conn.cursor() as cur:
+        db = get_db()
+        with db.cursor() as cur:
             cur.execute("""
                 DELETE FROM text_replacements 
                 WHERE user_id = %s AND original_text = %s
             """, (user_id, original))
             deleted = cur.rowcount > 0
-            conn.commit()
+            db.commit()
 
         if deleted:
+            # Update TEXT_REPLACEMENTS in main.py
             import main
             main.load_user_replacements(user_id)
             return jsonify({'message': 'Replacement removed successfully'})
@@ -326,8 +349,18 @@ def remove_replacement():
 
 @app.route('/logout')
 def logout():
-    session.clear()
-    return redirect(url_for('login'))
+    try:
+        phone = session.get('user_phone')
+        if phone:
+            session_file = f"sessions/{phone}"
+            if os.path.exists(session_file):
+                os.remove(session_file)
+                logger.info(f"Removed session file for {phone}")
+        session.clear()
+        return redirect(url_for('login'))
+    except Exception as e:
+        logger.error(f"Error in logout route: {str(e)}")
+        return redirect(url_for('login'))
 
 
 @app.route('/update-channels', methods=['POST'])
@@ -345,64 +378,45 @@ def update_channels():
             logger.error("Source and destination channels cannot be the same")
             return jsonify({'error': 'Source and destination channels must be different'}), 400
 
+        # Format channel IDs properly
         if not source.startswith('-100'):
             source = f"-100{source.lstrip('-')}"
         if not destination.startswith('-100'):
             destination = f"-100{destination.lstrip('-')}"
 
-        user_phone = session.get('phone')
-        user_id = get_user_id(user_phone)
-
-        save_user_channel_config(user_id, source, destination)
-
+        # Store channel IDs in session and file
         session['source_channel'] = source
         session['dest_channel'] = destination
 
-        logger.info(f"Updated channel configuration - Source: {source}, Destination: {destination}")
-        return jsonify({'message': 'Channel configuration updated successfully'})
+        # Save to configuration file
+        config = {
+            'source_channel': source,
+            'destination_channel': destination
+        }
 
+        with open('channel_config.json', 'w') as f:
+            import json
+            json.dump(config, f)
+
+        logger.info(f"Updated channel configuration - Source: {source}, Destination: {destination}")
+        logger.info("Configuration saved to channel_config.json")
+
+        return jsonify({'message': 'Channel configuration updated successfully'})
     except Exception as e:
         logger.error(f"Error updating channels: {str(e)}")
         return jsonify({'error': str(e)}), 500
-
-def get_user_channel_config(user_id):
-    conn = get_db()
-    with conn.cursor(cursor_factory=DictCursor) as cur:
-        cur.execute("""
-            SELECT source_channel, destination_channel 
-            FROM channel_configs 
-            WHERE user_id = %s
-        """, (user_id,))
-        return cur.fetchone()
-
-def save_user_channel_config(user_id, source_channel, destination_channel):
-    conn = get_db()
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO channel_configs (user_id, source_channel, destination_channel)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (user_id) 
-            DO UPDATE SET 
-                source_channel = EXCLUDED.source_channel,
-                destination_channel = EXCLUDED.destination_channel
-        """, (user_id, source_channel, destination_channel))
-        conn.commit()
 
 @app.route('/clear-replacements', methods=['POST'])
 @login_required
 def clear_replacements():
     try:
-        user_phone = session.get('phone')
+        user_phone = session.get('user_phone')
         user_id = get_user_id(user_phone)
 
-        conn = get_db()
-        with conn.cursor() as cur:
+        db = get_db()
+        with db.cursor() as cur:
             cur.execute("DELETE FROM text_replacements WHERE user_id = %s", (user_id,))
-            conn.commit()
-
-        import main
-        main.TEXT_REPLACEMENTS = {}  
-        main.load_user_replacements(user_id)  
+            db.commit()
 
         logger.info("Cleared all text replacements for user")
         return jsonify({'message': 'All replacements cleared'})
@@ -422,6 +436,7 @@ def toggle_bot():
             logger.error("Channel configuration missing")
             return jsonify({'error': 'Please configure source and destination channels first'}), 400
 
+        # Configure bot channels
         try:
             import main
             main.SOURCE_CHANNEL = source
@@ -442,37 +457,7 @@ def toggle_bot():
         logger.error(f"Error toggling bot: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-async def get_channels():
-    if not session.get('user_id'):
-        return []
-
-    client = TelegramClient(None, API_ID, API_HASH)
-    try:
-        await client.connect()
-        channels = []
-        async for dialog in client.iter_dialogs():
-            if dialog.is_channel:
-                channels.append({
-                    'id': dialog.id,
-                    'name': dialog.name
-                })
-        await client.disconnect()
-
-        user_id = session.get('user_id')
-        config = get_user_channel_config(user_id)
-        if config:
-            for channel in channels:
-                if str(channel['id']) == config['source_channel']:
-                    channel['is_source'] = True
-                if str(channel['id']) == config['destination_channel']:
-                    channel['is_destination'] = True
-
-        return channels
-    except Exception as e:
-        logger.error(f"Error fetching channels: {str(e)}")
-        if client and client.connected:
-            await client.disconnect()
-        raise e
-
 if __name__ == '__main__':
+    os.makedirs('sessions', exist_ok=True)
+    # ALWAYS serve the app on port 5000
     app.run(host='0.0.0.0', port=5000, debug=True)

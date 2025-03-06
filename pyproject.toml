@@ -8,10 +8,9 @@ dependencies = [
     "flask-login>=0.6.3",
     "flask-session>=0.8.0",
     "hypercorn>=0.17.3",
-    "telethon==1.32.1",
+    "telethon>=1.39.0",
     "asgiref>=3.8.1",
     "psycopg2-binary>=2.9.10",
     "flask-sqlalchemy>=3.1.1",
     "sqlalchemy>=2.0.38",
-    "flask-wtf>=1.2.2",
 ]
