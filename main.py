@@ -135,7 +135,9 @@ async def setup_client():
             logger.error("❌ No session string provided")
             return False
 
-        # Create new client instance with session
+        logger.info("🔄 Setting up Telegram client...")
+
+        # Create client with session
         client = TelegramClient(
             StringSession(SESSION_STRING),
             API_ID,
@@ -145,27 +147,33 @@ async def setup_client():
             app_version="1.0"
         )
 
-        # Connect and verify authorization
+        # Connect and verify
         await client.connect()
         if not await client.is_user_authorized():
-            logger.error("❌ Bot not authorized")
-            await client.disconnect()
-            client = None
+            logger.error("❌ Session expired or invalid")
+            await cleanup_client()
             return False
 
         me = await client.get_me()
-        logger.info(f"✅ Bot running as: {me.first_name} (ID: {me.id})")
+        logger.info(f"✅ Connected as: {me.first_name} (ID: {me.id})")
         return True
 
     except Exception as e:
         logger.error(f"❌ Client setup error: {str(e)}")
-        if client:
-            try:
-                await client.disconnect()
-            except:
-                pass
-            client = None
+        await cleanup_client()
         return False
+
+async def cleanup_client():
+    """Clean up client resources"""
+    global client
+    if client:
+        try:
+            if client.is_connected():
+                await client.disconnect()
+        except Exception as e:
+            logger.error(f"❌ Disconnect error: {str(e)}")
+        finally:
+            client = None
 
 async def setup_handlers():
     """Set up message handlers"""
@@ -261,86 +269,74 @@ async def setup_handlers():
 async def main():
     """Main bot function"""
     global client, SOURCE_CHANNEL, DESTINATION_CHANNEL
-
     try:
-        # Setup client
-        if not await setup_client():
-            return False
+        while True:
+            # Check session validity
+            if not SESSION_STRING:
+                logger.error("❌ No session string available")
+                await cleanup_client()
+                return False
 
-        # Load configuration
-        if not load_channel_config():
-            logger.error("❌ Failed to load channels")
-            return False
+            # Setup client if needed
+            if not client or not client.is_connected():
+                if not await setup_client():
+                    logger.error("❌ Client setup failed")
+                    return False
 
-        # Load replacements
-        if not load_replacements():
-            logger.warning("⚠️ No replacements loaded")
+            # Load config and replacements
+            if not load_channel_config():
+                logger.error("❌ Failed to load channel config")
+                await asyncio.sleep(30)
+                continue
 
-        # Setup handlers
-        if not await setup_handlers():
-            logger.error("❌ Failed to setup handlers")
-            return False
+            if not load_replacements():
+                logger.warning("⚠️ No replacements loaded")
 
-        logger.info("\n🤖 Bot is ready")
-        logger.info(f"📱 Source: {SOURCE_CHANNEL}")
-        logger.info(f"📱 Destination: {DESTINATION_CHANNEL}")
-        logger.info(f"📚 Replacements: {len(TEXT_REPLACEMENTS)}")
+            # Setup handlers
+            if not await setup_handlers():
+                logger.error("❌ Failed to setup handlers")
+                return False
 
-        # Keep the bot running
-        try:
-            while SESSION_STRING:  # Only run while we have a valid session
-                # Check client connection
-                if not client or not client.is_connected():
-                    logger.error("❌ Client disconnected, attempting to reconnect")
-                    if not await setup_client():
+            logger.info("\n🤖 Bot is running")
+            logger.info(f"📱 Source: {SOURCE_CHANNEL}")
+            logger.info(f"📱 Destination: {DESTINATION_CHANNEL}")
+
+            # Keep running while session is valid
+            try:
+                while SESSION_STRING:
+                    await asyncio.sleep(30)
+
+                    # Verify client connection
+                    if not client or not client.is_connected():
                         break
 
-                # Reload configuration and replacements
-                if load_channel_config():
-                    logger.info("✅ Channel config refreshed")
-                if load_replacements():
-                    logger.info("✅ Replacements refreshed")
+                    # Refresh config periodically
+                    load_channel_config()
+                    load_replacements()
 
-                # Wait before next check
-                await asyncio.sleep(30)  # Check every 30 seconds
-
-        except KeyboardInterrupt:
-            logger.info("👋 Bot stopped by user")
-            return True
-        except asyncio.CancelledError:
-            logger.info("👋 Bot stopping...")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Runtime error: {str(e)}")
-            return False
+            except asyncio.CancelledError:
+                logger.info("👋 Bot stopping (cancelled)")
+                break
+            except Exception as e:
+                logger.error(f"❌ Runtime error: {str(e)}")
+                await asyncio.sleep(30)
 
     except Exception as e:
-        logger.error(f"❌ Bot error: {str(e)}")
+        logger.error(f"❌ Fatal error: {str(e)}")
         return False
-
     finally:
-        if client:
-            try:
-                if client.is_connected():
-                    await client.disconnect()
-            except:
-                pass
-            client = None
+        await cleanup_client()
         return True
 
 if __name__ == "__main__":
     try:
-        # Run bot
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(main())
-        except KeyboardInterrupt:
-            logger.info("👋 Bot stopped by user")
-        finally:
-            if client and client.is_connected():
-                loop.run_until_complete(client.disconnect())
-            loop.close()
-
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Bot stopped by user")
     except Exception as e:
         logger.error(f"❌ Fatal error: {str(e)}")
+    finally:
+        if loop:
+            loop.close()
