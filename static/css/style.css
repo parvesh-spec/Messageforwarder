@@ -16,9 +16,9 @@ body {
     background: white;
     padding: 2rem;
     border-radius: 8px;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
     width: 100%;
-    max-width: 800px; /* Updated max-width */
+    max-width: 400px;
 }
 
 /* Input Styles */
@@ -32,6 +32,7 @@ input, select {
     border: 1px solid #ddd;
     border-radius: 4px;
     margin-bottom: 1rem;
+    font-size: 16px;
 }
 
 /* Button Styles */
@@ -43,10 +44,75 @@ button {
     border-radius: 4px;
     cursor: pointer;
     width: 100%;
+    font-size: 16px;
+    margin-bottom: 0.5rem;
+    transition: background-color 0.2s;
 }
 
 button:hover {
     background-color: #006699;
+}
+
+button.secondary {
+    background-color: #666;
+    margin-top: 0.5rem;
+}
+
+button.secondary:hover {
+    background-color: #444;
+}
+
+/* Message Styles */
+#message {
+    text-align: center;
+    margin: 1rem 0;
+    padding: 0.5rem;
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+#message.error {
+    color: #dc3545;
+    background-color: #fdf0f0;
+}
+
+#message.success {
+    color: #28a745;
+    background-color: #f0fdf0;
+}
+
+/* Timer Styles */
+.timer {
+    text-align: center;
+    margin: 1rem 0;
+    font-size: 14px;
+    color: #666;
+    padding: 0.5rem;
+    background-color: #f8f9fa;
+    border-radius: 4px;
+}
+
+/* Responsive Design */
+@media (max-width: 480px) {
+    .login-container,
+    .dashboard-container {
+        margin: 1rem;
+        padding: 1rem;
+    }
+}
+
+/* Form Transitions */
+#login-form,
+#otp-form,
+#twofa-form {
+    transition: all 0.3s ease;
+}
+
+/* Header Styles */
+h2 {
+    text-align: center;
+    color: #333;
+    margin-bottom: 1.5rem;
 }
 
 /* Toggle Switch */
@@ -130,15 +196,6 @@ input:checked + .slider:before {
     color: #666;
 }
 
-/* Responsive Design */
-@media (max-width: 480px) {
-    .login-container,
-    .dashboard-container {
-        margin: 1rem;
-        padding: 1rem;
-    }
-}
-
 /* Text Replacement Section */
 .text-replacement-section {
     margin: 2rem 0;
@@ -199,14 +256,4 @@ input:checked + .slider:before {
 
 .remove-btn:hover {
     background: #cc0000;
-}
-
-button.secondary {
-    background-color: #666;
-    margin-top: 1rem;
-    width: auto;
-}
-
-button.secondary:hover {
-    background-color: #444;
 }

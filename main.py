@@ -146,7 +146,6 @@ async def setup_client():
 
         if not client.is_connected():
             await client.connect()
-            logger.info("✅ Connected to Telegram")
 
         if not await client.is_user_authorized():
             logger.error("❌ Bot not authorized")
@@ -159,11 +158,6 @@ async def setup_client():
     except Exception as e:
         logger.error(f"❌ Client setup error: {str(e)}")
         return False
-
-    finally:
-        if client and not client.is_connected():
-            await client.disconnect()
-            client = None
 
 async def setup_handlers():
     """Set up message handlers"""
@@ -290,9 +284,11 @@ async def main():
 
     except Exception as e:
         logger.error(f"❌ Bot error: {str(e)}")
+        return False
+
+    finally:
         if client and client.is_connected():
             await client.disconnect()
-        return False
 
 if __name__ == "__main__":
     try:

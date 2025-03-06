@@ -19,6 +19,7 @@
             </div>
             <button onclick="verifyOTP()">Verify OTP</button>
             <button onclick="resendOTP()" class="secondary">Resend OTP</button>
+            <div id="otp-timer" class="timer"></div>
         </div>
         <div id="twofa-form" style="display: none;">
             <div class="input-group">
@@ -31,6 +32,7 @@
 
     <script>
         let currentPhone = '';
+        let otpTimer = null;
 
         function showMessage(message, isError = false) {
             const messageDiv = document.getElementById('message');
@@ -44,6 +46,27 @@
             document.getElementById('otp-form').style.display = 'none';
             document.getElementById('twofa-form').style.display = 'none';
             document.getElementById('message').innerHTML = '';
+            clearInterval(otpTimer);
+            document.getElementById('otp-timer').innerHTML = '';
+        }
+
+        function startOTPTimer() {
+            let timeLeft = 120; // 2 minutes
+            clearInterval(otpTimer);
+
+            const timerDiv = document.getElementById('otp-timer');
+            otpTimer = setInterval(() => {
+                if (timeLeft <= 0) {
+                    clearInterval(otpTimer);
+                    timerDiv.innerHTML = 'OTP expired. Please request a new one.';
+                    timerDiv.style.color = 'red';
+                    return;
+                }
+                const minutes = Math.floor(timeLeft / 60);
+                const seconds = timeLeft % 60;
+                timerDiv.innerHTML = `OTP expires in: ${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+                timeLeft--;
+            }, 1000);
         }
 
         function handleApiError(error, defaultMessage = 'An error occurred. Please try again.') {
@@ -53,6 +76,10 @@
             try {
                 if (error.response) {
                     return error.response.json().then(data => {
+                        if (data.error === 'Session expired. Please request a new OTP.' || 
+                            data.error === 'OTP has expired. Please request a new one.') {
+                            resetForms();
+                        }
                         showMessage(data.error || defaultMessage, true);
                     });
                 } else if (error.message) {
@@ -98,6 +125,7 @@
                     document.getElementById('login-form').style.display = 'none';
                     document.getElementById('otp-form').style.display = 'block';
                     showMessage('OTP sent to your Telegram account');
+                    startOTPTimer();
                 }
             })
             .catch(error => handleApiError(error));
@@ -135,6 +163,9 @@
                     document.getElementById('twofa-form').style.display = 'block';
                     showMessage('Please enter your 2FA password');
                 } else if (data.error) {
+                    if (data.error.includes('expired')) {
+                        resetForms();
+                    }
                     showMessage(data.error, true);
                 } else {
                     window.location.href = '/dashboard';

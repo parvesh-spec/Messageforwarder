@@ -3,7 +3,7 @@ import logging
 import threading
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify, send_from_directory
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
+from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError
 from telethon.sessions import StringSession
 import asyncio
 from functools import wraps
@@ -117,12 +117,18 @@ class TelegramManager:
         self.api_id = api_id
         self.api_hash = api_hash
         self._lock = threading.Lock()
+        self._client = None
 
     async def get_auth_client(self):
         """Get a client for authentication or dashboard operations"""
         with self._lock:
             try:
+                # Create new client for each auth request
                 session_string = session.get('session_string')
+
+                if self._client and self._client.is_connected():
+                    return self._client
+
                 client = TelegramClient(
                     StringSession(session_string) if session_string else StringSession(),
                     self.api_id,
@@ -136,15 +142,41 @@ class TelegramManager:
                 if not client.is_connected():
                     await client.connect()
 
-                EventLoopManager.set_client(client)
+                # If session string exists but client is not authorized, start fresh
+                if session_string and not await client.is_user_authorized():
+                    session.pop('session_string', None)
+                    await client.disconnect()
+
+                    client = TelegramClient(
+                        StringSession(),
+                        self.api_id,
+                        self.api_hash,
+                        device_model="Replit Web",
+                        system_version="Linux",
+                        app_version="1.0",
+                        loop=EventLoopManager.get_loop()
+                    )
+                    await client.connect()
+
+                self._client = client
                 return client
+
             except Exception as e:
                 logger.error(f"❌ Client creation error: {str(e)}")
                 raise
 
     def cleanup(self):
         """Clean up resources"""
-        EventLoopManager.reset()
+        with self._lock:
+            if self._client:
+                try:
+                    if self._client.is_connected():
+                        loop = EventLoopManager.get_loop()
+                        loop.run_until_complete(self._client.disconnect())
+                except:
+                    pass
+                self._client = None
+            EventLoopManager.reset()
 
 # Create global Telegram manager
 telegram_manager = TelegramManager(
@@ -155,6 +187,7 @@ telegram_manager = TelegramManager(
 @app.route('/')
 def login():
     if session.get('logged_in'):
+        logger.info("✅ User already logged in, redirecting to dashboard")
         return redirect(url_for('dashboard'))
     return render_template('login.html')
 
@@ -173,10 +206,9 @@ async def send_otp():
             client = await telegram_manager.get_auth_client()
 
             # Clear any existing session data
-            session.pop('phone_code_hash', None)
-            session.pop('session_string', None)
+            session.clear()
 
-            # Check existing session
+            # Check if already authorized
             if await client.is_user_authorized():
                 session['user_phone'] = phone
                 session['logged_in'] = True
@@ -209,20 +241,25 @@ async def verify_otp():
         password = request.form.get('password')
 
         if not phone or not phone_code_hash:
-            return jsonify({'error': 'Session expired. Please try again.'}), 400
+            return jsonify({'error': 'Session expired. Please request a new OTP.'}), 400
 
         if not otp:
             return jsonify({'error': 'OTP is required'}), 400
 
         try:
             client = await telegram_manager.get_auth_client()
-            try:
-                # Clear any existing session
-                if await client.is_user_authorized():
-                    await client.log_out()
 
+            try:
                 # Try signing in
                 await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
+
+            except PhoneCodeExpiredError:
+                session.pop('phone_code_hash', None)
+                return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
+
+            except PhoneCodeInvalidError:
+                return jsonify({'error': 'Invalid OTP. Please try again.'}), 400
+
             except SessionPasswordNeededError:
                 if not password:
                     return jsonify({
@@ -232,31 +269,21 @@ async def verify_otp():
                 try:
                     await client.sign_in(password=password)
                 except Exception as e:
-                    session.pop('phone_code_hash', None)  # Clear failed OTP
-                    return jsonify({'error': 'Invalid 2FA password'}), 400
-            except Exception as e:
-                if "phone code expired" in str(e).lower() or "code expired" in str(e).lower():
-                    # Clear expired OTP from session
+                    logger.error(f"❌ 2FA error: {str(e)}")
                     session.pop('phone_code_hash', None)
-                    return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
-                elif "invalid" in str(e).lower():
-                    return jsonify({'error': 'Invalid OTP. Please try again.'}), 400
-                else:
-                    logger.error(f"❌ Sign in error: {str(e)}")
-                    return jsonify({'error': str(e)}), 400
+                    return jsonify({'error': 'Invalid 2FA password'}), 400
 
             if await client.is_user_authorized():
-                # Save session string and mark as logged in
                 session['logged_in'] = True
                 session['session_string'] = client.session.save()
+                logger.info("✅ Login successful")
                 return jsonify({'message': 'Login successful'})
             else:
-                session.pop('phone_code_hash', None)  # Clear invalid OTP
+                session.pop('phone_code_hash', None)
                 return jsonify({'error': 'Authentication failed. Please try again.'}), 400
 
         except Exception as e:
-            logger.error(f"❌ Verify OTP error: {str(e)}")
-            # Clear failed session
+            logger.error(f"❌ Sign in error: {str(e)}")
             session.pop('phone_code_hash', None)
             return jsonify({'error': str(e)}), 500
 
@@ -271,11 +298,13 @@ async def dashboard():
     try:
         # Verify session string exists
         if not session.get('session_string'):
+            logger.error("❌ No session string found")
             return redirect(url_for('login'))
 
         # Get client using event loop manager
         client = await telegram_manager.get_auth_client()
         if not await client.is_user_authorized():
+            logger.error("❌ Client not authorized")
             return redirect(url_for('login'))
 
         channels = []
@@ -298,9 +327,9 @@ async def dashboard():
                 last_config = cur.fetchone()
 
         return render_template('dashboard.html', 
-                          channels=channels,
-                          last_source=last_config['source_channel'] if last_config else None,
-                          last_dest=last_config['destination_channel'] if last_config else None)
+                            channels=channels,
+                            last_source=last_config['source_channel'] if last_config else None,
+                            last_dest=last_config['destination_channel'] if last_config else None)
 
     except Exception as e:
         logger.error(f"❌ Dashboard error: {str(e)}")
@@ -309,11 +338,12 @@ async def dashboard():
 @app.route('/logout')
 def logout():
     try:
-        # Clean up sessions
+        # Clean up Telegram resources
         telegram_manager.cleanup()
 
         # Clear flask session
         session.clear()
+        logger.info("✅ Logged out successfully")
         return redirect(url_for('login'))
     except Exception as e:
         logger.error(f"❌ Logout error: {str(e)}")
@@ -386,10 +416,16 @@ def toggle_bot():
                         except Exception as e:
                             logger.error(f"❌ Bot startup error: {str(e)}")
                         finally:
+                            if loop.is_running():
+                                loop.stop()
                             loop.close()
                     except Exception as e:
                         logger.error(f"❌ Thread error: {str(e)}")
 
+                # Ensure any previous bot thread is stopped
+                session['bot_running'] = False
+
+                # Start new bot thread
                 bot_thread = threading.Thread(target=start_bot, daemon=True)
                 bot_thread.start()
                 session['bot_running'] = True
@@ -405,7 +441,7 @@ def toggle_bot():
                 return jsonify({'error': str(e)}), 500
         else:
             try:
-                # Stop bot
+                # Stop bot by clearing its session
                 main.SESSION_STRING = None
                 main.SOURCE_CHANNEL = None
                 main.DESTINATION_CHANNEL = None
@@ -430,49 +466,4 @@ def serve_static(filename):
     return send_from_directory('static', filename)
 
 if __name__ == '__main__':
-    # Ensure directories exist
-    os.makedirs('static/css', exist_ok=True)
-
-    # Create default CSS if not exists
-    if not os.path.exists('static/css/style.css'):
-        with open('static/css/style.css', 'w') as f:
-            f.write("""
-                body {
-                    font-family: Arial, sans-serif;
-                    margin: 0;
-                    padding: 20px;
-                    background-color: #f0f2f5;
-                }
-                .login-container {
-                    max-width: 400px;
-                    margin: 50px auto;
-                    padding: 20px;
-                    background: white;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-                }
-                .input-group {
-                    margin-bottom: 15px;
-                }
-                input {
-                    width: 100%;
-                    padding: 8px;
-                    margin-bottom: 10px;
-                    border: 1px solid #ddd;
-                    border-radius: 4px;
-                }
-                button {
-                    width: 100%;
-                    padding: 10px;
-                    background-color: #0066cc;
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    cursor: pointer;
-                }
-                button:hover {
-                    background-color: #0052a3;
-                }
-            """)
-
     app.run(host='0.0.0.0', port=5000)
