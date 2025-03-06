@@ -7,6 +7,7 @@ from psycopg2 import pool
 import asyncio
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+import sys
 
 # Set up logging
 logging.basicConfig(
@@ -336,6 +337,11 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        # Get required session string
+        if not SESSION_STRING:
+            logger.error("❌ No session string provided - waiting for web dashboard to provide it")
+            sys.exit(1)
+
         # Run bot
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -350,3 +356,4 @@ if __name__ == "__main__":
 
     except Exception as e:
         logger.error(f"❌ Fatal error: {str(e)}")
+        sys.exit(1)
