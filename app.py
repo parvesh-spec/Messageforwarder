@@ -492,6 +492,45 @@ def check_session():
         logger.error(f"Error in check_session: {str(e)}")
         return jsonify({'authenticated': False}), 500
 
+@app.route('/bot/toggle', methods=['POST'])
+@login_required
+def toggle_bot():
+    try:
+        status = request.form.get('status') == 'true'
+        source = session.get('source_channel')
+        destination = session.get('dest_channel')
+
+        if not source or not destination:
+            logger.error("Channel configuration missing")
+            return jsonify({'error': 'Please configure source and destination channels first'}), 400
+
+        try:
+            import main
+            main.SOURCE_CHANNEL = source
+            main.DESTINATION_CHANNEL = destination
+            logger.info(f"Bot channels configured - Source: {source}, Destination: {destination}")
+
+            # Reload text replacements for current user
+            user_phone = session.get('user_phone')
+            if user_phone:
+                user_id = get_user_id(user_phone)
+                main.CURRENT_USER_ID = user_id
+                main.load_user_replacements(user_id)
+                logger.info(f"Reloaded text replacements for user {user_id}")
+
+            return jsonify({
+                'status': status,
+                'message': f"Bot is now {'running' if status else 'stopped'}"
+            })
+
+        except Exception as e:
+            logger.error(f"Error configuring bot: {str(e)}")
+            return jsonify({'error': 'Failed to configure bot'}), 500
+
+    except Exception as e:
+        logger.error(f"Error toggling bot: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     os.makedirs('sessions', exist_ok=True)
     # ALWAYS serve the app on port 5000
