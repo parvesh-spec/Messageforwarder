@@ -225,9 +225,13 @@ telegram_manager = TelegramManager(
 
 @app.route('/health')
 def health():
-    return 'OK', 200
+    return jsonify({'status': 'healthy'}), 200
 
 @app.route('/')
+def health_check():
+    return 'OK', 200
+
+@app.route('/login')
 def login():
     if session.get('logged_in'):
         logger.info("✅ User already logged in, redirecting to dashboard")
