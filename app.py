@@ -15,7 +15,7 @@ from flask_sqlalchemy import SQLAlchemy
 from threading import Thread, Lock
 from contextlib import contextmanager
 
-# Set up logging with more detailed format
+# Set up logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -39,64 +39,6 @@ app.config.update(
     }
 )
 
-# Ensure static folder exists
-os.makedirs('static/css', exist_ok=True)
-
-# Create a basic CSS file if it doesn't exist
-if not os.path.exists('static/css/style.css'):
-    with open('static/css/style.css', 'w') as f:
-        f.write("""
-            body {
-                font-family: Arial, sans-serif;
-                margin: 0;
-                padding: 20px;
-                background-color: #f0f2f5;
-            }
-            .login-container {
-                max-width: 400px;
-                margin: 50px auto;
-                padding: 20px;
-                background: white;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-            }
-            .input-group {
-                margin-bottom: 15px;
-            }
-            input {
-                width: 100%;
-                padding: 8px;
-                margin-bottom: 10px;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-            }
-            button {
-                width: 100%;
-                padding: 10px;
-                background-color: #0066cc;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-            }
-            button:hover {
-                background-color: #0052a3;
-            }
-            .message {
-                margin-top: 10px;
-                padding: 10px;
-                border-radius: 4px;
-            }
-            .error {
-                background-color: #ffebee;
-                color: #c62828;
-            }
-            .success {
-                background-color: #e8f5e9;
-                color: #2e7d32;
-            }
-        """)
-
 # Initialize database
 db = SQLAlchemy(app)
 
@@ -114,53 +56,7 @@ class FlaskSession(db.Model):
 app.config['SESSION_SQLALCHEMY'] = db
 Session(app)
 
-# Database connection
-@contextmanager
-def get_db():
-    if hasattr(g, 'db'):
-        yield g.db
-    else:
-        conn = psycopg2.connect(
-            os.getenv('DATABASE_URL'),
-            application_name='telegram_bot_web'
-        )
-        conn.autocommit = True
-        g.db = conn
-        try:
-            yield g.db
-        finally:
-            conn.close()
-            g.pop('db', None)
-
-@app.teardown_appcontext
-def close_db(e=None):
-    db = g.pop('db', None)
-    if db is not None:
-        db.close()
-
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_phone' not in session:
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-def async_route(f):
-    @wraps(f)
-    def wrapped(*args, **kwargs):
-        return async_to_sync(f)(*args, **kwargs)
-    return wrapped
-
-@app.route('/')
-def login():
-    logger.info("Accessing login page")
-    if 'logged_in' in session and session['logged_in']:
-        logger.info("User already logged in, redirecting to dashboard")
-        return redirect(url_for('dashboard'))
-    return render_template('login.html')
-
-# Add this after imports
+# Event Loop Manager
 class EventLoopManager:
     _instance = None
     _lock = threading.Lock()
@@ -187,6 +83,104 @@ class EventLoopManager:
                 except:
                     pass
                 cls._loop = None
+
+# Database connection
+@contextmanager
+def get_db():
+    if hasattr(g, '_db'):
+        yield g._db
+    else:
+        conn = psycopg2.connect(
+            os.getenv('DATABASE_URL'),
+            application_name='telegram_bot_web'
+        )
+        conn.autocommit = True
+        g._db = conn
+        try:
+            yield g._db
+        finally:
+            conn.close()
+            g.pop('_db', None)
+
+@app.teardown_appcontext
+def close_db(e=None):
+    db = g.pop('_db', None)
+    if db is not None:
+        db.close()
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def async_route(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        return async_to_sync(f)(*args, **kwargs)
+    return wrapped
+
+# Telegram client manager
+class TelegramManager:
+    def __init__(self, session_name, api_id, api_hash):
+        self.session_name = session_name
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.client = None
+        self._lock = Lock()
+
+    async def get_client(self):
+        with self._lock:
+            if not self.client:
+                loop = EventLoopManager.get_loop()
+                self.client = TelegramClient(
+                    self.session_name,
+                    self.api_id,
+                    self.api_hash,
+                    device_model="Replit Web",
+                    system_version="Linux",
+                    app_version="1.0",
+                    loop=loop
+                )
+
+            if not self.client.is_connected():
+                await self.client.connect()
+
+            return self.client
+
+    async def disconnect(self):
+        with self._lock:
+            if self.client and self.client.is_connected():
+                await self.client.disconnect()
+                self.client = None
+
+    def cleanup(self):
+        with self._lock:
+            if self.client:
+                try:
+                    loop = EventLoopManager.get_loop()
+                    loop.run_until_complete(self.disconnect())
+                except:
+                    pass
+            self.client = None
+            EventLoopManager.reset()
+
+# Create global Telegram manager
+telegram_manager = TelegramManager(
+    'anon',
+    int(os.getenv('API_ID', '27202142')),
+    os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
+)
+
+@app.route('/')
+def login():
+    logger.info("Accessing login page")
+    if session.get('logged_in'):
+        logger.info("User already logged in, redirecting to dashboard")
+        return redirect(url_for('dashboard'))
+    return render_template('login.html')
 
 @app.route('/send-otp', methods=['POST'])
 @async_route
@@ -248,7 +242,7 @@ async def verify_otp():
             logger.error("❌ OTP missing")
             return jsonify({'error': 'OTP is required'}), 400
 
-        with db_lock:
+        try:
             client = await telegram_manager.get_client()
             try:
                 await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
@@ -273,86 +267,25 @@ async def verify_otp():
             else:
                 return jsonify({'error': 'Invalid OTP'}), 400
 
+        except Exception as e:
+            logger.error(f"❌ Verify OTP error: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+
     except Exception as e:
-        logger.error(f"❌ Verify OTP error: {str(e)}")
+        logger.error(f"❌ Critical error in verify_otp: {str(e)}")
         return jsonify({'error': str(e)}), 500
-
-#Telegram client manager
-class TelegramManager:
-    def __init__(self, session_name, api_id, api_hash):
-        self.session_name = session_name
-        self.api_id = api_id
-        self.api_hash = api_hash
-        self.client = None
-        self._lock = Lock()
-
-    async def get_client(self):
-        with self._lock:
-            if not self.client:
-                loop = EventLoopManager.get_loop()
-                self.client = TelegramClient(
-                    self.session_name,
-                    self.api_id,
-                    self.api_hash,
-                    device_model="Replit Web",
-                    system_version="Linux",
-                    app_version="1.0",
-                    loop=loop
-                )
-
-            if not self.client.is_connected():
-                await self.client.connect()
-
-            return self.client
-
-    async def disconnect(self):
-        with self._lock:
-            if self.client and self.client.is_connected():
-                await self.client.disconnect()
-                self.client = None
-
-    def cleanup(self):
-        with self._lock:
-            if self.client:
-                try:
-                    loop = EventLoopManager.get_loop()
-                    loop.run_until_complete(self.disconnect())
-                except:
-                    pass
-            self.client = None
-            EventLoopManager.reset()
-
-# Create global Telegram manager
-telegram_manager = TelegramManager(
-    'anon',
-    int(os.getenv('API_ID', '27202142')),
-    os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
-)
-
-def get_user_id(phone):
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
-                result = cur.fetchone()
-                if result:
-                    return result[0]
-                cur.execute("INSERT INTO users (phone) VALUES (%s) RETURNING id", (phone,))
-                conn.commit()
-                return cur.fetchone()[0]
-    except Exception as e:
-        logger.error(f"Error getting user ID: {str(e)}")
-        return None
 
 @app.route('/dashboard')
 @login_required
 @async_route
 async def dashboard():
     try:
+        # Get and prepare Telegram client
         client = await telegram_manager.get_client()
         channels = []
 
         try:
+            # Get channels using existing event loop
             async for dialog in client.iter_dialogs():
                 if dialog.is_channel:
                     channels.append({
@@ -372,16 +305,13 @@ async def dashboard():
                     last_config = cur.fetchone()
 
             return render_template('dashboard.html', 
-                                    channels=channels,
-                                    last_source=last_config['source_channel'] if last_config else None,
-                                    last_dest=last_config['destination_channel'] if last_config else None)
+                                channels=channels,
+                                last_source=last_config['source_channel'] if last_config else None,
+                                last_dest=last_config['destination_channel'] if last_config else None)
 
         except Exception as e:
             logger.error(f"Error loading dashboard data: {str(e)}")
             raise
-
-        finally:
-            await telegram_manager.disconnect()
 
     except Exception as e:
         logger.error(f"Critical error in dashboard: {str(e)}")
@@ -493,6 +423,7 @@ def remove_replacement():
 @app.route('/logout')
 def logout():
     try:
+        # Cleanup existing session
         phone = session.get('user_phone')
         if phone:
             session_file = "anon.session"
@@ -503,7 +434,7 @@ def logout():
                 except Exception as e:
                     logger.error(f"❌ Cleanup error: {str(e)}")
 
-        # Cleanup telegram manager and reset event loop
+        # Cleanup Telegram manager and reset event loop
         telegram_manager.cleanup()
         EventLoopManager.reset()
 
@@ -513,7 +444,6 @@ def logout():
     except Exception as e:
         logger.error(f"❌ Error in logout route: {str(e)}")
         return redirect(url_for('login'))
-
 
 @app.route('/update-channels', methods=['POST'])
 def update_channels():
@@ -711,10 +641,67 @@ def toggle_bot():
 
 @app.route('/static/<path:filename>')
 def serve_static(filename):
-    logger.info(f"Serving static file: {filename}")
     return send_from_directory('static', filename)
 
+def get_user_id(phone):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
+                result = cur.fetchone()
+                if result:
+                    return result[0]
+                cur.execute("INSERT INTO users (phone) VALUES (%s) RETURNING id", (phone,))
+                conn.commit()
+                return cur.fetchone()[0]
+    except Exception as e:
+        logger.error(f"Error getting user ID: {str(e)}")
+        return None
+
 if __name__ == '__main__':
-    os.makedirs('sessions', exist_ok=True)
+    # Ensure required directories exist
     os.makedirs('static/css', exist_ok=True)
+
+    # Create default CSS if not exists
+    if not os.path.exists('static/css/style.css'):
+        with open('static/css/style.css', 'w') as f:
+            f.write("""
+                body {
+                    font-family: Arial, sans-serif;
+                    margin: 0;
+                    padding: 20px;
+                    background-color: #f0f2f5;
+                }
+                .login-container {
+                    max-width: 400px;
+                    margin: 50px auto;
+                    padding: 20px;
+                    background: white;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+                }
+                .input-group {
+                    margin-bottom: 15px;
+                }
+                input {
+                    width: 100%;
+                    padding: 8px;
+                    margin-bottom: 10px;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                }
+                button {
+                    width: 100%;
+                    padding: 10px;
+                    background-color: #0066cc;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    cursor: pointer;
+                }
+                button:hover {
+                    background-color: #0052a3;
+                }
+            """)
+
     app.run(host='0.0.0.0', port=5000, debug=True)
