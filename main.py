@@ -7,7 +7,6 @@ from psycopg2 import pool
 import asyncio
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-import sys
 
 # Set up logging
 logging.basicConfig(
@@ -29,12 +28,6 @@ API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
 # Telegram session string (to be set by app.py)
 SESSION_STRING = None
-
-# Check for required environment variables
-if not os.getenv('SESSION_SECRET'):
-    logger.warning("⚠️ No SESSION_SECRET provided - using a temporary one")
-    os.environ['SESSION_SECRET'] = os.urandom(24).hex()
-    # This will work but is not persistent between restarts
 
 # Database connection pool
 db_pool = psycopg2.pool.ThreadedConnectionPool(
@@ -337,11 +330,6 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        # Get required session string
-        if not SESSION_STRING:
-            logger.error("❌ No session string provided - waiting for web dashboard to provide it")
-            sys.exit(1)
-
         # Run bot
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -356,4 +344,3 @@ if __name__ == "__main__":
 
     except Exception as e:
         logger.error(f"❌ Fatal error: {str(e)}")
-        sys.exit(1)

@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # Configure Flask application
 app.config.update(
-    SECRET_KEY=os.getenv('SESSION_SECRET', os.urandom(24)),
+    SECRET_KEY=os.urandom(24),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True
@@ -224,19 +224,6 @@ telegram_manager = TelegramManager(
 )
 
 @app.route('/')
-def root():
-    """Redirect to login page"""
-    if session.get('logged_in'):
-        logger.info("✅ User already logged in, redirecting to dashboard")
-        return redirect(url_for('dashboard'))
-    return redirect(url_for('login'))
-
-@app.route('/health')
-def health():
-    """Health check endpoint"""
-    return jsonify({'status': 'healthy'}), 200
-
-@app.route('/login')
 def login():
     if session.get('logged_in'):
         logger.info("✅ User already logged in, redirecting to dashboard")
@@ -603,30 +590,4 @@ def clear_replacements():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    try:
-        # Initialize database tables
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS channel_config (
-                        id SERIAL PRIMARY KEY,
-                        source_channel TEXT NOT NULL,
-                        destination_channel TEXT NOT NULL,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-
-                    CREATE TABLE IF NOT EXISTS text_replacements (
-                        id SERIAL PRIMARY KEY,
-                        original_text TEXT NOT NULL,
-                        replacement_text TEXT NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """)
-
-        # Start production server
-        from waitress import serve
-        logger.info("🚀 Starting production server on port 5000...")
-        serve(app, host='0.0.0.0', port=5000, threads=4)
-    except Exception as e:
-        logger.error(f"❌ Server startup error: {str(e)}")
-        raise
+    app.run(host='0.0.0.0', port=5000)
