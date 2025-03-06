@@ -97,23 +97,29 @@ class TelegramManager:
                 self._loop = None
                 self._initialized = True
 
+    async def _create_client(self):
+        """Create a new Telegram client"""
+        if not self._loop:
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+
+        client = TelegramClient(
+            self.session_name,
+            self.api_id,
+            self.api_hash,
+            device_model="Replit Web",
+            system_version="Linux",
+            app_version="1.0",
+            loop=self._loop
+        )
+        return client
+
     async def get_client(self):
         """Get or create a Telegram client with proper event loop management"""
         try:
             with self._client_lock:
                 if not self.client:
-                    if not self._loop:
-                        self._loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(self._loop)
-                    self.client = TelegramClient(
-                        self.session_name,
-                        self.api_id,
-                        self.api_hash,
-                        device_model="Replit Web",
-                        system_version="Linux",
-                        app_version="1.0",
-                        loop=self._loop
-                    )
+                    self.client = await self._create_client()
 
                 if not self.client.is_connected():
                     await self.client.connect()
@@ -293,8 +299,7 @@ async def verify_otp():
                 return jsonify({'error': 'Invalid OTP'}), 400
 
         finally:
-            if client:
-                await telegram_manager.disconnect()
+            await telegram_manager.disconnect()
 
     except Exception as e:
         logger.error(f"❌ Verify OTP error: {str(e)}")
@@ -371,65 +376,6 @@ async def dashboard():
     except Exception as e:
         logger.error(f"❌ Critical error in dashboard: {str(e)}")
         return redirect(url_for('login'))
-
-@app.route('/static/<path:filename>')
-def serve_static(filename):
-    """Serve static files"""
-    return send_from_directory('static', filename)
-
-# Create required directories and CSS
-os.makedirs('static/css', exist_ok=True)
-
-# Create default CSS if it doesn't exist
-if not os.path.exists('static/css/style.css'):
-    with open('static/css/style.css', 'w') as f:
-        f.write("""
-            body {
-                font-family: Arial, sans-serif;
-                margin: 0;
-                padding: 20px;
-                background-color: #f0f2f5;
-            }
-            .login-container {
-                max-width: 400px;
-                margin: 50px auto;
-                padding: 20px;
-                background: white;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-            }
-            input {
-                width: 100%;
-                padding: 8px;
-                margin-bottom: 10px;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-            }
-            button {
-                width: 100%;
-                padding: 10px;
-                background-color: #0066cc;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-                margin-bottom: 10px;
-            }
-            button:hover {
-                background-color: #0052a3;
-            }
-            #message {
-                padding: 10px;
-                margin-top: 10px;
-                border-radius: 4px;
-            }
-            .error {
-                color: red;
-            }
-            .success {
-                color: green;
-            }
-        """)
 
 @app.route('/update-channels', methods=['POST'])
 def update_channels():
@@ -564,6 +510,65 @@ def toggle_bot():
     except Exception as e:
         logger.error(f"❌ Route error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/static/<path:filename>')
+def serve_static(filename):
+    """Serve static files"""
+    return send_from_directory('static', filename)
+
+# Create required directories and CSS
+os.makedirs('static/css', exist_ok=True)
+
+# Create default CSS if it doesn't exist
+if not os.path.exists('static/css/style.css'):
+    with open('static/css/style.css', 'w') as f:
+        f.write("""
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 20px;
+                background-color: #f0f2f5;
+            }
+            .login-container {
+                max-width: 400px;
+                margin: 50px auto;
+                padding: 20px;
+                background: white;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            }
+            input {
+                width: 100%;
+                padding: 8px;
+                margin-bottom: 10px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            }
+            button {
+                width: 100%;
+                padding: 10px;
+                background-color: #0066cc;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                margin-bottom: 10px;
+            }
+            button:hover {
+                background-color: #0052a3;
+            }
+            #message {
+                padding: 10px;
+                margin-top: 10px;
+                border-radius: 4px;
+            }
+            .error {
+                color: red;
+            }
+            .success {
+                color: green;
+            }
+        """)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
