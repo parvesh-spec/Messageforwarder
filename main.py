@@ -29,17 +29,34 @@ client = None
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
+# Database connection with connection pooling
+db_pool = None
+db_lock = Lock()
+
+def init_db_pool():
+    global db_pool
+    if not db_pool:
+        with db_lock:
+            if not db_pool:
+                db_pool = psycopg2.pool.SimpleConnectionPool(
+                    1, 20,
+                    os.getenv('DATABASE_URL'),
+                    application_name='telegram_bot_main'
+                )
+
 def get_db():
+    """Get database connection from pool"""
     try:
-        conn = psycopg2.connect(
-            os.getenv('DATABASE_URL'),
-            application_name='telegram_bot_main'
-        )
-        conn.autocommit = True
-        return conn
+        init_db_pool()
+        return db_pool.getconn()
     except Exception as e:
         logger.error(f"❌ Database connection error: {str(e)}")
         return None
+
+def release_db(conn):
+    """Release connection back to pool"""
+    if conn and db_pool:
+        db_pool.putconn(conn)
 
 def load_channel_config():
     """Load channel configuration from database"""
@@ -72,7 +89,7 @@ def load_channel_config():
         return False
     finally:
         if conn:
-            conn.close()
+            release_db(conn)
 
 def load_user_replacements(user_id):
     """Load text replacements for user"""
@@ -105,7 +122,7 @@ def load_user_replacements(user_id):
         return False
     finally:
         if conn:
-            conn.close()
+            release_db(conn)
 
 def apply_text_replacements(text):
     """Apply text replacements to message"""
@@ -120,17 +137,17 @@ def apply_text_replacements(text):
     return result
 
 async def setup_client():
-    """Initialize Telegram client"""
+    """Initialize Telegram client for bot operations"""
     global client
 
     try:
-        # Initialize client
+        # Initialize client with bot-specific session
         logger.info("🔄 Starting Telegram client...")
         client = TelegramClient(
-            'anon',
+            'bot_session',  # Different session for bot
             API_ID,
             API_HASH,
-            device_model="Replit Web",
+            device_model="Replit Bot",
             system_version="Linux",
             app_version="1.0"
         )
@@ -141,11 +158,11 @@ async def setup_client():
             logger.info("✅ Connected to Telegram")
 
         if not await client.is_user_authorized():
-            logger.error("❌ User not authorized")
+            logger.error("❌ Bot not authorized")
             return False
 
         me = await client.get_me()
-        logger.info(f"✅ Client active as: {me.first_name} (ID: {me.id})")
+        logger.info(f"✅ Bot active as: {me.first_name} (ID: {me.id})")
 
         return True
 
@@ -267,26 +284,32 @@ async def main():
             logger.error("❌ Failed to setup client")
             return False
 
-        # Load channel config
-        if not load_channel_config():
-            logger.error("❌ Failed to load channel configuration")
-            return False
+        # Load configuration
+        conn = get_db()
+        try:
+            if not load_channel_config():
+                logger.error("❌ Failed to load channel configuration")
+                return False
 
-        # Setup handlers
-        if not await setup_handlers():
-            logger.error("❌ Failed to setup handlers")
-            return False
+            # Setup handlers
+            if not await setup_handlers():
+                logger.error("❌ Failed to setup handlers")
+                return False
 
-        # Log system state
-        logger.info("\n🤖 System is ready")
-        logger.info(f"📱 Source channel: {SOURCE_CHANNEL}")
-        logger.info(f"📱 Destination channel: {DESTINATION_CHANNEL}")
-        logger.info(f"👤 Current user: {CURRENT_USER_ID}")
-        logger.info(f"📚 Active replacements: {len(TEXT_REPLACEMENTS)}")
+            # Log system state
+            logger.info("\n🤖 System is ready")
+            logger.info(f"📱 Source channel: {SOURCE_CHANNEL}")
+            logger.info(f"📱 Destination channel: {DESTINATION_CHANNEL}")
+            logger.info(f"👤 Current user: {CURRENT_USER_ID}")
+            logger.info(f"📚 Active replacements: {len(TEXT_REPLACEMENTS)}")
 
-        # Run client
-        await client.run_until_disconnected()
-        return True
+            # Run client
+            await client.run_until_disconnected()
+            return True
+
+        finally:
+            if conn:
+                release_db(conn)
 
     except Exception as e:
         logger.error(f"❌ Critical error: {str(e)}")
@@ -296,13 +319,14 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        # Clean up old session
-        if os.path.exists('anon.session-journal'):
-            try:
-                os.remove('anon.session-journal')
-                logger.info("✅ Cleaned old session journal")
-            except Exception as e:
-                logger.error(f"❌ Cleanup error: {str(e)}")
+        # Clean up old sessions
+        for session_file in ['bot_session.session', 'bot_session.session-journal']:
+            if os.path.exists(session_file):
+                try:
+                    os.remove(session_file)
+                    logger.info(f"✅ Cleaned old session: {session_file}")
+                except Exception as e:
+                    logger.error(f"❌ Cleanup error: {str(e)}")
 
         # Set up event loop
         loop = asyncio.new_event_loop()

@@ -141,29 +141,24 @@ class TelegramManager:
         self._lock = Lock()
 
     async def get_client(self):
-        client = EventLoopManager.get_client()
-        if client and client.is_connected():
-            return client
-
+        """Only for authentication purposes"""
         with self._lock:
-            loop = EventLoopManager.get_loop()
             client = TelegramClient(
-                self.session_name,
+                'auth_session',  # Different session file for auth
                 self.api_id,
                 self.api_hash,
-                device_model="Replit Web",
+                device_model="Replit Web Auth",
                 system_version="Linux",
-                app_version="1.0",
-                loop=loop
+                app_version="1.0"
             )
 
             if not client.is_connected():
                 await client.connect()
 
-            EventLoopManager.set_client(client)
             return client
 
     async def disconnect(self):
+        """Clean up authentication client"""
         with self._lock:
             client = EventLoopManager.get_client()
             if client and client.is_connected():
@@ -171,6 +166,7 @@ class TelegramManager:
                 EventLoopManager.set_client(None)
 
     def cleanup(self):
+        """Clean up authentication resources"""
         with self._lock:
             loop = EventLoopManager.get_loop()
             if loop:
@@ -619,8 +615,7 @@ def toggle_bot():
             else:
                 logger.info("🔄 Stopping bot...")
                 try:
-                    # Cleanup and stop
-                    EventLoopManager.reset()
+                    # Just update flags, main.py will handle cleanup
                     main.SOURCE_CHANNEL = None
                     main.DESTINATION_CHANNEL = None
                     session['bot_running'] = False
