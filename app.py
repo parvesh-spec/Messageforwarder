@@ -12,6 +12,8 @@ import json
 from flask_session import Session
 from datetime import timedelta
 from flask_sqlalchemy import SQLAlchemy
+from threading import Thread
+from contextlib import contextmanager
 
 # Set up logging
 logging.basicConfig(
@@ -476,6 +478,16 @@ def clear_replacements():
         logger.error(f"Error clearing replacements: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+def run_async(coro):
+    """Run an async function in a new event loop"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
 def toggle_bot():
@@ -491,7 +503,6 @@ def toggle_bot():
 
         try:
             import main
-            import asyncio
 
             # Test database connection first
             db = get_db()
@@ -505,7 +516,7 @@ def toggle_bot():
                 # Stop existing client if running
                 if hasattr(main, 'client') and main.client:
                     try:
-                        asyncio.run(main.client.disconnect())
+                        run_async(main.client.disconnect())
                         logger.info("✅ Disconnected existing client")
                     except Exception as e:
                         logger.warning(f"⚠️ Error disconnecting client: {e}")
@@ -519,21 +530,19 @@ def toggle_bot():
                 main.DESTINATION_CHANNEL = destination
                 logger.info(f"✅ Updated channels - Source: {source}, Destination: {destination}")
 
-                try:
-                    # Start new client
-                    asyncio.run(main.main())
-                    logger.info("✅ Started Telegram client")
-                except Exception as e:
-                    logger.error(f"❌ Error starting client: {e}")
-                    main.SOURCE_CHANNEL = None
-                    main.DESTINATION_CHANNEL = None
-                    return jsonify({'error': 'Failed to start bot'}), 500
+                # Start bot in a new thread with its own event loop
+                def start_bot():
+                    run_async(main.main())
+
+                bot_thread = Thread(target=start_bot, daemon=True)
+                bot_thread.start()
+                logger.info("✅ Started Telegram client in new thread")
 
             else:
                 logger.info("🔄 Stopping bot...")
                 if hasattr(main, 'client') and main.client:
                     try:
-                        asyncio.run(main.client.disconnect())
+                        run_async(main.client.disconnect())
                         logger.info("✅ Disconnected client")
                     except Exception as e:
                         logger.warning(f"⚠️ Error disconnecting client: {e}")

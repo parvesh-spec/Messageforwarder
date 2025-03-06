@@ -37,6 +37,23 @@ def get_db():
     conn.autocommit = True
     return conn
 
+def get_user_id_by_phone(phone):
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
+            result = cur.fetchone()
+            if result:
+                return result[0]
+            logger.warning(f"❌ No user found for phone: {phone}")
+            return None
+    except Exception as e:
+        logger.error(f"❌ Database error: {str(e)}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
     try:
@@ -61,7 +78,8 @@ def load_channel_config():
         logger.error(f"❌ Error loading channels: {str(e)}")
         return False
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 def load_user_replacements(user_id):
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
@@ -74,15 +92,12 @@ def load_user_replacements(user_id):
                 WHERE user_id = %s
                 ORDER BY LENGTH(original_text) DESC
             """, (user_id,))
-
             TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
             CURRENT_USER_ID = user_id
-
-            logger.info(f"👤 Loading replacements for user {user_id}")
+            logger.info(f"👤 Loaded replacements for user {user_id}")
             logger.info(f"📚 Found {len(TEXT_REPLACEMENTS)} replacements")
             for original, replacement in TEXT_REPLACEMENTS.items():
                 logger.info(f"📝 Loaded: '{original}' → '{replacement}'")
-
             return True
     except Exception as e:
         logger.error(f"❌ Error loading replacements: {str(e)}")
@@ -90,7 +105,8 @@ def load_user_replacements(user_id):
         CURRENT_USER_ID = None
         return False
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 def apply_text_replacements(text):
     if not text:
@@ -134,34 +150,6 @@ async def setup_client():
         me = await client.get_me()
         logger.info(f"✅ Client active as: {me.first_name} (ID: {me.id})")
 
-        # Get phone from session
-        session_phone = None
-        try:
-            with open('anon.session', 'rb') as f:
-                f.seek(20)  # Skip version and DC ID
-                phone_len = int.from_bytes(f.read(1), 'little')
-                if phone_len > 0:
-                    phone_bytes = f.read(phone_len)
-                    session_phone = phone_bytes.decode('utf-8')
-                    if not session_phone.startswith('+'):
-                        session_phone = f"+{session_phone}"
-                    logger.info(f"📱 Found phone: {session_phone}")
-        except Exception as e:
-            logger.error(f"❌ Error reading session: {str(e)}")
-            return False
-
-        # Load user data and replacements
-        if session_phone:
-            user_id = get_user_id_by_phone(session_phone)
-            if user_id:
-                logger.info(f"👤 Found user ID: {user_id}")
-                if load_user_replacements(user_id):
-                    logger.info("✅ Loaded text replacements")
-                else:
-                    logger.warning("❌ Failed to load replacements")
-            else:
-                logger.warning(f"❌ No user found for phone: {session_phone}")
-
         return True
 
     except Exception as e:
@@ -173,9 +161,10 @@ async def setup_handlers():
 
     try:
         # Clear existing handlers
-        for handler in client.list_event_handlers():
-            client.remove_event_handler(handler)
-        logger.info("🔄 Cleared existing handlers")
+        if client.list_event_handlers():
+            for handler in client.list_event_handlers():
+                client.remove_event_handler(handler)
+            logger.info("🔄 Cleared existing handlers")
 
         # Add message handler
         @client.on(events.NewMessage(pattern=''))
@@ -213,7 +202,6 @@ async def setup_handlers():
                     message_text = event.message.text if event.message.text else ""
                     logger.info(f"📥 Original message: {message_text}")
 
-                    # Apply replacements
                     if message_text and TEXT_REPLACEMENTS:
                         old_text = message_text
                         message_text = apply_text_replacements(message_text)
@@ -271,35 +259,17 @@ async def main():
         # Setup client
         if not await setup_client():
             logger.error("❌ Failed to setup client")
-            return
+            return False
 
         # Load channel config
         if not load_channel_config():
             logger.error("❌ Failed to load channel configuration")
-            return
+            return False
 
         # Setup handlers
         if not await setup_handlers():
             logger.error("❌ Failed to setup handlers")
-            return
-
-        # Start monitor
-        def config_monitor():
-            while True:
-                try:
-                    if client and client.is_connected():
-                        if load_channel_config():
-                            logger.info("✅ Channel config refreshed")
-                        if CURRENT_USER_ID:
-                            if load_user_replacements(CURRENT_USER_ID):
-                                logger.info("✅ Replacements refreshed")
-                    time.sleep(30)
-                except Exception as e:
-                    logger.error(f"❌ Monitor error: {str(e)}")
-                    time.sleep(1)
-
-        Thread(target=config_monitor, daemon=True).start()
-        logger.info("✅ Started config monitor")
+            return False
 
         # Log system state
         logger.info("\n🤖 System is ready")
@@ -310,6 +280,7 @@ async def main():
 
         # Run client
         await client.run_until_disconnected()
+        return True
 
     except Exception as e:
         logger.error(f"❌ Critical error: {str(e)}")
@@ -317,7 +288,7 @@ async def main():
         logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
         if client and client.is_connected():
             await client.disconnect()
-        raise
+        return False
 
 if __name__ == "__main__":
     try:
@@ -330,8 +301,12 @@ if __name__ == "__main__":
                 logger.error(f"❌ Cleanup error: {str(e)}")
 
         # Run main function
-        asyncio.run(main())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("\n👋 System stopped by user")
     except Exception as e:
         logger.error(f"❌ Startup error: {str(e)}")
+    finally:
+        loop.close()
