@@ -247,7 +247,19 @@ def dashboard():
                         'name': dialog.name
                     })
             await client.disconnect()
-            return channels
+
+            # Get last selected channels from database
+            db = get_db()
+            with db.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT source_channel, destination_channel 
+                    FROM channel_config 
+                    ORDER BY updated_at DESC 
+                    LIMIT 1
+                """)
+                last_config = cur.fetchone()
+
+            return channels, last_config
         except Exception as e:
             logger.error(f"Error fetching channels: {str(e)}")
             if client and client.connected:
@@ -255,8 +267,11 @@ def dashboard():
             raise e
 
     try:
-        channels = asyncio.run(get_channels())
-        return render_template('dashboard.html', channels=channels)
+        channels, last_config = asyncio.run(get_channels())
+        return render_template('dashboard.html', 
+                             channels=channels,
+                             last_source=last_config['source_channel'] if last_config else None,
+                             last_dest=last_config['destination_channel'] if last_config else None)
     except Exception as e:
         logger.error(f"Error in dashboard route: {str(e)}")
         return redirect(url_for('login'))
@@ -284,8 +299,8 @@ def add_replacement():
             """, (user_id, original, replacement))
             db.commit()
 
-        # Update TEXT_REPLACEMENTS in main.py
         import main
+        main.CURRENT_USER_ID = user_id
         main.load_user_replacements(user_id)
 
         return jsonify({'message': 'Replacement added successfully'})
@@ -306,8 +321,10 @@ def get_replacements():
                 SELECT original_text, replacement_text 
                 FROM text_replacements 
                 WHERE user_id = %s
+                ORDER BY LENGTH(original_text) DESC
             """, (user_id,))
             replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
+            logger.info(f"Retrieved {len(replacements)} replacements for user {user_id}")
 
         return jsonify(replacements)
     except Exception as e:
@@ -336,7 +353,6 @@ def remove_replacement():
             db.commit()
 
         if deleted:
-            # Update TEXT_REPLACEMENTS in main.py
             import main
             main.load_user_replacements(user_id)
             return jsonify({'message': 'Replacement removed successfully'})

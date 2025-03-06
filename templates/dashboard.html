@@ -238,8 +238,21 @@
             });
         }
 
-        // Load replacements when page loads
-        document.addEventListener('DOMContentLoaded', loadReplacements);
+        // Update the channel selection initialization
+        document.addEventListener('DOMContentLoaded', function() {
+            const lastSource = '{{ last_source|safe if last_source else "" }}';
+            const lastDest = '{{ last_dest|safe if last_dest else "" }}';
+
+            if (lastSource) {
+                document.getElementById('source-channel').value = lastSource;
+            }
+            if (lastDest) {
+                document.getElementById('dest-channel').value = lastDest;
+            }
+
+            // Load replacements when page loads
+            loadReplacements();
+        });
     </script>
     <style>
         .header {

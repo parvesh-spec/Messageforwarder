@@ -173,7 +173,9 @@ async def main():
 
                     # Apply text replacements if any
                     if TEXT_REPLACEMENTS and message_text:
-                        logger.debug("Starting text replacement process...")
+                        logger.debug(f"Starting text replacement process. Original text: {message_text}")
+                        logger.debug(f"Available replacements: {TEXT_REPLACEMENTS}")
+
                         for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
                             if original in message_text:
                                 old_text = message_text
@@ -181,37 +183,17 @@ async def main():
                                 logger.info(f"Replaced '{original}' with '{replacement}'")
                                 logger.debug(f"Text changed from '{old_text}' to '{message_text}'")
 
-                    # Handle media
-                    media = None
-                    if event.message.media:
-                        logger.info("Downloading media...")
-                        try:
-                            media = await event.message.download_media()
-                            logger.info(f"Media downloaded: {media}")
-                        except Exception as e:
-                            logger.error(f"Failed to download media: {str(e)}")
-                            return
+                        logger.debug(f"Final text after replacements: {message_text}")
 
                     # Send message
                     try:
-                        if media:
-                            logger.info("Sending message with media...")
-                            sent_message = await client.send_file(
-                                dest_channel,
-                                media,
-                                caption=message_text,
-                                formatting_entities=event.message.entities
-                            )
-                            os.remove(media)  # Clean up
-                            logger.info("Message with media sent successfully")
-                        else:
-                            logger.info("Sending text message...")
-                            sent_message = await client.send_message(
-                                dest_channel,
-                                message_text,
-                                formatting_entities=event.message.entities
-                            )
-                            logger.info("Text message sent successfully")
+                        logger.info("Sending text message...")
+                        sent_message = await client.send_message(
+                            dest_channel,
+                            message_text,
+                            formatting_entities=event.message.entities
+                        )
+                        logger.info("Text message sent successfully")
 
                         # Store message IDs mapping
                         MESSAGE_IDS[event.message.id] = sent_message.id
@@ -219,8 +201,6 @@ async def main():
 
                     except Exception as e:
                         logger.error(f"Failed to send message: {str(e)}")
-                        if media and os.path.exists(media):
-                            os.remove(media)
                         return
 
                 except ValueError as e:
