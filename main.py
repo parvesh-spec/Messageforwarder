@@ -138,39 +138,6 @@ def apply_text_replacements(text):
 
     return result
 
-async def handle_forward_message(client, event, source_id, dest_id):
-    """Handle message forwarding with text replacements"""
-    try:
-        message_text = event.message.text if event.message.text else ""
-        logger.info(f"📥 Processing message: '{message_text}'")
-
-        # Apply text replacements if needed
-        if message_text and TEXT_REPLACEMENTS:
-            old_text = message_text
-            message_text = apply_text_replacements(message_text)
-            logger.info(f"📝 Text replaced: '{old_text}' → '{message_text}'")
-
-        # Get destination channel
-        dest_channel = await client.get_entity(int(dest_id))
-        logger.info(f"📤 Forwarding to: {getattr(dest_channel, 'title', 'Unknown')}")
-
-        # Send message
-        sent_message = await client.send_message(
-            dest_channel,
-            message_text,
-            formatting_entities=event.message.entities
-        )
-
-        MESSAGE_IDS[event.message.id] = sent_message.id
-        logger.info("✅ Message forwarded successfully")
-        return True
-
-    except Exception as e:
-        logger.error(f"❌ Forward error: {str(e)}")
-        import traceback
-        logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
-        return False
-
 async def main():
     try:
         # Initialize client
@@ -190,7 +157,7 @@ async def main():
             await client.connect()
             logger.info("✅ Connected to Telegram")
 
-            # Check authorization 
+            # Check authorization
             if not await client.is_user_authorized():
                 logger.error("❌ User not authorized")
                 return
@@ -236,9 +203,7 @@ async def main():
             @client.on(events.NewMessage())
             async def handle_new_message(event):
                 try:
-                    logger.info(f"📨 Event received from chat {event.chat_id}")
-                    logger.info(f"💬 Message text: {event.message.text if event.message else 'No text'}")
-
+                    # Skip if no channels configured
                     if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
                         logger.warning("❌ Channels not configured")
                         return
@@ -252,29 +217,42 @@ async def main():
                     if not chat_id.startswith('-100'):
                         chat_id = f"-100{chat_id.lstrip('-')}"
 
-                    logger.info(f"🔍 Checking message - From: {chat_id}, Source Channel: {source_id}")
-
+                    # Check if message is from source channel
                     if chat_id != source_id:
-                        logger.info("👉 Not from source channel, skipping")
                         return
 
-                    logger.info("✅ Message is from source channel, forwarding...")
+                    logger.info(f"📨 New message from source channel")
+                    logger.info(f"💬 Message text: {event.message.text}")
+
+                    # Process message
+                    message_text = event.message.text if event.message.text else ""
+                    if message_text:
+                        message_text = apply_text_replacements(message_text)
 
                     # Format destination channel ID
                     dest_id = str(DESTINATION_CHANNEL)
                     if not dest_id.startswith('-100'):
                         dest_id = f"-100{dest_id.lstrip('-')}"
 
-                    success = await handle_forward_message(client, event, source_id, dest_id)
-                    if not success:
-                        logger.error("❌ Failed to forward message")
+                    # Send to destination
+                    try:
+                        dest_channel = await client.get_entity(int(dest_id))
+                        sent_message = await client.send_message(
+                            dest_channel,
+                            message_text,
+                            formatting_entities=event.message.entities
+                        )
+                        MESSAGE_IDS[event.message.id] = sent_message.id
+                        logger.info("✅ Message forwarded successfully")
+                    except Exception as e:
+                        logger.error(f"❌ Forward error: {str(e)}")
+                        import traceback
+                        logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
 
                 except Exception as e:
                     logger.error(f"❌ Message handler error: {str(e)}")
                     import traceback
                     logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
-
-            logger.info("✅ Message handlers registered")
 
             # Start config monitor
             def config_monitor():
