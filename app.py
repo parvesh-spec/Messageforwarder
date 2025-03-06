@@ -589,34 +589,45 @@ def toggle_bot():
                 # Start bot in a new thread
                 def start_bot():
                     try:
+                        # Initialize event loop for this thread
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+
+                        # Configure bot
                         main.SOURCE_CHANNEL = source
                         main.DESTINATION_CHANNEL = destination
-                        loop = EventLoopManager.get_loop()
-                        loop.run_until_complete(main.main())
+
+                        # Run bot
+                        try:
+                            loop.run_until_complete(main.main())
+                        except Exception as e:
+                            logger.error(f"❌ Bot error: {str(e)}")
+                        finally:
+                            loop.stop()
+                            loop.close()
                     except Exception as e:
-                        logger.error(f"❌ Bot error: {str(e)}")
+                        logger.error(f"❌ Thread error: {str(e)}")
 
                 bot_thread = Thread(target=start_bot, daemon=True)
                 bot_thread.start()
                 logger.info("✅ Started bot thread")
 
+                # Update session
+                session['bot_running'] = True
+                logger.info("✅ Bot status changed to: running")
+
             else:
                 logger.info("🔄 Stopping bot...")
-                client = EventLoopManager.get_client()
-                if client:
-                    try:
-                        loop = EventLoopManager.get_loop()
-                        loop.run_until_complete(client.disconnect())
-                        logger.info("✅ Disconnected client")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Error disconnecting client: {e}")
-
-                main.SOURCE_CHANNEL = None
-                main.DESTINATION_CHANNEL = None
-
-            # Update session
-            session['bot_running'] = status
-            logger.info(f"✅ Bot status changed to: {'running' if status else 'stopped'}")
+                try:
+                    # Cleanup and stop
+                    EventLoopManager.reset()
+                    main.SOURCE_CHANNEL = None
+                    main.DESTINATION_CHANNEL = None
+                    session['bot_running'] = False
+                    logger.info("✅ Bot stopped successfully")
+                except Exception as e:
+                    logger.error(f"❌ Stop error: {str(e)}")
+                    raise
 
             return jsonify({
                 'status': status,

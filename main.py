@@ -304,13 +304,23 @@ if __name__ == "__main__":
             except Exception as e:
                 logger.error(f"❌ Cleanup error: {str(e)}")
 
-        # Run main function
+        # Set up event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        logger.info("\n👋 System stopped by user")
+        try:
+            # Run main function
+            loop.run_until_complete(main())
+        except KeyboardInterrupt:
+            logger.info("\n👋 System stopped by user")
+        except Exception as e:
+            logger.error(f"❌ Startup error: {str(e)}")
+        finally:
+            # Cleanup
+            try:
+                if client and client.is_connected():
+                    loop.run_until_complete(client.disconnect())
+            except:
+                pass
+            loop.close()
     except Exception as e:
-        logger.error(f"❌ Startup error: {str(e)}")
-    finally:
-        loop.close()
+        logger.error(f"❌ Fatal error: {str(e)}")
