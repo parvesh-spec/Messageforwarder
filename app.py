@@ -2,7 +2,7 @@ import os
 import logging
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify, g
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
+from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError, AuthKeyUnregisteredError
 import asyncio
 from functools import wraps
 from asgiref.sync import async_to_sync
@@ -48,6 +48,43 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['SESSION_PERMANENT'] = True
 Session(app)
 
+# Telegram client manager
+class TelegramManager:
+    def __init__(self, session_name, api_id, api_hash):
+        self.session_name = session_name
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.client = None
+
+    async def get_client(self):
+        if not self.client:
+            self.client = TelegramClient(
+                self.session_name,
+                self.api_id,
+                self.api_hash,
+                device_model="Replit Web",
+                system_version="Linux",
+                app_version="1.0",
+                connection_retries=None  # Infinite retries
+            )
+
+        if not self.client.is_connected():
+            await self.client.connect()
+
+        return self.client
+
+    async def disconnect(self):
+        if self.client and self.client.is_connected():
+            await self.client.disconnect()
+            self.client = None
+
+# Create global Telegram manager
+telegram_manager = TelegramManager(
+    'anon',
+    int(os.getenv('API_ID', '27202142')),
+    os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
+)
+
 # Database connection with better connection handling
 def get_db():
     if 'db' not in g:
@@ -63,10 +100,6 @@ def close_db(e=None):
     db = g.pop('db', None)
     if db is not None:
         db.close()
-
-# Telegram API credentials
-API_ID = int(os.getenv('API_ID', '27202142'))
-API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
 def login_required(f):
     @wraps(f)
@@ -92,7 +125,7 @@ def login():
     return render_template('login.html')
 
 @app.route('/send-otp', methods=['POST'])
-def send_otp():
+async def send_otp():
     phone = request.form.get('phone')
     if not phone:
         logger.error("Phone number missing in request")
@@ -103,68 +136,36 @@ def send_otp():
         return jsonify({'error': 'Phone number must start with +91'}), 400
 
     try:
-        async def send_code():
-            logger.info(f"Initializing Telegram client for phone: {phone}")
-            session_file = f"sessions/{phone}"
+        client = await telegram_manager.get_client()
 
-            # If session exists, check if it's valid
-            if os.path.exists(session_file):
-                try:
-                    client = TelegramClient(session_file, API_ID, API_HASH)
-                    await client.connect()
-                    if await client.is_user_authorized():
-                        logger.info(f"Found valid session for {phone}")
-                        session['user_phone'] = phone
-                        session['logged_in'] = True
-                        await client.disconnect()
-                        return {'message': 'Already authorized', 'already_authorized': True}
-                    else:
-                        logger.info(f"Session exists but not authorized for {phone}")
-                        os.remove(session_file)
-                except Exception as e:
-                    logger.error(f"Error checking existing session: {e}")
-                    if os.path.exists(session_file):
-                        os.remove(session_file)
+        # If session exists, check if it's valid
+        if await client.is_user_authorized():
+            logger.info(f"Found valid session for {phone}")
+            session['user_phone'] = phone
+            session['logged_in'] = True
+            await telegram_manager.disconnect()
+            return jsonify({'message': 'Already authorized', 'already_authorized': True})
 
-            # Create new session
-            client = TelegramClient(session_file, API_ID, API_HASH)
-            try:
-                logger.info("Connecting to Telegram...")
-                await client.connect()
+        try:
+            # Send code and get the phone_code_hash
+            sent = await client.send_code_request(phone)
+            session['user_phone'] = phone
+            session['phone_code_hash'] = sent.phone_code_hash
+            logger.info("Code request sent successfully")
+            return jsonify({'message': 'OTP sent successfully'})
+        except PhoneNumberInvalidError:
+            logger.error(f"Invalid phone number: {phone}")
+            return jsonify({'error': 'Invalid phone number'}), 400
+        finally:
+            await telegram_manager.disconnect()
 
-                try:
-                    # Send code and get the phone_code_hash
-                    sent = await client.send_code_request(phone)
-                    session['user_phone'] = phone
-                    session['phone_code_hash'] = sent.phone_code_hash
-                    logger.info("Code request sent successfully")
-                    await client.disconnect()
-                    return {'message': 'OTP sent successfully'}
-                except PhoneNumberInvalidError:
-                    logger.error(f"Invalid phone number: {phone}")
-                    await client.disconnect()
-                    if os.path.exists(session_file):
-                        os.remove(session_file)
-                    return {'error': 'Invalid phone number'}, 400
-
-            except Exception as e:
-                logger.error(f"Error in send_code: {str(e)}")
-                if client and client.connected:
-                    await client.disconnect()
-                if os.path.exists(session_file):
-                    os.remove(session_file)
-                raise e
-
-        result = asyncio.run(send_code())
-        if isinstance(result, tuple):
-            return jsonify(result[0]), result[1]
-        return jsonify(result)
     except Exception as e:
         logger.error(f"Error in send_otp route: {str(e)}")
+        await telegram_manager.disconnect()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/verify-otp', methods=['POST'])
-def verify_otp():
+async def verify_otp():
     phone = session.get('user_phone')
     phone_code_hash = session.get('phone_code_hash')
     otp = request.form.get('otp')
@@ -179,102 +180,73 @@ def verify_otp():
         return jsonify({'error': 'OTP is required'}), 400
 
     try:
-        async def verify():
-            logger.info(f"Verifying OTP for phone: {phone}")
-            session_file = f"sessions/{phone}"
-            client = TelegramClient(session_file, API_ID, API_HASH)
+        client = await telegram_manager.get_client()
 
+        try:
+            # Sign in with phone code hash
+            await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
+            logger.info("Sign in successful")
+        except SessionPasswordNeededError:
+            logger.info("2FA password needed")
+            if not password:
+                return jsonify({
+                    'error': 'two_factor_needed',
+                    'message': 'Two-factor authentication is required'
+                })
             try:
-                await client.connect()
-                logger.info("Connected to Telegram")
-
-                try:
-                    # Sign in with phone code hash
-                    await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
-                    logger.info("Sign in successful")
-                except SessionPasswordNeededError:
-                    logger.info("2FA password needed")
-                    if not password:
-                        await client.disconnect()
-                        return {
-                            'error': 'two_factor_needed',
-                            'message': 'Two-factor authentication is required'
-                        }
-                    try:
-                        await client.sign_in(password=password)
-                        logger.info("2FA verification successful")
-                    except Exception as e:
-                        logger.error(f"2FA verification failed: {e}")
-                        await client.disconnect()
-                        return {'error': 'Invalid 2FA password'}, 400
-
-                if await client.is_user_authorized():
-                    session['logged_in'] = True
-                    await client.disconnect()
-                    return {'message': 'Login successful'}
-                else:
-                    await client.disconnect()
-                    return {'error': 'Invalid OTP'}, 400
-
+                await client.sign_in(password=password)
+                logger.info("2FA verification successful")
             except Exception as e:
-                logger.error(f"Error during verification: {str(e)}")
-                if client and client.connected:
-                    await client.disconnect()
-                raise e
+                logger.error(f"2FA verification failed: {e}")
+                return jsonify({'error': 'Invalid 2FA password'}), 400
 
-        result = asyncio.run(verify())
-        if isinstance(result, tuple):
-            return jsonify(result[0]), result[1]
-        return jsonify(result)
+        if await client.is_user_authorized():
+            session['logged_in'] = True
+            return jsonify({'message': 'Login successful'})
+        else:
+            return jsonify({'error': 'Invalid OTP'}), 400
+
     except Exception as e:
         logger.error(f"Error in verify_otp route: {str(e)}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        await telegram_manager.disconnect()
 
 @app.route('/dashboard')
 @login_required
-def dashboard():
-    async def get_channels():
-        phone = session.get('user_phone')
-        client = TelegramClient(f"sessions/{phone}", API_ID, API_HASH)
-
-        try:
-            await client.connect()
-            channels = []
-            async for dialog in client.iter_dialogs():
-                if dialog.is_channel:
-                    channels.append({
-                        'id': dialog.id,
-                        'name': dialog.name
-                    })
-            await client.disconnect()
-
-            # Get last selected channels from database
-            db = get_db()
-            with db.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute("""
-                    SELECT source_channel, destination_channel 
-                    FROM channel_config 
-                    ORDER BY updated_at DESC 
-                    LIMIT 1
-                """)
-                last_config = cur.fetchone()
-
-            return channels, last_config
-        except Exception as e:
-            logger.error(f"Error fetching channels: {str(e)}")
-            if client and client.connected:
-                await client.disconnect()
-            raise e
-
+async def dashboard():
+    phone = session.get('user_phone')
     try:
-        channels, last_config = asyncio.run(get_channels())
+        client = await telegram_manager.get_client()
+        channels = []
+        async for dialog in client.iter_dialogs():
+            if dialog.is_channel:
+                channels.append({
+                    'id': dialog.id,
+                    'name': dialog.name
+                })
+
+        # Get last selected channels from database
+        db = get_db()
+        with db.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT source_channel, destination_channel 
+                FROM channel_config 
+                ORDER BY updated_at DESC 
+                LIMIT 1
+            """)
+            last_config = cur.fetchone()
+
         return render_template('dashboard.html', 
                              channels=channels,
                              last_source=last_config['source_channel'] if last_config else None,
                              last_dest=last_config['destination_channel'] if last_config else None)
     except Exception as e:
-        logger.error(f"Error in dashboard route: {str(e)}")
+        logger.error(f"Error fetching channels: {str(e)}")
         return redirect(url_for('login'))
+    finally:
+        await telegram_manager.disconnect()
+
 
 @app.route('/add-replacement', methods=['POST'])
 @login_required
