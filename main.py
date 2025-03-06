@@ -82,6 +82,7 @@ def load_user_replacements(user_id):
         conn = get_db()
         try:
             with conn.cursor(cursor_factory=DictCursor) as cur:
+                # Get replacements sorted by length
                 cur.execute("""
                     SELECT original_text, replacement_text 
                     FROM text_replacements 
@@ -90,16 +91,14 @@ def load_user_replacements(user_id):
                 """, (user_id,))
                 TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
 
-                if TEXT_REPLACEMENTS:
-                    logger.info(f"Loaded {len(TEXT_REPLACEMENTS)} text replacements for user {user_id}")
-                    for original, replacement in TEXT_REPLACEMENTS.items():
-                        logger.debug(f"Loaded replacement: '{original}' -> '{replacement}'")
-                else:
-                    logger.warning(f"No text replacements found for user {user_id}")
+                logger.info(f"🔄 Reloaded text replacements for user {user_id}")
+                logger.info(f"📝 Found {len(TEXT_REPLACEMENTS)} replacements")
+                for original, replacement in TEXT_REPLACEMENTS.items():
+                    logger.info(f"📌 Loaded: '{original}' → '{replacement}'")
         finally:
             conn.close()
     except Exception as e:
-        logger.error(f"Error loading text replacements: {str(e)}")
+        logger.error(f"❌ Error loading text replacements: {str(e)}")
         TEXT_REPLACEMENTS = {}
 
 def config_monitor():
@@ -132,6 +131,10 @@ async def main():
         # Get information about yourself
         me = await client.get_me()
         logger.info(f"Successfully logged in as {me.first_name} (ID: {me.id})")
+        
+        #Call load_user_replacements here to initialize with bot user ID.  This addresses point 2 in the intention.
+        load_user_replacements(me.id)
+
 
         @client.on(events.NewMessage())
         async def forward_handler(event):
@@ -155,7 +158,7 @@ async def main():
                 if chat_id != source_id:
                     return
 
-                logger.info(f"Processing message from source channel {source_id}")
+                logger.info(f"📨 Processing message from source channel {source_id}")
 
                 try:
                     # Format destination channel ID
@@ -165,51 +168,51 @@ async def main():
 
                     # Get destination channel entity
                     dest_channel = await client.get_entity(int(dest_id))
-                    logger.info(f"Found destination channel: {getattr(dest_channel, 'title', 'Unknown')}")
+                    logger.info(f"📍 Found destination channel: {getattr(dest_channel, 'title', 'Unknown')}")
 
                     # Create a new message
                     message_text = event.message.text if event.message.text else ""
-                    logger.debug(f"Original message text: {message_text}")
+                    logger.debug(f"📄 Original message: {message_text}")
 
                     # Apply text replacements if any
                     if TEXT_REPLACEMENTS and message_text:
-                        logger.debug(f"Starting text replacement process. Original text: {message_text}")
-                        logger.debug(f"Available replacements: {TEXT_REPLACEMENTS}")
+                        logger.info(f"🔍 Checking {len(TEXT_REPLACEMENTS)} replacements")
+                        logger.debug(f"📝 Text before replacements: {message_text}")
 
                         for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
                             if original in message_text:
                                 old_text = message_text
                                 message_text = message_text.replace(original, replacement)
-                                logger.info(f"Replaced '{original}' with '{replacement}'")
-                                logger.debug(f"Text changed from '{old_text}' to '{message_text}'")
+                                logger.info(f"✅ Replaced '{original}' with '{replacement}'")
+                                logger.debug(f"📝 Text changed: {old_text} → {message_text}")
 
-                        logger.debug(f"Final text after replacements: {message_text}")
+                        logger.info(f"📄 Final message: {message_text}")
 
                     # Send message
                     try:
-                        logger.info("Sending text message...")
+                        logger.info("📤 Sending message...")
                         sent_message = await client.send_message(
                             dest_channel,
                             message_text,
                             formatting_entities=event.message.entities
                         )
-                        logger.info("Text message sent successfully")
+                        logger.info("✅ Message sent successfully")
 
                         # Store message IDs mapping
                         MESSAGE_IDS[event.message.id] = sent_message.id
-                        logger.debug(f"Stored message ID mapping: {event.message.id} → {sent_message.id}")
+                        logger.debug(f"🔗 Mapped message IDs: {event.message.id} → {sent_message.id}")
 
                     except Exception as e:
-                        logger.error(f"Failed to send message: {str(e)}")
+                        logger.error(f"❌ Failed to send message: {str(e)}")
                         return
 
                 except ValueError as e:
-                    logger.error(f"Failed to access destination channel: {str(e)}")
+                    logger.error(f"❌ Failed to access destination channel: {str(e)}")
                     return
 
             except Exception as e:
-                logger.error(f"Error in forward handler: {str(e)}")
-                logger.error(f"Error type: {type(e).__name__}")
+                logger.error(f"❌ Error in forward handler: {str(e)}")
+                logger.error(f"❌ Error type: {type(e).__name__}")
 
         @client.on(events.MessageEdited())
         async def edit_handler(event):

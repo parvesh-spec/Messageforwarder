@@ -285,9 +285,11 @@ def add_replacement():
         user_phone = session.get('user_phone')
 
         if not original or not replacement:
+            logger.error("Missing replacement text parameters")
             return jsonify({'error': 'Both original and replacement text are required'}), 400
 
         user_id = get_user_id(user_phone)
+        logger.info(f"Adding replacement for user {user_id}: '{original}' → '{replacement}'")
 
         db = get_db()
         with db.cursor() as cur:
@@ -302,6 +304,7 @@ def add_replacement():
         import main
         main.CURRENT_USER_ID = user_id
         main.load_user_replacements(user_id)
+        logger.info(f"Reloaded replacements for user {user_id}")
 
         return jsonify({'message': 'Replacement added successfully'})
     except Exception as e:
@@ -314,6 +317,7 @@ def get_replacements():
     try:
         user_phone = session.get('user_phone')
         user_id = get_user_id(user_phone)
+        logger.info(f"Fetching replacements for user {user_id}")
 
         db = get_db()
         with db.cursor(cursor_factory=DictCursor) as cur:
@@ -325,6 +329,11 @@ def get_replacements():
             """, (user_id,))
             replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
             logger.info(f"Retrieved {len(replacements)} replacements for user {user_id}")
+
+            # Ensure text replacements are loaded in main.py
+            import main
+            main.CURRENT_USER_ID = user_id
+            main.load_user_replacements(user_id)
 
         return jsonify(replacements)
     except Exception as e:
