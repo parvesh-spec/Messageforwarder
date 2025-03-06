@@ -13,4 +13,5 @@ dependencies = [
     "psycopg2-binary>=2.9.10",
     "flask-sqlalchemy>=3.1.1",
     "sqlalchemy>=2.0.38",
+    "twilio>=9.4.6",
 ]

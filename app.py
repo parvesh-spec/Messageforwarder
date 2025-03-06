@@ -175,7 +175,7 @@ async def send_otp():
             await telegram_manager.disconnect()
 
     except Exception as e:
-        logger.error(f"Critical error in send-otp: {str(e)}")
+        logger.error(f"Critical error in send_otp: {str(e)}")
         return jsonify({'error': 'Server error'}), 500
 
 @app.route('/verify-otp', methods=['POST'])
@@ -474,34 +474,47 @@ def toggle_bot():
             logger.error("❌ Channel configuration missing")
             return jsonify({'error': 'Please configure source and destination channels first'}), 400
 
-        # Configure bot channels
         try:
             import main
-            # Reset client on status change
+            import asyncio
+
             if status:
-                logger.info("🔄 Starting bot with new configuration")
+                logger.info("🔄 Starting Telegram client...")
+                # Stop existing client if running
+                if hasattr(main, 'client') and main.client and main.client.is_connected():
+                    asyncio.run(main.client.disconnect())
+                    logger.info("✅ Disconnected existing client")
+
+                # Reset channels
                 main.SOURCE_CHANNEL = source
                 main.DESTINATION_CHANNEL = destination
-                main.load_channel_config()  # Reload configuration
+
+                # Start new client
+                asyncio.run(main.main())
+                logger.info("✅ Started new Telegram client")
+
             else:
-                logger.info("🔄 Stopping bot")
+                logger.info("🔄 Stopping bot...")
+                if hasattr(main, 'client') and main.client:
+                    asyncio.run(main.client.disconnect())
                 main.SOURCE_CHANNEL = None
                 main.DESTINATION_CHANNEL = None
+                logger.info("✅ Bot stopped")
 
             session['bot_running'] = status
-            logger.info(f"✅ Bot status changed to: {'running' if status else 'stopped'}")
-
             return jsonify({
                 'status': status,
                 'message': f"Bot is now {'running' if status else 'stopped'}"
             })
 
         except Exception as e:
-            logger.error(f"❌ Error configuring bot: {e}")
-            return jsonify({'error': 'Failed to configure bot'}), 500
+            logger.error(f"❌ Bot toggle error: {str(e)}")
+            import traceback
+            logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
+            return jsonify({'error': 'Failed to toggle bot status'}), 500
 
     except Exception as e:
-        logger.error(f"❌ Error toggling bot: {str(e)}")
+        logger.error(f"❌ Route error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
