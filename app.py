@@ -391,55 +391,69 @@ def logout():
 
 
 @app.route('/update-channels', methods=['POST'])
-@login_required
 def update_channels():
+    """Update channel configuration in database"""
     try:
         source = request.form.get('source')
         destination = request.form.get('destination')
 
         if not source or not destination:
-            logger.error("Missing channel IDs in request")
+            logger.error("❌ Missing channel IDs")
             return jsonify({'error': 'Both source and destination channels are required'}), 400
 
         if source == destination:
-            logger.error("Source and destination channels cannot be the same")
+            logger.error("❌ Source and destination channels are same")
             return jsonify({'error': 'Source and destination channels must be different'}), 400
 
-        # Format channel IDs properly
-        if not source.startswith('-100'):
-            source = f"-100{source.lstrip('-')}"
-        if not destination.startswith('-100'):
-            destination = f"-100{destination.lstrip('-')}"
+        try:
+            # Format channel IDs
+            if not source.startswith('-100'):
+                source = f"-100{source.lstrip('-')}"
+            if not destination.startswith('-100'):
+                destination = f"-100{destination.lstrip('-')}"
 
-        # Store channel IDs in session for the current user
-        session['source_channel'] = source
-        session['dest_channel'] = destination
+            # Update session
+            session['source_channel'] = source
+            session['dest_channel'] = destination
 
-        # Save to database
-        db = get_db()
-        with db.cursor() as cur:
-            # First create the table if it doesn't exist
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS channel_config (
-                    id SERIAL PRIMARY KEY,
-                    source_channel TEXT NOT NULL,
-                    destination_channel TEXT NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+            # Save to database
+            db = get_db()
+            with db.cursor() as cur:
+                # Create table if not exists
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS channel_config (
+                        id SERIAL PRIMARY KEY,
+                        source_channel TEXT NOT NULL,
+                        destination_channel TEXT NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
 
-            # Insert new configuration
-            cur.execute("""
-                INSERT INTO channel_config (source_channel, destination_channel)
-                VALUES (%s, %s)
-            """, (source, destination))
+                # Insert new configuration
+                cur.execute("""
+                    INSERT INTO channel_config (source_channel, destination_channel)
+                    VALUES (%s, %s)
+                """, (source, destination))
 
-            db.commit()
+            # Update bot if running
+            if session.get('bot_running'):
+                import main
+                main.SOURCE_CHANNEL = source
+                main.DESTINATION_CHANNEL = destination
+                logger.info("✅ Updated running bot configuration")
 
-        logger.info(f"Updated channel configuration - Source: {source}, Destination: {destination}")
-        return jsonify({'message': 'Channel configuration updated successfully'})
+            logger.info(f"✅ Channel config updated - Source: {source}, Destination: {destination}")
+            return jsonify({'message': 'Channel configuration updated successfully'})
+
+        except psycopg2.Error as e:
+            logger.error(f"❌ Database error: {e}")
+            return jsonify({'error': 'Database error updating channels'}), 500
+        except Exception as e:
+            logger.error(f"❌ Channel update error: {e}")
+            return jsonify({'error': str(e)}), 500
+
     except Exception as e:
-        logger.error(f"Error updating channels: {str(e)}")
+        logger.error(f"❌ Route error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/clear-replacements', methods=['POST'])
@@ -465,6 +479,7 @@ def clear_replacements():
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
 def toggle_bot():
+    """Toggle bot status and manage Telegram client"""
     try:
         status = request.form.get('status') == 'true'
         source = session.get('source_channel')
@@ -478,35 +493,66 @@ def toggle_bot():
             import main
             import asyncio
 
+            # Test database connection first
+            db = get_db()
+            with db.cursor() as cur:
+                cur.execute("SELECT 1")
+            logger.info("✅ Database connection verified")
+
             if status:
-                logger.info("🔄 Starting Telegram client...")
+                logger.info("🔄 Starting bot...")
+
                 # Stop existing client if running
-                if hasattr(main, 'client') and main.client and main.client.is_connected():
-                    asyncio.run(main.client.disconnect())
-                    logger.info("✅ Disconnected existing client")
+                if hasattr(main, 'client') and main.client:
+                    try:
+                        asyncio.run(main.client.disconnect())
+                        logger.info("✅ Disconnected existing client")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error disconnecting client: {e}")
 
                 # Reset channels
+                main.SOURCE_CHANNEL = None
+                main.DESTINATION_CHANNEL = None
+
+                # Update channels
                 main.SOURCE_CHANNEL = source
                 main.DESTINATION_CHANNEL = destination
+                logger.info(f"✅ Updated channels - Source: {source}, Destination: {destination}")
 
-                # Start new client
-                asyncio.run(main.main())
-                logger.info("✅ Started new Telegram client")
+                try:
+                    # Start new client
+                    asyncio.run(main.main())
+                    logger.info("✅ Started Telegram client")
+                except Exception as e:
+                    logger.error(f"❌ Error starting client: {e}")
+                    main.SOURCE_CHANNEL = None
+                    main.DESTINATION_CHANNEL = None
+                    return jsonify({'error': 'Failed to start bot'}), 500
 
             else:
                 logger.info("🔄 Stopping bot...")
                 if hasattr(main, 'client') and main.client:
-                    asyncio.run(main.client.disconnect())
+                    try:
+                        asyncio.run(main.client.disconnect())
+                        logger.info("✅ Disconnected client")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error disconnecting client: {e}")
+
                 main.SOURCE_CHANNEL = None
                 main.DESTINATION_CHANNEL = None
-                logger.info("✅ Bot stopped")
 
+            # Update session
             session['bot_running'] = status
+            logger.info(f"✅ Bot status changed to: {'running' if status else 'stopped'}")
+
             return jsonify({
                 'status': status,
                 'message': f"Bot is now {'running' if status else 'stopped'}"
             })
 
+        except ImportError:
+            logger.error("❌ Failed to import main module")
+            return jsonify({'error': 'Bot module not found'}), 500
         except Exception as e:
             logger.error(f"❌ Bot toggle error: {str(e)}")
             import traceback
