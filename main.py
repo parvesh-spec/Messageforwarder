@@ -36,10 +36,6 @@ DESTINATION_CHANNEL = None
 TEXT_REPLACEMENTS = {}
 CURRENT_USER_ID = None
 
-# Lock for thread-safe operations
-from threading import Lock
-text_replacement_lock = Lock()
-
 def get_db():
     conn = psycopg2.connect(
         os.getenv('DATABASE_URL'),
@@ -80,61 +76,31 @@ def load_channel_config():
         logger.error(f"Error loading channel configuration: {str(e)}")
 
 def load_user_replacements(user_id):
-    """Thread-safe loading of text replacements for a user"""
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
-
     try:
-        with text_replacement_lock:
-            CURRENT_USER_ID = user_id
-            conn = get_db()
-            try:
-                with conn.cursor(cursor_factory=DictCursor) as cur:
-                    cur.execute("""
-                        SELECT original_text, replacement_text 
-                        FROM text_replacements 
-                        WHERE user_id = %s
-                        ORDER BY LENGTH(original_text) DESC
-                    """, (user_id,))
-                    TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
+        CURRENT_USER_ID = user_id
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT original_text, replacement_text 
+                    FROM text_replacements 
+                    WHERE user_id = %s
+                    ORDER BY LENGTH(original_text) DESC
+                """, (user_id,))
+                TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
 
-                    if TEXT_REPLACEMENTS:
-                        logger.info(f"Loaded {len(TEXT_REPLACEMENTS)} text replacements for user {user_id}")
-                        for original, replacement in TEXT_REPLACEMENTS.items():
-                            logger.debug(f"Loaded replacement: '{original}' -> '{replacement}'")
-                    else:
-                        logger.warning(f"No text replacements found for user {user_id}")
-            finally:
-                conn.close()
+                if TEXT_REPLACEMENTS:
+                    logger.info(f"Loaded {len(TEXT_REPLACEMENTS)} text replacements for user {user_id}")
+                    for original, replacement in TEXT_REPLACEMENTS.items():
+                        logger.debug(f"Loaded replacement: '{original}' -> '{replacement}'")
+                else:
+                    logger.warning(f"No text replacements found for user {user_id}")
+        finally:
+            conn.close()
     except Exception as e:
         logger.error(f"Error loading text replacements: {str(e)}")
         TEXT_REPLACEMENTS = {}
-
-def apply_text_replacements(text):
-    """Thread-safe application of text replacements"""
-    if not text:
-        return text
-
-    with text_replacement_lock:
-        if not TEXT_REPLACEMENTS:
-            logger.debug("No text replacements available")
-            return text
-
-        result = text
-        logger.debug(f"Applying replacements to text: {text}")
-        logger.debug(f"Available replacements: {TEXT_REPLACEMENTS}")
-
-        try:
-            for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
-                if original in result:
-                    old_text = result
-                    result = result.replace(original, replacement)
-                    logger.info(f"Replaced '{original}' with '{replacement}'")
-                    logger.debug(f"Text changed from '{old_text}' to '{result}'")
-
-            return result
-        except Exception as e:
-            logger.error(f"Error applying replacements: {str(e)}")
-            return text
 
 def config_monitor():
     while True:
@@ -142,7 +108,7 @@ def config_monitor():
             load_channel_config()
             if CURRENT_USER_ID:
                 load_user_replacements(CURRENT_USER_ID)
-            time.sleep(30)  # Check every 30 seconds
+            time.sleep(30)  # Check every 30 seconds instead of 5
         except Exception as e:
             logger.error(f"Error in config monitor: {str(e)}")
             time.sleep(1)
@@ -201,12 +167,23 @@ async def main():
                     dest_channel = await client.get_entity(int(dest_id))
                     logger.info(f"Found destination channel: {getattr(dest_channel, 'title', 'Unknown')}")
 
-                    # Get message text and apply replacements
+                    # Create a new message
                     message_text = event.message.text if event.message.text else ""
-                    if message_text:
-                        logger.debug(f"Original message text: {message_text}")
-                        message_text = apply_text_replacements(message_text)
-                        logger.debug(f"Text after replacements: {message_text}")
+                    logger.debug(f"Original message text: {message_text}")
+
+                    # Apply text replacements if any
+                    if TEXT_REPLACEMENTS and message_text:
+                        logger.debug(f"Starting text replacement process. Original text: {message_text}")
+                        logger.debug(f"Available replacements: {TEXT_REPLACEMENTS}")
+
+                        for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
+                            if original in message_text:
+                                old_text = message_text
+                                message_text = message_text.replace(original, replacement)
+                                logger.info(f"Replaced '{original}' with '{replacement}'")
+                                logger.debug(f"Text changed from '{old_text}' to '{message_text}'")
+
+                        logger.debug(f"Final text after replacements: {message_text}")
 
                     # Send message
                     try:
@@ -262,9 +239,16 @@ async def main():
                 dest_msg_id = MESSAGE_IDS[event.message.id]
                 logger.info(f"Found destination message ID: {dest_msg_id}")
 
-                # Get message text and apply replacements
+                # Get the edited message content
                 message_text = event.message.text if event.message.text else ""
-                message_text = apply_text_replacements(message_text)
+
+                # Apply text replacements if any
+                if TEXT_REPLACEMENTS and message_text:
+                    logger.debug("Applying text replacements to edited message...")
+                    for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
+                        if original in message_text:
+                            message_text = message_text.replace(original, replacement)
+                            logger.info(f"Replaced '{original}' with '{replacement}' in edited message")
 
                 try:
                     # Format destination channel ID

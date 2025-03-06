@@ -65,18 +65,6 @@
             showMessage(errorMessage, true);
         }
 
-        // Check for existing session
-        fetch('/check-session')
-            .then(response => response.json())
-            .then(data => {
-                if (data.authenticated) {
-                    window.location.href = '/dashboard';
-                }
-            })
-            .catch(error => {
-                console.error('Error checking session:', error);
-            });
-
         function sendOTP() {
             const phone = document.getElementById('phone').value;
             if (!phone.startsWith('+91')) {
@@ -95,12 +83,16 @@
                 },
                 body: `phone=${encodeURIComponent(phone)}`
             })
-            .then(response => response.json())
-            .then(data => {
-                console.log('OTP request response:', data);
+            .then(response => {
+                console.log('OTP request response status:', response.status);
+                return response.json().then(data => ({status: response.status, data}));
+            })
+            .then(({status, data}) => {
+                console.log('OTP request response data:', data);
                 if (data.error) {
                     showMessage(data.error, true);
                 } else if (data.already_authorized) {
+                    console.log('Already authorized, redirecting to dashboard');
                     window.location.href = '/dashboard';
                 } else {
                     document.getElementById('login-form').style.display = 'none';
@@ -132,8 +124,11 @@
                 },
                 body: `otp=${encodeURIComponent(otp)}`
             })
-            .then(response => response.json())
-            .then(data => {
+            .then(response => {
+                console.log('OTP verification response status:', response.status);
+                return response.json().then(data => ({status: response.status, data}));
+            })
+            .then(({status, data}) => {
                 console.log('OTP verification response:', data);
                 if (data.error === 'two_factor_needed') {
                     document.getElementById('otp-form').style.display = 'none';
@@ -161,8 +156,11 @@
                 },
                 body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
             })
-            .then(response => response.json())
-            .then(data => {
+            .then(response => {
+                console.log('2FA verification response status:', response.status);
+                return response.json().then(data => ({status: response.status, data}));
+            })
+            .then(({status, data}) => {
                 console.log('2FA verification response:', data);
                 if (data.error) {
                     showMessage(data.error, true);
