@@ -480,23 +480,43 @@ def toggle_bot():
 
             if status:
                 logger.info("🔄 Starting Telegram client...")
-                # Stop existing client if running
-                if hasattr(main, 'client') and main.client and main.client.is_connected():
-                    asyncio.run(main.client.disconnect())
-                    logger.info("✅ Disconnected existing client")
 
-                # Reset channels
+                # Format channel IDs
+                if not source.startswith('-100'):
+                    source = f"-100{source.lstrip('-')}"
+                if not destination.startswith('-100'):
+                    destination = f"-100{destination.lstrip('-')}"
+
+                # Stop existing client if running
+                if hasattr(main, 'client') and main.client:
+                    try:
+                        if main.client.is_connected():
+                            asyncio.run(main.client.disconnect())
+                            logger.info("✅ Disconnected existing client")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error disconnecting client: {e}")
+
+                # Update channel configuration
                 main.SOURCE_CHANNEL = source
                 main.DESTINATION_CHANNEL = destination
 
-                # Start new client
-                asyncio.run(main.main())
-                logger.info("✅ Started new Telegram client")
+                try:
+                    # Start new client
+                    asyncio.run(main.main())
+                    logger.info("✅ Started Telegram client")
+                except Exception as e:
+                    logger.error(f"❌ Failed to start client: {e}")
+                    return jsonify({'error': 'Failed to start bot'}), 500
 
             else:
                 logger.info("🔄 Stopping bot...")
                 if hasattr(main, 'client') and main.client:
-                    asyncio.run(main.client.disconnect())
+                    try:
+                        if main.client.is_connected():
+                            asyncio.run(main.client.disconnect())
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error disconnecting client: {e}")
+
                 main.SOURCE_CHANNEL = None
                 main.DESTINATION_CHANNEL = None
                 logger.info("✅ Bot stopped")
