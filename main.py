@@ -75,6 +75,18 @@ def load_channel_config():
     except Exception as e:
         logger.error(f"Error loading channel configuration: {str(e)}")
 
+def get_user_id_by_phone(phone):
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
+            result = cur.fetchone()
+            if result:
+                return result[0]
+    except Exception as e:
+        logger.error(f"Error getting user ID for phone {phone}: {str(e)}")
+    return None
+
 def load_user_replacements(user_id):
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
     try:
@@ -101,13 +113,30 @@ def load_user_replacements(user_id):
         logger.error(f"❌ Error loading text replacements: {str(e)}")
         TEXT_REPLACEMENTS = {}
 
+def apply_text_replacements(text):
+    if not text or not TEXT_REPLACEMENTS:
+        return text
+
+    logger.info(f"📝 Applying replacements to text: '{text}'")
+    logger.info(f"🔍 Using {len(TEXT_REPLACEMENTS)} replacements")
+
+    result = text
+    for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
+        if original in result:
+            old_text = result
+            result = result.replace(original, replacement)
+            logger.info(f"✅ Replaced '{original}' with '{replacement}'")
+            logger.info(f"📝 Text changed: '{old_text}' → '{result}'")
+
+    return result
+
 def config_monitor():
     while True:
         try:
             load_channel_config()
             if CURRENT_USER_ID:
                 load_user_replacements(CURRENT_USER_ID)
-            time.sleep(30)  # Check every 30 seconds instead of 5
+            time.sleep(30)  # Check every 30 seconds
         except Exception as e:
             logger.error(f"Error in config monitor: {str(e)}")
             time.sleep(1)
@@ -131,10 +160,31 @@ async def main():
         # Get information about yourself
         me = await client.get_me()
         logger.info(f"Successfully logged in as {me.first_name} (ID: {me.id})")
-        
-        #Call load_user_replacements here to initialize with bot user ID.  This addresses point 2 in the intention.
-        load_user_replacements(me.id)
 
+        # Get user_id from the phone number in the session file
+        session_phone = None
+        try:
+            with open('anon.session', 'rb') as f:
+                # Skip the first 20 bytes which contain version and DC ID
+                f.seek(20)
+                # Read the phone number length (1 byte)
+                phone_len = int.from_bytes(f.read(1), 'little')
+                # Read the phone number
+                if phone_len > 0:
+                    phone_bytes = f.read(phone_len)
+                    session_phone = phone_bytes.decode('utf-8')
+                    if not session_phone.startswith('+'):
+                        session_phone = f"+{session_phone}"
+        except Exception as e:
+            logger.error(f"Error reading session file: {str(e)}")
+
+        if session_phone:
+            user_id = get_user_id_by_phone(session_phone)
+            if user_id:
+                logger.info(f"Found user ID {user_id} for phone {session_phone}")
+                load_user_replacements(user_id)
+            else:
+                logger.warning(f"No user ID found for phone {session_phone}")
 
         @client.on(events.NewMessage())
         async def forward_handler(event):
@@ -174,19 +224,9 @@ async def main():
                     message_text = event.message.text if event.message.text else ""
                     logger.debug(f"📄 Original message: {message_text}")
 
-                    # Apply text replacements if any
-                    if TEXT_REPLACEMENTS and message_text:
-                        logger.info(f"🔍 Checking {len(TEXT_REPLACEMENTS)} replacements")
-                        logger.debug(f"📝 Text before replacements: {message_text}")
-
-                        for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
-                            if original in message_text:
-                                old_text = message_text
-                                message_text = message_text.replace(original, replacement)
-                                logger.info(f"✅ Replaced '{original}' with '{replacement}'")
-                                logger.debug(f"📝 Text changed: {old_text} → {message_text}")
-
-                        logger.info(f"📄 Final message: {message_text}")
+                    # Apply text replacements
+                    if message_text:
+                        message_text = apply_text_replacements(message_text)
 
                     # Send message
                     try:
@@ -245,13 +285,9 @@ async def main():
                 # Get the edited message content
                 message_text = event.message.text if event.message.text else ""
 
-                # Apply text replacements if any
-                if TEXT_REPLACEMENTS and message_text:
-                    logger.debug("Applying text replacements to edited message...")
-                    for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
-                        if original in message_text:
-                            message_text = message_text.replace(original, replacement)
-                            logger.info(f"Replaced '{original}' with '{replacement}' in edited message")
+                # Apply text replacements
+                if message_text:
+                    message_text = apply_text_replacements(message_text)
 
                 try:
                     # Format destination channel ID
@@ -283,6 +319,15 @@ async def main():
         logger.info("\nBot is running and monitoring for new messages and edits.")
         logger.info(f"Source channel: {SOURCE_CHANNEL}")
         logger.info(f"Destination channel: {DESTINATION_CHANNEL}")
+
+        # Test text replacement functionality
+        test_text = "Hello haha how are you?"
+        logger.info("\nTesting text replacement functionality...")
+        logger.info(f"Test text: '{test_text}'")
+        logger.info(f"Current replacements: {TEXT_REPLACEMENTS}")
+        test_result = apply_text_replacements(test_text)
+        logger.info(f"Test result: '{test_result}'")
+
         await client.run_until_disconnected()
 
     except Exception as e:
