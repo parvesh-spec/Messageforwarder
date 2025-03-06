@@ -384,60 +384,26 @@ def update_channels():
         if not destination.startswith('-100'):
             destination = f"-100{destination.lstrip('-')}"
 
-        user_phone = session.get('user_phone')
-        user_id = get_user_id(user_phone)
-
-        # Store in database
-        db = get_db()
-        with db.cursor() as cur:
-            cur.execute("""
-                INSERT INTO channel_config (user_id, source_channel, destination_channel)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (user_id) 
-                DO UPDATE SET 
-                    source_channel = EXCLUDED.source_channel,
-                    destination_channel = EXCLUDED.destination_channel,
-                    updated_at = CURRENT_TIMESTAMP
-            """, (user_id, source, destination))
-            db.commit()
-
-        # Store in session for immediate use
+        # Store channel IDs in session and file
         session['source_channel'] = source
         session['dest_channel'] = destination
 
+        # Save to configuration file
+        config = {
+            'source_channel': source,
+            'destination_channel': destination
+        }
+
+        with open('channel_config.json', 'w') as f:
+            import json
+            json.dump(config, f)
+
         logger.info(f"Updated channel configuration - Source: {source}, Destination: {destination}")
+        logger.info("Configuration saved to channel_config.json")
 
         return jsonify({'message': 'Channel configuration updated successfully'})
     except Exception as e:
         logger.error(f"Error updating channels: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/get-channel-config')
-@login_required
-def get_channel_config():
-    try:
-        user_phone = session.get('user_phone')
-        user_id = get_user_id(user_phone)
-
-        db = get_db()
-        with db.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("""
-                SELECT source_channel, destination_channel
-                FROM channel_config
-                WHERE user_id = %s
-            """, (user_id,))
-            config = cur.fetchone()
-
-            if config:
-                session['source_channel'] = config['source_channel']
-                session['dest_channel'] = config['destination_channel']
-                return jsonify({
-                    'source_channel': config['source_channel'].lstrip('-100'),
-                    'destination_channel': config['destination_channel'].lstrip('-100')
-                })
-            return jsonify({})
-    except Exception as e:
-        logger.error(f"Error getting channel config: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/clear-replacements', methods=['POST'])

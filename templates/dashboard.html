@@ -238,30 +238,8 @@
             });
         }
 
-        function loadChannelConfig() {
-            console.log('Loading channel configuration...');
-            fetch('/get-channel-config')
-            .then(response => response.json())
-            .then(data => {
-                console.log('Loaded channel config:', data);
-                if (data.source_channel) {
-                    document.getElementById('source-channel').value = data.source_channel;
-                }
-                if (data.destination_channel) {
-                    document.getElementById('dest-channel').value = data.destination_channel;
-                }
-            })
-            .catch(error => {
-                console.error('Error loading channel config:', error);
-                showMessage('Failed to load channel configuration', true);
-            });
-        }
-
-        // Load both channel config and replacements when page loads
-        document.addEventListener('DOMContentLoaded', () => {
-            loadChannelConfig();
-            loadReplacements();
-        });
+        // Load replacements when page loads
+        document.addEventListener('DOMContentLoaded', loadReplacements);
     </script>
     <style>
         .header {
