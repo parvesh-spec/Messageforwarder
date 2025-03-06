@@ -118,12 +118,35 @@ def apply_text_replacements(text):
 
     return result
 
+async def forward_message(client, event, source_id, dest_id):
+    try:
+        # Get message text and apply replacements
+        message_text = event.message.text if event.message.text else ""
+        if message_text:
+            message_text = apply_text_replacements(message_text)
+            logger.info(f"📝 Final message after replacements: '{message_text}'")
+
+        # Send to destination
+        dest_channel = await client.get_entity(int(dest_id))
+        sent_message = await client.send_message(
+            dest_channel,
+            message_text,
+            formatting_entities=event.message.entities
+        )
+
+        # Store mapping
+        MESSAGE_IDS[event.message.id] = sent_message.id
+        logger.info("✅ Message forwarded successfully")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Forward error: {str(e)}")
+        return False
+
 async def main():
     try:
-        # Start the client with better connection handling
+        # Initialize client with better connection handling
         logger.info("🔄 Starting Telegram client...")
-
-        # Initialize client with more robust settings
         client = TelegramClient(
             'anon',
             API_ID,
@@ -168,10 +191,14 @@ async def main():
                 else:
                     logger.warning(f"❌ No user ID for {session_phone}")
 
+            # Load initial channel config
+            load_channel_config()
+
             @client.on(events.NewMessage())
             async def forward_handler(event):
                 try:
                     if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
+                        logger.warning("❌ Channels not configured")
                         return
 
                     # Format channel IDs
@@ -187,31 +214,17 @@ async def main():
                         return
 
                     logger.info(f"📨 Got message from source channel")
+                    logger.info(f"Current source channel: {source_id}")
+                    logger.info(f"Message chat ID: {chat_id}")
 
-                    try:
-                        # Get message text and apply replacements
-                        message_text = event.message.text if event.message.text else ""
-                        if message_text:
-                            message_text = apply_text_replacements(message_text)
+                    # Format destination channel ID
+                    dest_id = str(DESTINATION_CHANNEL)
+                    if not dest_id.startswith('-100'):
+                        dest_id = f"-100{dest_id.lstrip('-')}"
 
-                        # Send to destination
-                        dest_id = str(DESTINATION_CHANNEL)
-                        if not dest_id.startswith('-100'):
-                            dest_id = f"-100{dest_id.lstrip('-')}"
-
-                        dest_channel = await client.get_entity(int(dest_id))
-                        sent_message = await client.send_message(
-                            dest_channel,
-                            message_text,
-                            formatting_entities=event.message.entities
-                        )
-
-                        # Store mapping
-                        MESSAGE_IDS[event.message.id] = sent_message.id
-                        logger.info("✅ Message forwarded successfully")
-
-                    except Exception as e:
-                        logger.error(f"❌ Forward error: {str(e)}")
+                    success = await forward_message(client, event, source_id, dest_id)
+                    if not success:
+                        logger.error("❌ Failed to forward message")
 
                 except Exception as e:
                     logger.error(f"❌ Handler error: {str(e)}")
@@ -222,7 +235,7 @@ async def main():
                     if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
                         return
 
-                    # Check if message is from source channel
+                    # Format IDs
                     source_id = str(SOURCE_CHANNEL)
                     chat_id = str(event.chat_id)
 
@@ -264,6 +277,17 @@ async def main():
                     logger.error(f"❌ Handler error: {str(e)}")
 
             # Start config monitor
+            def config_monitor():
+                while True:
+                    try:
+                        load_channel_config()
+                        if CURRENT_USER_ID:
+                            load_user_replacements(CURRENT_USER_ID)
+                        time.sleep(30)
+                    except Exception as e:
+                        logger.error(f"❌ Monitor error: {str(e)}")
+                        time.sleep(1)
+
             Thread(target=config_monitor, daemon=True).start()
             logger.info("✅ Started config monitor")
 
@@ -285,27 +309,16 @@ async def main():
         logger.error(f"❌ Critical error: {str(e)}")
         raise
 
-def config_monitor():
-    while True:
-        try:
-            load_channel_config()
-            if CURRENT_USER_ID:
-                load_user_replacements(CURRENT_USER_ID)
-            time.sleep(30)
-        except Exception as e:
-            logger.error(f"❌ Monitor error: {str(e)}")
-            time.sleep(1)
-
 if __name__ == "__main__":
-    # Clean up old session if exists
-    if os.path.exists('anon.session-journal'):
-        try:
-            os.remove('anon.session-journal')
-            logger.info("✅ Cleaned old session journal")
-        except Exception as e:
-            logger.error(f"❌ Cleanup error: {str(e)}")
-
     try:
+        # Clean up old session if exists
+        if os.path.exists('anon.session-journal'):
+            try:
+                os.remove('anon.session-journal')
+                logger.info("✅ Cleaned old session journal")
+            except Exception as e:
+                logger.error(f"❌ Cleanup error: {str(e)}")
+
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("\n👋 Bot stopped by user")
