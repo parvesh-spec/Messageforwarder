@@ -4,8 +4,6 @@ from flask import Flask, render_template, request, session, redirect, url_for, j
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError, AuthKeyUnregisteredError
 import asyncio
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from asgiref.sync import async_to_sync
 import psycopg2
@@ -125,7 +123,7 @@ def get_user_id(phone):
             if result:
                 return result[0]
             cur.execute("INSERT INTO users (phone) VALUES (%s) RETURNING id", (phone,))
-            conn.commit()
+            conn.commit() # Corrected to use conn, not db
             return cur.fetchone()[0]
     except Exception as e:
         logger.error(f"Error getting user ID: {str(e)}")
@@ -465,6 +463,7 @@ def clear_replacements():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/bot/toggle', methods=['POST'])
+@login_required
 def toggle_bot():
     try:
         status = request.form.get('status') == 'true'
@@ -477,40 +476,30 @@ def toggle_bot():
 
         try:
             import main
+            import asyncio
 
-            def run_async_toggle(status):
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            if status:
+                logger.info("🔄 Starting Telegram client...")
+                # Stop existing client if running
+                if hasattr(main, 'client') and main.client and main.client.is_connected():
+                    asyncio.run(main.client.disconnect())
+                    logger.info("✅ Disconnected existing client")
 
-                try:
-                    if status:
-                        logger.info("🔄 Starting bot...")
-                        # Stop existing client
-                        if hasattr(main, 'client') and main.client:
-                            loop.run_until_complete(main.client.disconnect())
-                            logger.info("✅ Stopped existing client")
+                # Reset channels
+                main.SOURCE_CHANNEL = source
+                main.DESTINATION_CHANNEL = destination
 
-                        # Reset channels
-                        main.SOURCE_CHANNEL = source
-                        main.DESTINATION_CHANNEL = destination
+                # Start new client
+                asyncio.run(main.main())
+                logger.info("✅ Started new Telegram client")
 
-                        # Start new client
-                        loop.run_until_complete(main.main())
-                        logger.info("✅ Started new client")
-                    else:
-                        logger.info("🔄 Stopping bot...")
-                        if hasattr(main, 'client') and main.client:
-                            loop.run_until_complete(main.client.disconnect())
-                            main.SOURCE_CHANNEL = None
-                            main.DESTINATION_CHANNEL = None
-                            logger.info("✅ Bot stopped")
-                finally:
-                    loop.close()
-
-            # Run async operations in thread
-            with ThreadPoolExecutor() as executor:
-                future = executor.submit(run_async_toggle, status)
-                future.result()  # Wait for completion
+            else:
+                logger.info("🔄 Stopping bot...")
+                if hasattr(main, 'client') and main.client:
+                    asyncio.run(main.client.disconnect())
+                main.SOURCE_CHANNEL = None
+                main.DESTINATION_CHANNEL = None
+                logger.info("✅ Bot stopped")
 
             session['bot_running'] = status
             return jsonify({
