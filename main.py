@@ -30,16 +30,12 @@ API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
 def get_db():
-    try:
-        conn = psycopg2.connect(
-            os.getenv('DATABASE_URL'),
-            application_name='telegram_bot_main'
-        )
-        conn.autocommit = True
-        return conn
-    except Exception as e:
-        logger.error(f"❌ Database connection error: {e}")
-        raise
+    conn = psycopg2.connect(
+        os.getenv('DATABASE_URL'),
+        application_name='telegram_bot_main'
+    )
+    conn.autocommit = True
+    return conn
 
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
@@ -61,20 +57,11 @@ def load_channel_config():
             else:
                 logger.warning("❌ No channel configuration found")
                 return False
+    except Exception as e:
+        logger.error(f"❌ Error loading channels: {str(e)}")
+        return False
     finally:
-        if 'conn' in locals():
-            conn.close()
-
-def get_user_id_by_phone(phone):
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
-            result = cur.fetchone()
-            return result[0] if result else None
-    finally:
-        if 'conn' in locals():
-            conn.close()
+        conn.close()
 
 def load_user_replacements(user_id):
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
@@ -87,9 +74,15 @@ def load_user_replacements(user_id):
                 WHERE user_id = %s
                 ORDER BY LENGTH(original_text) DESC
             """, (user_id,))
+
             TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
             CURRENT_USER_ID = user_id
-            logger.info(f"✅ Loaded {len(TEXT_REPLACEMENTS)} replacements for user {user_id}")
+
+            logger.info(f"👤 Loading replacements for user {user_id}")
+            logger.info(f"📚 Found {len(TEXT_REPLACEMENTS)} replacements")
+            for original, replacement in TEXT_REPLACEMENTS.items():
+                logger.info(f"📝 Loaded: '{original}' → '{replacement}'")
+
             return True
     except Exception as e:
         logger.error(f"❌ Error loading replacements: {str(e)}")
@@ -97,13 +90,14 @@ def load_user_replacements(user_id):
         CURRENT_USER_ID = None
         return False
     finally:
-        if 'conn' in locals():
-            conn.close()
+        conn.close()
 
 def apply_text_replacements(text):
     if not text:
         return text
+
     if not TEXT_REPLACEMENTS:
+        logger.info("❌ No replacements configured")
         return text
 
     result = text
@@ -117,6 +111,8 @@ async def setup_client():
     global client
 
     try:
+        # Initialize client
+        logger.info("🔄 Starting Telegram client...")
         client = TelegramClient(
             'anon',
             API_ID,
@@ -126,7 +122,7 @@ async def setup_client():
             app_version="1.0"
         )
 
-        # Connect and verify
+        # Connect to Telegram
         if not client.is_connected():
             await client.connect()
             logger.info("✅ Connected to Telegram")
@@ -154,15 +150,17 @@ async def setup_client():
             logger.error(f"❌ Error reading session: {str(e)}")
             return False
 
-        # Load user data
+        # Load user data and replacements
         if session_phone:
             user_id = get_user_id_by_phone(session_phone)
             if user_id:
                 logger.info(f"👤 Found user ID: {user_id}")
                 if load_user_replacements(user_id):
-                    logger.info("✅ Loaded replacements")
+                    logger.info("✅ Loaded text replacements")
                 else:
                     logger.warning("❌ Failed to load replacements")
+            else:
+                logger.warning(f"❌ No user found for phone: {session_phone}")
 
         return True
 
@@ -210,36 +208,42 @@ async def setup_handlers():
 
                 logger.info("✅ Message is from source channel")
 
-                # Process message
-                message_text = event.message.text if event.message.text else ""
-                logger.info(f"📥 Original message: {message_text}")
+                try:
+                    # Process message
+                    message_text = event.message.text if event.message.text else ""
+                    logger.info(f"📥 Original message: {message_text}")
 
-                # Apply replacements
-                if message_text and TEXT_REPLACEMENTS:
-                    old_text = message_text
-                    message_text = apply_text_replacements(message_text)
-                    logger.info(f"📝 After replacements: {message_text}")
+                    # Apply replacements
+                    if message_text and TEXT_REPLACEMENTS:
+                        old_text = message_text
+                        message_text = apply_text_replacements(message_text)
+                        logger.info(f"📝 After replacements: {message_text}")
 
-                # Format destination ID
-                dest_id = str(DESTINATION_CHANNEL)
-                if not dest_id.startswith('-100'):
-                    dest_id = f"-100{dest_id.lstrip('-')}"
+                    # Format destination ID
+                    dest_id = str(DESTINATION_CHANNEL)
+                    if not dest_id.startswith('-100'):
+                        dest_id = f"-100{dest_id.lstrip('-')}"
 
-                # Send to destination
-                dest_channel = await client.get_entity(int(dest_id))
-                logger.info(f"📤 Forwarding to: {getattr(dest_channel, 'title', 'Unknown')}")
+                    # Send to destination
+                    dest_channel = await client.get_entity(int(dest_id))
+                    logger.info(f"📤 Forwarding to: {getattr(dest_channel, 'title', 'Unknown')}")
 
-                sent_message = await client.send_message(
-                    dest_channel,
-                    message_text,
-                    formatting_entities=event.message.entities
-                )
+                    sent_message = await client.send_message(
+                        dest_channel,
+                        message_text,
+                        formatting_entities=event.message.entities
+                    )
 
-                MESSAGE_IDS[event.message.id] = sent_message.id
-                logger.info("✅ Message forwarded successfully")
+                    MESSAGE_IDS[event.message.id] = sent_message.id
+                    logger.info("✅ Message forwarded successfully")
+
+                except Exception as e:
+                    logger.error(f"❌ Forward error: {str(e)}")
+                    import traceback
+                    logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
 
             except Exception as e:
-                logger.error(f"❌ Forward error: {str(e)}")
+                logger.error(f"❌ Handler error: {str(e)}")
                 import traceback
                 logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
 

@@ -480,34 +480,23 @@ def toggle_bot():
 
             if status:
                 logger.info("🔄 Starting Telegram client...")
+                # Stop existing client if running
+                if hasattr(main, 'client') and main.client and main.client.is_connected():
+                    asyncio.run(main.client.disconnect())
+                    logger.info("✅ Disconnected existing client")
 
-                # Initialize channels first
+                # Reset channels
                 main.SOURCE_CHANNEL = source
                 main.DESTINATION_CHANNEL = destination
 
-                # Run the client setup
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(main.setup_client())
-                    loop.run_until_complete(main.setup_handlers())
-                    logger.info("✅ Started Telegram client")
-                except Exception as e:
-                    logger.error(f"❌ Failed to start client: {e}")
-                    raise
-                finally:
-                    loop.close()
+                # Start new client
+                asyncio.run(main.main())
+                logger.info("✅ Started new Telegram client")
 
             else:
                 logger.info("🔄 Stopping bot...")
                 if hasattr(main, 'client') and main.client:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        if main.client.is_connected():
-                            loop.run_until_complete(main.client.disconnect())
-                    finally:
-                        loop.close()
+                    asyncio.run(main.client.disconnect())
                 main.SOURCE_CHANNEL = None
                 main.DESTINATION_CHANNEL = None
                 logger.info("✅ Bot stopped")
