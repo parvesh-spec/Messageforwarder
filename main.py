@@ -2,7 +2,7 @@ import os
 import logging
 import json
 import time
-from threading import Thread
+from threading import Thread, Lock
 import asyncio
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, AuthKeyUnregisteredError
@@ -34,10 +34,11 @@ API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 engine = create_engine(
     os.getenv('DATABASE_URL'),
     poolclass=QueuePool,
-    pool_size=5,
-    max_overflow=10,
+    pool_size=3,
+    max_overflow=5,
     pool_timeout=30,
-    pool_recycle=1800
+    pool_recycle=1800,
+    pool_pre_ping=True
 )
 
 # Create session factory
@@ -79,49 +80,6 @@ def load_channel_config():
     except Exception as e:
         logger.error(f"❌ Error loading channels: {str(e)}")
         return False
-
-def load_user_replacements(user_id):
-    """Load text replacements for user from database"""
-    global TEXT_REPLACEMENTS, CURRENT_USER_ID
-    try:
-        session = get_db()
-        sql = text("""
-            SELECT original_text as orig, replacement_text as repl
-            FROM text_replacements 
-            WHERE user_id = :user_id
-            ORDER BY LENGTH(original_text) DESC
-        """)
-        result = session.execute(sql, {"user_id": user_id})
-
-        TEXT_REPLACEMENTS = {row.orig: row.repl for row in result}
-        CURRENT_USER_ID = user_id
-
-        logger.info(f"👤 Loaded replacements for user {user_id}")
-        logger.info(f"📚 Found {len(TEXT_REPLACEMENTS)} replacements")
-        for original, replacement in TEXT_REPLACEMENTS.items():
-            logger.info(f"📝 Loaded: '{original}' → '{replacement}'")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Error loading replacements: {str(e)}")
-        TEXT_REPLACEMENTS = {}
-        CURRENT_USER_ID = None
-        return False
-
-def apply_text_replacements(text):
-    """Apply text replacements to message"""
-    if not text:
-        return text
-
-    if not TEXT_REPLACEMENTS:
-        logger.info("❌ No replacements configured")
-        return text
-
-    result = text
-    for original, replacement in TEXT_REPLACEMENTS.items():
-        if original in result:
-            result = result.replace(original, replacement)
-            logger.info(f"✅ Replaced '{original}' with '{replacement}'")
-    return result
 
 async def setup_client():
     """Initialize and setup Telegram client"""
@@ -169,7 +127,7 @@ async def setup_handlers():
             logger.info("🔄 Cleared existing handlers")
 
         # Add message handler
-        @client.on(events.NewMessage(pattern=''))
+        @client.on(events.NewMessage())
         async def handle_new_message(event):
             try:
                 logger.info("\n📨 New message received")
@@ -180,7 +138,7 @@ async def setup_handlers():
                     logger.warning("❌ Channels not configured")
                     return
 
-                # Format chat IDs
+                # Format chat IDs consistently
                 chat_id = str(event.chat_id)
                 source_id = str(SOURCE_CHANNEL)
 
@@ -195,49 +153,38 @@ async def setup_handlers():
 
                 logger.info("✅ Message is from source channel")
 
-                try:
-                    # Process message
-                    message_text = event.message.text if event.message.text else ""
-                    logger.info(f"📥 Original message: {message_text}")
+                # Process message
+                message_text = event.message.text if event.message.text else ""
+                logger.info(f"📥 Original message: {message_text}")
 
-                    if message_text and TEXT_REPLACEMENTS:
-                        message_text = apply_text_replacements(message_text)
-                        logger.info(f"📝 After replacements: {message_text}")
+                if message_text and TEXT_REPLACEMENTS:
+                    message_text = apply_text_replacements(message_text)
+                    logger.info(f"📝 After replacements: {message_text}")
 
-                    # Format destination ID
-                    dest_id = str(DESTINATION_CHANNEL)
-                    if not dest_id.startswith('-100'):
-                        dest_id = f"-100{dest_id.lstrip('-')}"
+                # Format destination ID
+                dest_id = str(DESTINATION_CHANNEL)
+                if not dest_id.startswith('-100'):
+                    dest_id = f"-100{dest_id.lstrip('-')}"
 
-                    # Send to destination
-                    dest_channel = await client.get_entity(int(dest_id))
-                    logger.info(f"📤 Forwarding to: {getattr(dest_channel, 'title', 'Unknown')}")
+                # Send to destination
+                dest_channel = await client.get_entity(int(dest_id))
+                logger.info(f"📤 Forwarding to: {getattr(dest_channel, 'title', 'Unknown')}")
 
-                    sent_message = await client.send_message(
-                        dest_channel,
-                        message_text,
-                        formatting_entities=event.message.entities
-                    )
+                sent_message = await client.send_message(
+                    dest_channel,
+                    message_text,
+                    formatting_entities=event.message.entities
+                )
 
-                    MESSAGE_IDS[event.message.id] = sent_message.id
-                    logger.info("✅ Message forwarded successfully")
-
-                except Exception as e:
-                    logger.error(f"❌ Forward error: {str(e)}")
-                    import traceback
-                    logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
+                MESSAGE_IDS[event.message.id] = sent_message.id
+                logger.info("✅ Message forwarded successfully")
 
             except Exception as e:
-                logger.error(f"❌ Handler error: {str(e)}")
+                logger.error(f"❌ Message handler error: {str(e)}")
                 import traceback
                 logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
 
-        # Add debug handler
-        @client.on(events.Raw)
-        async def debug_raw_events(event):
-            logger.info(f"🔍 Raw event: {type(event).__name__}")
-
-        # Verify handlers
+        # Verify handlers are set up
         handlers = client.list_event_handlers()
         logger.info(f"\n✅ Total handlers: {len(handlers)}")
         for handler in handlers:
@@ -249,19 +196,62 @@ async def setup_handlers():
         logger.error(f"❌ Handler setup error: {str(e)}")
         return False
 
+def load_user_replacements(user_id):
+    """Load text replacements for user from database"""
+    global TEXT_REPLACEMENTS, CURRENT_USER_ID
+    try:
+        session = get_db()
+        sql = text("""
+            SELECT original_text as orig, replacement_text as repl
+            FROM text_replacements 
+            WHERE user_id = :user_id
+            ORDER BY LENGTH(original_text) DESC
+        """)
+        result = session.execute(sql, {"user_id": user_id})
+
+        TEXT_REPLACEMENTS = {row.orig: row.repl for row in result}
+        CURRENT_USER_ID = user_id
+
+        logger.info(f"👤 Loaded replacements for user {user_id}")
+        logger.info(f"📚 Found {len(TEXT_REPLACEMENTS)} replacements")
+        for original, replacement in TEXT_REPLACEMENTS.items():
+            logger.info(f"📝 Loaded: '{original}' → '{replacement}'")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error loading replacements: {str(e)}")
+        TEXT_REPLACEMENTS = {}
+        CURRENT_USER_ID = None
+        return False
+
+def apply_text_replacements(text):
+    """Apply text replacements to message"""
+    if not text:
+        return text
+
+    if not TEXT_REPLACEMENTS:
+        logger.info("❌ No replacements configured")
+        return text
+
+    result = text
+    for original, replacement in TEXT_REPLACEMENTS.items():
+        if original in result:
+            result = result.replace(original, replacement)
+            logger.info(f"✅ Replaced '{original}' with '{replacement}'")
+    return result
+
 async def main():
     """Main function to run the Telegram bot"""
     global client
 
     try:
+        # Load channel config first
+        if not load_channel_config():
+            logger.error("❌ Failed to load channel configuration")
+            return False
+
         # Setup client
         if not await setup_client():
             logger.error("❌ Failed to setup client")
-            return False
-
-        # Load channel config
-        if not load_channel_config():
-            logger.error("❌ Failed to load channel configuration")
             return False
 
         # Setup handlers
@@ -273,7 +263,6 @@ async def main():
         logger.info("\n🤖 System is ready")
         logger.info(f"📱 Source channel: {SOURCE_CHANNEL}")
         logger.info(f"📱 Destination channel: {DESTINATION_CHANNEL}")
-        logger.info(f"👤 Current user: {CURRENT_USER_ID}")
         logger.info(f"📚 Active replacements: {len(TEXT_REPLACEMENTS)}")
 
         # Run client

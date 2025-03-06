@@ -464,7 +464,7 @@ def get_replacements():
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
 def toggle_bot():
-    """Toggle bot status"""
+    """Toggle bot status and manage Telegram client"""
     try:
         status = request.form.get('status') == 'true'
         source = session.get('source_channel')
@@ -482,20 +482,37 @@ def toggle_bot():
             if status:
                 logger.info("🔄 Starting bot...")
                 if not hasattr(main, 'client') or not main.client:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(main.setup_client())
-                    loop.run_until_complete(main.setup_handlers())
-                    logger.info("✅ Bot initialized successfully")
+                    def start_bot():
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            try:
+                                loop.run_until_complete(main.setup_client())
+                                loop.run_until_complete(main.setup_handlers())
+                                loop.run_until_complete(main.client.run_until_disconnected())
+                            except Exception as e:
+                                logger.error(f"❌ Bot error: {str(e)}")
+                            finally:
+                                loop.close()
+                                asyncio.set_event_loop(None)
+                        except Exception as e:
+                            logger.error(f"❌ Thread error: {str(e)}")
+
+                    bot_thread = Thread(target=start_bot, daemon=True)
+                    bot_thread.start()
+                    logger.info("✅ Started Telegram client in new thread")
 
             else:
                 logger.info("🔄 Stopping bot...")
                 if hasattr(main, 'client') and main.client:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
-                    loop.run_until_complete(main.client.disconnect())
-                    main.client = None
-                    logger.info("✅ Bot stopped successfully")
+                    try:
+                        loop.run_until_complete(main.client.disconnect())
+                        main.client = None
+                        logger.info("✅ Bot stopped successfully")
+                    finally:
+                        loop.close()
 
             session['bot_running'] = status
             return jsonify({
