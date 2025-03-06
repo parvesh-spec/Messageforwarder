@@ -30,34 +30,24 @@ API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
 def get_db():
-    conn = psycopg2.connect(
-        os.getenv('DATABASE_URL'),
-        application_name='telegram_bot_main'
-    )
-    conn.autocommit = True
-    return conn
-
-def get_user_id_by_phone(phone):
     try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users WHERE phone = %s", (phone,))
-            result = cur.fetchone()
-            if result:
-                return result[0]
-            logger.warning(f"❌ No user found for phone: {phone}")
-            return None
+        conn = psycopg2.connect(
+            os.getenv('DATABASE_URL'),
+            application_name='telegram_bot_main'
+        )
+        conn.autocommit = True
+        return conn
     except Exception as e:
-        logger.error(f"❌ Database error: {str(e)}")
+        logger.error(f"❌ Database connection error: {str(e)}")
         return None
-    finally:
-        if conn:
-            conn.close()
 
 def load_channel_config():
     global SOURCE_CHANNEL, DESTINATION_CHANNEL
     try:
         conn = get_db()
+        if not conn:
+            return False
+
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
                 SELECT source_channel, destination_channel 
@@ -69,7 +59,7 @@ def load_channel_config():
             if result:
                 SOURCE_CHANNEL = result['source_channel']
                 DESTINATION_CHANNEL = result['destination_channel']
-                logger.info(f"📱 Loaded channels - Source: {SOURCE_CHANNEL}, Dest: {DESTINATION_CHANNEL}")
+                logger.info(f"✅ Loaded channels - Source: {SOURCE_CHANNEL}, Dest: {DESTINATION_CHANNEL}")
                 return True
             else:
                 logger.warning("❌ No channel configuration found")
@@ -85,6 +75,9 @@ def load_user_replacements(user_id):
     global TEXT_REPLACEMENTS, CURRENT_USER_ID
     try:
         conn = get_db()
+        if not conn:
+            return False
+
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
                 SELECT original_text, replacement_text 
@@ -167,7 +160,7 @@ async def setup_handlers():
             logger.info("🔄 Cleared existing handlers")
 
         # Add message handler
-        @client.on(events.NewMessage(pattern=''))
+        @client.on(events.NewMessage())
         async def handle_new_message(event):
             try:
                 logger.info("\n📨 New message received")
@@ -197,22 +190,21 @@ async def setup_handlers():
 
                 logger.info("✅ Message is from source channel")
 
+                # Process message
+                message_text = event.message.text if event.message.text else ""
+                logger.info(f"📥 Original message: {message_text}")
+
+                if message_text and TEXT_REPLACEMENTS:
+                    message_text = apply_text_replacements(message_text)
+                    logger.info(f"📝 After replacements: {message_text}")
+
+                # Format destination ID
+                dest_id = str(DESTINATION_CHANNEL)
+                if not dest_id.startswith('-100'):
+                    dest_id = f"-100{dest_id.lstrip('-')}"
+
+                # Send to destination
                 try:
-                    # Process message
-                    message_text = event.message.text if event.message.text else ""
-                    logger.info(f"📥 Original message: {message_text}")
-
-                    if message_text and TEXT_REPLACEMENTS:
-                        old_text = message_text
-                        message_text = apply_text_replacements(message_text)
-                        logger.info(f"📝 After replacements: {message_text}")
-
-                    # Format destination ID
-                    dest_id = str(DESTINATION_CHANNEL)
-                    if not dest_id.startswith('-100'):
-                        dest_id = f"-100{dest_id.lstrip('-')}"
-
-                    # Send to destination
                     dest_channel = await client.get_entity(int(dest_id))
                     logger.info(f"📤 Forwarding to: {getattr(dest_channel, 'title', 'Unknown')}")
 
