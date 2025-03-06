@@ -173,6 +173,7 @@ async def main():
 
                     # Apply text replacements if any
                     if TEXT_REPLACEMENTS and message_text:
+                        logger.info(f"Current text replacements: {TEXT_REPLACEMENTS}")
                         logger.debug("Starting text replacement process...")
                         for original, replacement in sorted(TEXT_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
                             if original in message_text:

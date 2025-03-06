@@ -466,6 +466,30 @@ def toggle_bot():
         logger.error(f"Error toggling bot: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/get-channels')
+@login_required
+def get_channels():
+    try:
+        db = get_db()
+        with db.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT source_channel, destination_channel
+                FROM channel_config
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """)
+            row = cur.fetchone()
+
+            if row:
+                return jsonify({
+                    'source_channel': row['source_channel'].lstrip('-100'),
+                    'dest_channel': row['destination_channel'].lstrip('-100')
+                })
+            return jsonify({})
+    except Exception as e:
+        logger.error(f"Error getting channel config: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     os.makedirs('sessions', exist_ok=True)
     # ALWAYS serve the app on port 5000
