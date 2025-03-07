@@ -478,18 +478,25 @@ def toggle_bot():
         with get_db() as conn:
             with conn.cursor() as cur:
                 if status:
-                    # Start bot
+                    # First clear any existing running states
                     cur.execute("""
-                        INSERT INTO bot_state (is_running, session_string, source_channel, destination_channel)
-                        VALUES (true, %s, %s, %s)
+                        UPDATE bot_state SET is_running = false 
+                        WHERE is_running = true
+                    """)
+
+                    # Start bot with fresh state
+                    cur.execute("""
+                        INSERT INTO bot_state 
+                        (is_running, session_string, source_channel, destination_channel, reconnect_attempts)
+                        VALUES (true, %s, %s, %s, 0)
                     """, (session_string, source, destination))
                     logger.info("✅ Bot state set to running")
                 else:
                     # Stop bot
                     cur.execute("""
-                        INSERT INTO bot_state (is_running, session_string, source_channel, destination_channel)
-                        VALUES (false, %s, %s, %s)
-                    """, (session_string, source, destination))
+                        UPDATE bot_state SET is_running = false 
+                        WHERE is_running = true
+                    """)
                     logger.info("✅ Bot state set to stopped")
 
         return jsonify({

@@ -9,6 +9,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from flask import Flask, jsonify
 import time
+from collections import deque
 
 # Create a small Flask app for health checks
 health_app = Flask(__name__)
@@ -18,12 +19,12 @@ def health_check():
     return jsonify({"status": "ok"}), 200
 
 # Global variables
+MESSAGE_QUEUE = deque(maxlen=1000)  # Store messages when client is reconnecting
 MESSAGE_IDS = {}  # source_msg_id: destination_msg_id mapping
 TEXT_REPLACEMENTS = {}
 SOURCE_CHANNEL = None
 DESTINATION_CHANNEL = None
 client = None
-PORT = 8084  # Health check server port
 
 # Set up logging
 logging.basicConfig(
@@ -67,9 +68,28 @@ def get_bot_state():
             return None
 
         with conn.cursor(cursor_factory=DictCursor) as cur:
+            # First check if we need to update schema
             cur.execute("""
-                SELECT session_string, source_channel, destination_channel, is_running
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'bot_state' 
+                AND column_name = 'reconnect_attempts'
+            """)
+            if not cur.fetchone():
+                cur.execute("""
+                    ALTER TABLE bot_state 
+                    ADD COLUMN reconnect_attempts INTEGER DEFAULT 0
+                """)
+
+            cur.execute("""
+                SELECT 
+                    session_string, 
+                    source_channel, 
+                    destination_channel, 
+                    is_running,
+                    COALESCE(reconnect_attempts, 0) as reconnect_attempts
                 FROM bot_state
+                WHERE is_running = true
                 ORDER BY updated_at DESC
                 LIMIT 1
             """)
@@ -81,8 +101,8 @@ def get_bot_state():
         if conn:
             release_db(conn)
 
-def update_bot_state(is_running, session_string=None, source=None, destination=None):
-    """Update bot state in database"""
+def update_reconnect_attempts(attempts):
+    """Update reconnection attempts counter"""
     conn = None
     try:
         conn = get_db()
@@ -91,12 +111,15 @@ def update_bot_state(is_running, session_string=None, source=None, destination=N
 
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO bot_state (is_running, session_string, source_channel, destination_channel)
-                VALUES (%s, %s, %s, %s)
-            """, (is_running, session_string, source, destination))
+                UPDATE bot_state 
+                SET reconnect_attempts = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE is_running = true
+            """, (attempts,))
+            conn.commit()  # Ensure changes are committed
         return True
     except Exception as e:
-        logger.error(f"❌ Bot state update error: {str(e)}")
+        logger.error(f"❌ Reconnect attempts update error: {str(e)}")
         return False
     finally:
         if conn:
@@ -171,9 +194,6 @@ def load_replacements():
 
 def apply_text_replacements(text):
     """Apply text replacements to message"""
-    # Always reload replacements before applying
-    load_replacements()
-
     if not text:
         return text
 
@@ -185,34 +205,75 @@ def apply_text_replacements(text):
 
     return result
 
-async def setup_client():
+async def process_queued_messages():
+    """Process any messages that were queued during client disconnection"""
+    global MESSAGE_QUEUE
+
+    if not client or not client.is_connected():
+        return
+
+    while MESSAGE_QUEUE:
+        try:
+            message = MESSAGE_QUEUE.popleft()
+            text = message.get('text', '')
+            entities = message.get('entities', None)
+
+            if text and TEXT_REPLACEMENTS:
+                text = apply_text_replacements(text)
+
+            dest_id = str(DESTINATION_CHANNEL)
+            if not dest_id.startswith('-100'):
+                dest_id = f"-100{dest_id.lstrip('-')}"
+
+            dest_channel = await client.get_entity(int(dest_id))
+            sent_message = await client.send_message(
+                dest_channel,
+                text,
+                formatting_entities=entities
+            )
+            MESSAGE_IDS[message['id']] = sent_message.id
+            logger.info("✅ Queued message processed")
+        except Exception as e:
+            logger.error(f"❌ Error processing queued message: {str(e)}")
+            # Put message back in queue if processing failed
+            MESSAGE_QUEUE.appendleft(message)
+            break
+
+async def setup_client(session_string=None):
     """Initialize Telegram client with session string"""
     global client
     try:
-        # Try to get bot state from database
-        bot_state = get_bot_state()
-        if not bot_state:
-            logger.warning("⚠️ No bot state found, serving health checks only")
+        # Check if we already have a working client
+        if client and client.is_connected() and await client.is_user_authorized():
+            return True
+
+        # Get bot state if no session string provided
+        if not session_string:
+            bot_state = get_bot_state()
+            if not bot_state or not bot_state['is_running']:
+                logger.warning("⚠️ No active bot state found")
+                return False
+            session_string = bot_state['session_string']
+
+        if not session_string:
+            logger.warning("⚠️ No session string available")
             return False
 
-        if not bot_state['session_string']:
-            logger.warning("⚠️ No session string provided, serving health checks only")
-            return False
-
-        # Create new client instance with session
+        # Create new client instance with persistent connection settings
         client = TelegramClient(
-            StringSession(bot_state['session_string']),
+            StringSession(session_string),
             API_ID,
             API_HASH,
             device_model="Replit Bot",
             system_version="Linux",
             app_version="1.0",
-            retry_delay=1,  # Shorter retry delay
-            connection_retries=5,  # More retries
-            auto_reconnect=True  # Enable auto reconnect
+            retry_delay=1,
+            connection_retries=None,  # Infinite retries
+            auto_reconnect=True,
+            request_retries=10,
+            flood_sleep_threshold=60  # Increase flood wait handling
         )
 
-        # Connect and verify authorization
         await client.connect()
         if not await client.is_user_authorized():
             logger.error("❌ Bot not authorized")
@@ -220,31 +281,13 @@ async def setup_client():
             client = None
             return False
 
-        me = await client.get_me()
-        logger.info(f"✅ Bot running as: {me.first_name} (ID: {me.id})")
-        return True
-
-    except Exception as e:
-        logger.error(f"❌ Client setup error: {str(e)}")
-        if client:
-            try:
-                await client.disconnect()
-            except:
-                pass
-            client = None
-        return False
-
-async def setup_handlers():
-    """Set up message handlers"""
-    global client
-    try:
+        # Setup event handlers with improved error handling and persistence
         @client.on(events.NewMessage())
         async def handle_new_message(event):
             try:
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
                     return
 
-                # Format channel IDs
                 chat_id = str(event.chat_id)
                 source_id = str(SOURCE_CHANNEL)
                 if not chat_id.startswith('-100'):
@@ -252,32 +295,53 @@ async def setup_handlers():
                 if not source_id.startswith('-100'):
                     source_id = f"-100{source_id.lstrip('-')}"
 
-                # Verify source channel
                 if chat_id != source_id:
                     return
 
-                # Process message
+                # Queue message if client is reconnecting
+                if not client or not client.is_connected():
+                    MESSAGE_QUEUE.append({
+                        'id': event.message.id,
+                        'text': event.message.text,
+                        'entities': event.message.entities
+                    })
+                    logger.info("✅ Message queued for later processing")
+                    return
+
                 message_text = event.message.text if event.message.text else ""
                 if message_text and TEXT_REPLACEMENTS:
                     message_text = apply_text_replacements(message_text)
 
-                # Format destination channel ID
                 dest_id = str(DESTINATION_CHANNEL)
                 if not dest_id.startswith('-100'):
                     dest_id = f"-100{dest_id.lstrip('-')}"
 
-                # Send to destination
-                dest_channel = await client.get_entity(int(dest_id))
-                sent_message = await client.send_message(
-                    dest_channel,
-                    message_text,
-                    formatting_entities=event.message.entities
-                )
-                MESSAGE_IDS[event.message.id] = sent_message.id
-                logger.info("✅ Message forwarded")
+                for retry in range(3):  # Add retries for sending messages
+                    try:
+                        dest_channel = await client.get_entity(int(dest_id))
+                        sent_message = await client.send_message(
+                            dest_channel,
+                            message_text,
+                            formatting_entities=event.message.entities
+                        )
+                        MESSAGE_IDS[event.message.id] = sent_message.id
+                        logger.info("✅ Message forwarded")
+                        break
+                    except Exception as e:
+                        if retry == 2:  # Last retry
+                            raise
+                        await asyncio.sleep(1)  # Wait before retry
 
             except Exception as e:
                 logger.error(f"❌ Message handler error: {str(e)}")
+                # Queue message on error
+                if event.message:
+                    MESSAGE_QUEUE.append({
+                        'id': event.message.id,
+                        'text': event.message.text,
+                        'entities': event.message.entities
+                    })
+                    logger.info("✅ Message queued after error")
 
         @client.on(events.MessageEdited())
         async def handle_edit(event):
@@ -319,19 +383,28 @@ async def setup_handlers():
             except Exception as e:
                 logger.error(f"❌ Edit handler error: {str(e)}")
 
+        @client.on(events.Raw())
+        async def handle_disconnect(event):
+            if isinstance(event, events.ConnectionLost):
+                logger.warning("⚠️ Connection lost, will auto-reconnect...")
+
+        me = await client.get_me()
+        logger.info(f"✅ Bot running as: {me.first_name} (ID: {me.id})")
         return True
 
     except Exception as e:
-        logger.error(f"❌ Handler setup error: {str(e)}")
+        logger.error(f"❌ Client setup error: {str(e)}")
+        if client:
+            try:
+                await client.disconnect()
+            except:
+                pass
+            client = None
         return False
 
 async def main():
     """Main bot function"""
     global client, SOURCE_CHANNEL, DESTINATION_CHANNEL
-
-    # Initialize reconnection counter
-    reconnect_attempts = 0
-    max_reconnect_attempts = 5
 
     while True:  # Keep checking for bot state
         try:
@@ -345,69 +418,41 @@ async def main():
             # Update global variables
             SOURCE_CHANNEL = bot_state['source_channel']
             DESTINATION_CHANNEL = bot_state['destination_channel']
+            reconnect_attempts = bot_state['reconnect_attempts']
+
+            # Check reconnect attempts
+            if reconnect_attempts >= 10:
+                logger.error("❌ Max reconnection attempts reached, resetting bot state")
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE bot_state SET is_running = false WHERE is_running = true")
+                await asyncio.sleep(60)  # Wait before allowing new attempts
+                continue
 
             # Setup client if needed
             if not client or not client.is_connected():
-                if reconnect_attempts >= max_reconnect_attempts:
-                    logger.error("❌ Max reconnection attempts reached, waiting longer...")
-                    await asyncio.sleep(60)  # Wait longer before trying again
-                    reconnect_attempts = 0
-                    continue
-
-                client = TelegramClient(
-                    StringSession(bot_state['session_string']),
-                    API_ID,
-                    API_HASH,
-                    device_model="Replit Bot",
-                    system_version="Linux",
-                    app_version="1.0",
-                    retry_delay=1,
-                    connection_retries=5,
-                    auto_reconnect=True
-                )
-
-                try:
-                    await client.connect()
-                    if not await client.is_user_authorized():
-                        logger.error("❌ Bot not authorized")
-                        await client.disconnect()
-                        client = None
-                        reconnect_attempts += 1
-                        continue
-
-                    # Reset reconnection counter on successful connection
-                    reconnect_attempts = 0
-
-                    # Load configuration
-                    if not load_channel_config():
-                        logger.error("❌ Failed to load channels")
-                        continue
-
-                    # Load replacements
-                    if not load_replacements():
-                        logger.warning("⚠️ No replacements loaded")
-
-                    # Setup handlers
-                    if not await setup_handlers():
-                        logger.error("❌ Failed to setup handlers")
-                        continue
-
-                    logger.info("\n🤖 Bot is ready")
-                    logger.info(f"📱 Source: {SOURCE_CHANNEL}")
-                    logger.info(f"📱 Destination: {DESTINATION_CHANNEL}")
-                    logger.info(f"📚 Replacements: {len(TEXT_REPLACEMENTS)}")
-
-                except Exception as e:
-                    logger.error(f"❌ Connection error: {str(e)}")
+                # Try to setup client
+                if not await setup_client(bot_state['session_string']):
                     reconnect_attempts += 1
-                    if client:
-                        try:
-                            await client.disconnect()
-                        except:
-                            pass
-                        client = None
-                    await asyncio.sleep(5 * reconnect_attempts)  # Exponential backoff
+                    update_reconnect_attempts(reconnect_attempts)
+                    await asyncio.sleep(5 * (reconnect_attempts + 1))  # Exponential backoff
                     continue
+
+                # Reset reconnect attempts on success
+                update_reconnect_attempts(0)
+                logger.info("✅ Client connected and ready")
+
+                # Load configuration
+                if not load_channel_config():
+                    logger.error("❌ Failed to load channels")
+                    continue
+
+                # Load replacements
+                if not load_replacements():
+                    logger.warning("⚠️ No replacements loaded")
+
+                # Process any queued messages
+                await process_queued_messages()
 
             # Keep the bot running and check state periodically
             await asyncio.sleep(30)  # Check every 30 seconds
@@ -420,37 +465,39 @@ async def main():
                 except:
                     pass
                 client = None
-            await asyncio.sleep(5)  # Wait before retrying
+            await asyncio.sleep(5)
 
-def start_health_server():
-    """Start health check server in a separate thread"""
-    global PORT  # Declare global at start of function
-    try:
-        health_app.run(host='0.0.0.0', port=PORT, debug=False)
-    except Exception as e:
-        logger.error(f"❌ Health check server error: {str(e)}")
-        # Try alternative port if main port is busy
-        try:
-            PORT = 9001  # Use a higher port range
-            health_app.run(host='0.0.0.0', port=PORT, debug=False)
-        except Exception as e:
-            logger.error(f"❌ Health check server retry error: {str(e)}")
+class HealthServer:
+    def __init__(self):
+        self.port = 8084
+        self.max_retries = 3
+        self.current_retry = 0
+
+    def start(self):
+        """Start health check server with port fallback"""
+        while self.current_retry < self.max_retries:
             try:
-                PORT = 9002  # Try one more time
-                health_app.run(host='0.0.0.0', port=PORT, debug=False)
+                logger.info(f"Starting health server on port {self.port}")
+                health_app.run(host='0.0.0.0', port=self.port, debug=False)
+                break
             except Exception as e:
-                logger.error(f"❌ All health check server attempts failed: {str(e)}")
-
+                logger.error(f"❌ Health server error on port {self.port}: {str(e)}")
+                self.current_retry += 1
+                if self.current_retry < self.max_retries:
+                    self.port = 9000 + self.current_retry  # Try ports 9001, 9002
+                    continue
+                logger.error("❌ All health server attempts failed")
+                break
 
 if __name__ == "__main__":
     try:
         # Start health check server in a separate thread
+        health_server = HealthServer()
         health_thread = threading.Thread(
-            target=start_health_server,
+            target=health_server.start,
             daemon=True
         )
         health_thread.start()
-        logger.info(f"✅ Health check server started on port {PORT}")
 
         # Run bot
         loop = asyncio.new_event_loop()
