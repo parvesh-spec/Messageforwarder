@@ -552,6 +552,11 @@ def add_replacement():
                     VALUES (%s, %s)
                 """, (original, replacement))
 
+        # Force reload in main.py
+        import main
+        main.load_replacements()
+        logger.info("✅ New replacement added and reloaded")
+
         return jsonify({'message': 'Replacement added successfully'})
     except Exception as e:
         logger.error(f"❌ Add replacement error: {str(e)}")
@@ -572,6 +577,11 @@ def remove_replacement():
                     WHERE original_text = %s
                 """, (original,))
 
+        # Force reload in main.py
+        import main
+        main.load_replacements()
+        logger.info("✅ Replacement removed and reloaded")
+
         return jsonify({'message': 'Replacement removed successfully'})
     except Exception as e:
         logger.error(f"❌ Remove replacement error: {str(e)}")
@@ -584,6 +594,13 @@ def clear_replacements():
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM text_replacements")
+
+        # Force reload in main.py
+        import main
+        main.TEXT_REPLACEMENTS.clear()
+        main.load_replacements()
+
+        logger.info("✅ All replacements cleared and reloaded")
         return jsonify({'message': 'All replacements cleared'})
     except Exception as e:
         logger.error(f"❌ Clear replacements error: {str(e)}")

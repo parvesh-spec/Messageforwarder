@@ -17,7 +17,7 @@ def health_check():
     return jsonify({"status": "ok"}), 200
 
 # Set the health check server to run on a different port
-PORT = 8080
+PORT = 8081  # Changed from 8080
 
 # Set up logging
 logging.basicConfig(
@@ -109,18 +109,24 @@ def load_replacements():
             return False
 
         with conn.cursor(cursor_factory=DictCursor) as cur:
+            # Clear existing replacements first
+            TEXT_REPLACEMENTS.clear()
+
             cur.execute("""
                 SELECT original_text, replacement_text 
                 FROM text_replacements 
                 ORDER BY LENGTH(original_text) DESC
             """)
-            TEXT_REPLACEMENTS = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
+
+            for row in cur.fetchall():
+                TEXT_REPLACEMENTS[row['original_text']] = row['replacement_text']
+
             logger.info(f"✅ Loaded {len(TEXT_REPLACEMENTS)} replacements")
             return True
 
     except Exception as e:
         logger.error(f"❌ Replacements error: {str(e)}")
-        TEXT_REPLACEMENTS = {}
+        TEXT_REPLACEMENTS.clear()
         return False
     finally:
         if conn:
@@ -128,7 +134,10 @@ def load_replacements():
 
 def apply_text_replacements(text):
     """Apply text replacements to message"""
-    if not text or not TEXT_REPLACEMENTS:
+    # Always reload replacements before applying
+    load_replacements()
+
+    if not text:
         return text
 
     result = text
@@ -136,6 +145,7 @@ def apply_text_replacements(text):
         if original in result:
             result = result.replace(original, replacement)
             logger.info(f"✅ Replaced: {original} → {replacement}")
+
     return result
 
 async def setup_client():
@@ -145,7 +155,7 @@ async def setup_client():
         # Try to get SESSION_STRING from environment if not already set
         if not SESSION_STRING:
             SESSION_STRING = os.getenv('SESSION_STRING')
-            
+
         if not SESSION_STRING:
             logger.warning("⚠️ No session string provided, serving health checks only")
             # Start health check server when no session is available
@@ -345,16 +355,23 @@ async def main():
             client = None
         return True
 
+def start_health_server():
+    """Start health check server in a separate thread"""
+    try:
+        health_app.run(host='0.0.0.0', port=PORT, debug=False)
+    except Exception as e:
+        logger.error(f"❌ Health check server error: {str(e)}")
+
 if __name__ == "__main__":
     try:
         # Start health check server in a separate thread
         health_thread = threading.Thread(
-            target=lambda: health_app.run(host='0.0.0.0', port=PORT, debug=False),
+            target=start_health_server,
             daemon=True
         )
         health_thread.start()
         logger.info(f"✅ Health check server started on port {PORT}")
-        
+
         # Run bot
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -369,3 +386,6 @@ if __name__ == "__main__":
 
     except Exception as e:
         logger.error(f"❌ Fatal error: {str(e)}")
+        # Ensure the bot still runs even if health check fails
+        if not SESSION_STRING:
+            logger.warning("⚠️ No session string provided, waiting for configuration")
