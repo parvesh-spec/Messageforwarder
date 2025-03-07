@@ -16,6 +16,9 @@ health_app = Flask(__name__)
 def health_check():
     return jsonify({"status": "ok"}), 200
 
+# Set the health check server to run on a different port
+PORT = 8080
+
 # Set up logging
 logging.basicConfig(
     level=logging.DEBUG,
@@ -146,7 +149,7 @@ async def setup_client():
         if not SESSION_STRING:
             logger.warning("⚠️ No session string provided, serving health checks only")
             # Start health check server when no session is available
-            health_app.run(host='0.0.0.0', port=5000)
+            health_app.run(host='0.0.0.0', port=PORT)
             return False
 
         # Create new client instance with session
@@ -346,11 +349,11 @@ if __name__ == "__main__":
     try:
         # Start health check server in a separate thread
         health_thread = threading.Thread(
-            target=lambda: health_app.run(host='0.0.0.0', port=5000, debug=False),
+            target=lambda: health_app.run(host='0.0.0.0', port=PORT, debug=False),
             daemon=True
         )
         health_thread.start()
-        logger.info("✅ Health check server started on port 5000")
+        logger.info(f"✅ Health check server started on port {PORT}")
         
         # Run bot
         loop = asyncio.new_event_loop()
