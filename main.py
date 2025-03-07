@@ -187,27 +187,29 @@ def apply_text_replacements(text):
 
 async def setup_client():
     """Initialize Telegram client with session string"""
-    global client, SESSION_STRING
+    global client
     try:
-        #Try to get bot state from database
+        # Try to get bot state from database
         bot_state = get_bot_state()
-        if bot_state:
-            SESSION_STRING = bot_state['session_string']
+        if not bot_state:
+            logger.warning("⚠️ No bot state found, serving health checks only")
+            return False
 
-        if not SESSION_STRING:
+        if not bot_state['session_string']:
             logger.warning("⚠️ No session string provided, serving health checks only")
-            # Start health check server when no session is available
-            health_app.run(host='0.0.0.0', port=PORT)
             return False
 
         # Create new client instance with session
         client = TelegramClient(
-            StringSession(SESSION_STRING),
+            StringSession(bot_state['session_string']),
             API_ID,
             API_HASH,
             device_model="Replit Bot",
             system_version="Linux",
-            app_version="1.0"
+            app_version="1.0",
+            retry_delay=1,  # Shorter retry delay
+            connection_retries=5,  # More retries
+            auto_reconnect=True  # Enable auto reconnect
         )
 
         # Connect and verify authorization
@@ -327,6 +329,10 @@ async def main():
     """Main bot function"""
     global client, SOURCE_CHANNEL, DESTINATION_CHANNEL
 
+    # Initialize reconnection counter
+    reconnect_attempts = 0
+    max_reconnect_attempts = 5
+
     while True:  # Keep checking for bot state
         try:
             # Get current bot state
@@ -342,40 +348,66 @@ async def main():
 
             # Setup client if needed
             if not client or not client.is_connected():
+                if reconnect_attempts >= max_reconnect_attempts:
+                    logger.error("❌ Max reconnection attempts reached, waiting longer...")
+                    await asyncio.sleep(60)  # Wait longer before trying again
+                    reconnect_attempts = 0
+                    continue
+
                 client = TelegramClient(
                     StringSession(bot_state['session_string']),
                     API_ID,
                     API_HASH,
                     device_model="Replit Bot",
                     system_version="Linux",
-                    app_version="1.0"
+                    app_version="1.0",
+                    retry_delay=1,
+                    connection_retries=5,
+                    auto_reconnect=True
                 )
 
-                await client.connect()
-                if not await client.is_user_authorized():
-                    logger.error("❌ Bot not authorized")
-                    await client.disconnect()
-                    client = None
+                try:
+                    await client.connect()
+                    if not await client.is_user_authorized():
+                        logger.error("❌ Bot not authorized")
+                        await client.disconnect()
+                        client = None
+                        reconnect_attempts += 1
+                        continue
+
+                    # Reset reconnection counter on successful connection
+                    reconnect_attempts = 0
+
+                    # Load configuration
+                    if not load_channel_config():
+                        logger.error("❌ Failed to load channels")
+                        continue
+
+                    # Load replacements
+                    if not load_replacements():
+                        logger.warning("⚠️ No replacements loaded")
+
+                    # Setup handlers
+                    if not await setup_handlers():
+                        logger.error("❌ Failed to setup handlers")
+                        continue
+
+                    logger.info("\n🤖 Bot is ready")
+                    logger.info(f"📱 Source: {SOURCE_CHANNEL}")
+                    logger.info(f"📱 Destination: {DESTINATION_CHANNEL}")
+                    logger.info(f"📚 Replacements: {len(TEXT_REPLACEMENTS)}")
+
+                except Exception as e:
+                    logger.error(f"❌ Connection error: {str(e)}")
+                    reconnect_attempts += 1
+                    if client:
+                        try:
+                            await client.disconnect()
+                        except:
+                            pass
+                        client = None
+                    await asyncio.sleep(5 * reconnect_attempts)  # Exponential backoff
                     continue
-
-                # Load configuration
-                if not load_channel_config():
-                    logger.error("❌ Failed to load channels")
-                    continue
-
-                # Load replacements
-                if not load_replacements():
-                    logger.warning("⚠️ No replacements loaded")
-
-                # Setup handlers
-                if not await setup_handlers():
-                    logger.error("❌ Failed to setup handlers")
-                    continue
-
-                logger.info("\n🤖 Bot is ready")
-                logger.info(f"📱 Source: {SOURCE_CHANNEL}")
-                logger.info(f"📱 Destination: {DESTINATION_CHANNEL}")
-                logger.info(f"📚 Replacements: {len(TEXT_REPLACEMENTS)}")
 
             # Keep the bot running and check state periodically
             await asyncio.sleep(30)  # Check every 30 seconds
@@ -408,6 +440,7 @@ def start_health_server():
                 health_app.run(host='0.0.0.0', port=PORT, debug=False)
             except Exception as e:
                 logger.error(f"❌ All health check server attempts failed: {str(e)}")
+
 
 if __name__ == "__main__":
     try:
