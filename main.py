@@ -16,8 +16,13 @@ health_app = Flask(__name__)
 def health_check():
     return jsonify({"status": "ok"}), 200
 
-# Set the health check server to run on a different port
-PORT = 8081  # Changed from 8080
+# Global variables
+MESSAGE_IDS = {}  # source_msg_id: destination_msg_id mapping
+TEXT_REPLACEMENTS = {}
+SOURCE_CHANNEL = None
+DESTINATION_CHANNEL = None
+client = None
+PORT = 8084  # Health check server port
 
 # Set up logging
 logging.basicConfig(
@@ -25,13 +30,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Global variables
-MESSAGE_IDS = {}  # source_msg_id: destination_msg_id mapping
-TEXT_REPLACEMENTS = {}
-SOURCE_CHANNEL = None
-DESTINATION_CHANNEL = None
-client = None
 
 # API credentials
 API_ID = int(os.getenv('API_ID', '27202142'))
@@ -357,10 +355,17 @@ async def main():
 
 def start_health_server():
     """Start health check server in a separate thread"""
+    global PORT  # Declare global at start of function
     try:
         health_app.run(host='0.0.0.0', port=PORT, debug=False)
     except Exception as e:
         logger.error(f"❌ Health check server error: {str(e)}")
+        # Try alternative port if main port is busy
+        try:
+            PORT = 8085  # Use global PORT
+            health_app.run(host='0.0.0.0', port=PORT, debug=False)
+        except Exception as e:
+            logger.error(f"❌ Health check server retry error: {str(e)}")
 
 if __name__ == "__main__":
     try:

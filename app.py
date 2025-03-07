@@ -65,6 +65,20 @@ class EventLoopManager:
         return cls._loop
 
     @classmethod
+    def ensure_loop(cls):
+        """Ensure we have a valid event loop"""
+        with cls._lock:
+            try:
+                loop = cls.get_loop()
+                if not loop.is_running():
+                    asyncio.set_event_loop(loop)
+                return loop
+            except Exception as e:
+                logger.error(f"❌ Loop setup error: {str(e)}")
+                cls.reset()
+                return cls.get_loop()
+
+    @classmethod
     def reset(cls):
         with cls._lock:
             try:
@@ -78,19 +92,6 @@ class EventLoopManager:
                 cls._loop = None
                 cls._client = None
                 logger.info("✅ Reset event loop")
-
-    @classmethod
-    def ensure_loop(cls):
-        """Ensure we have a valid event loop"""
-        try:
-            loop = cls.get_loop()
-            if not loop.is_running():
-                asyncio.set_event_loop(loop)
-            return loop
-        except Exception as e:
-            logger.error(f"❌ Loop setup error: {str(e)}")
-            cls.reset()
-            return cls.get_loop()
 
 # Database connection context manager
 @contextmanager
@@ -335,6 +336,9 @@ async def verify_otp():
 @async_route
 async def dashboard():
     try:
+        # Create new event loop for this request
+        loop = EventLoopManager.ensure_loop()
+
         # Verify session string exists
         if not session.get('session_string'):
             logger.error("❌ No session string found")
