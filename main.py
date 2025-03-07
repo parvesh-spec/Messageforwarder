@@ -22,7 +22,7 @@ TEXT_REPLACEMENTS = {}
 SOURCE_CHANNEL = None
 DESTINATION_CHANNEL = None
 client = None
-PORT = 8084  # Health check server port
+PORT = 8084  # Use consistent port for health check
 
 # Set up logging
 logging.basicConfig(
@@ -203,15 +203,36 @@ async def setup_client():
     try:
         if not phone_number:
             logger.warning("⚠️ No phone number provided, serving health checks only")
-            health_app.run(host='0.0.0.0', port=PORT)
             return False
 
-        session_string = load_session_from_db(phone_number)
+        # Get session from database
+        conn = None
+        session_string = None
+        try:
+            conn = get_db()
+            if conn:
+                with conn.cursor(cursor_factory=DictCursor) as cur:
+                    cur.execute("""
+                        SELECT session_string 
+                        FROM telethon_sessions 
+                        WHERE phone_number = %s 
+                        ORDER BY updated_at DESC 
+                        LIMIT 1
+                    """, (phone_number,))
+                    result = cur.fetchone()
+                    if result:
+                        session_string = result['session_string']
+        except Exception as e:
+            logger.error(f"❌ Database error: {str(e)}")
+        finally:
+            if conn:
+                release_db(conn)
+
         if not session_string:
-            logger.warning("⚠️ No session string found in DB for this phone number, serving health checks only")
-            health_app.run(host='0.0.0.0', port=PORT)
+            logger.warning("⚠️ No session string found in database")
             return False
 
+        # Create and setup client
         client = TelegramClient(
             StringSession(session_string),
             API_ID,
@@ -404,17 +425,6 @@ def start_health_server():
         health_app.run(host='0.0.0.0', port=PORT, debug=False)
     except Exception as e:
         logger.error(f"❌ Health check server error: {str(e)}")
-        # Try alternative port if main port is busy
-        try:
-            PORT = 9001  # Use a higher port range
-            health_app.run(host='0.0.0.0', port=PORT, debug=False)
-        except Exception as e:
-            logger.error(f"❌ Health check server retry error: {str(e)}")
-            try:
-                PORT = 9002  # Try one more time
-                health_app.run(host='0.0.0.0', port=PORT, debug=False)
-            except Exception as e:
-                logger.error(f"❌ All health check server attempts failed: {str(e)}")
 
 
 if __name__ == "__main__":
