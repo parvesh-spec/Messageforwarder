@@ -314,6 +314,19 @@ async def main():
         # Keep the bot running
         try:
             while SESSION_STRING:  # Only run while we have a valid session
+                # Check if bot should still be running
+                conn = get_db()
+                if conn:
+                    try:
+                        with conn.cursor(cursor_factory=DictCursor) as cur:
+                            cur.execute("SELECT is_running FROM bot_status ORDER BY updated_at DESC LIMIT 1")
+                            result = cur.fetchone()
+                            if not result or not result['is_running']:
+                                logger.info("👋 Bot stopped by user")
+                                break
+                    finally:
+                        release_db(conn)
+
                 # Check client connection
                 if not client or not client.is_connected():
                     logger.error("❌ Client disconnected, attempting to reconnect")
@@ -371,6 +384,7 @@ def start_health_server():
                 health_app.run(host='0.0.0.0', port=PORT, debug=False)
             except Exception as e:
                 logger.error(f"❌ All health check server attempts failed: {str(e)}")
+
 
 if __name__ == "__main__":
     try:

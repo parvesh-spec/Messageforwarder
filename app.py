@@ -44,6 +44,52 @@ db_pool = psycopg2.pool.ThreadedConnectionPool(
 # Database lock for thread safety
 db_lock = threading.Lock()
 
+# Database connection context manager
+@contextmanager
+def get_db():
+    conn = db_pool.getconn()
+    try:
+        conn.autocommit = True
+        yield conn
+    finally:
+        db_pool.putconn(conn)
+
+# Create tables on startup
+def create_tables():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS bot_status (
+                    id SERIAL PRIMARY KEY,
+                    is_running BOOLEAN NOT NULL DEFAULT false,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+# Call create_tables on startup (after get_db is defined)
+create_tables()
+
+# Authentication decorator
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Async route decorator
+def async_route(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        try:
+            loop = EventLoopManager.get_loop()
+            return loop.run_until_complete(f(*args, **kwargs))
+        except Exception as e:
+            logger.error(f"❌ Async route error: {str(e)}")
+            raise
+    return wrapped
+
 # Event Loop Manager
 class EventLoopManager:
     _instance = None
@@ -92,35 +138,6 @@ class EventLoopManager:
                 cls._loop = None
                 cls._client = None
                 logger.info("✅ Reset event loop")
-
-# Database connection context manager
-@contextmanager
-def get_db():
-    conn = db_pool.getconn()
-    try:
-        conn.autocommit = True
-        yield conn
-    finally:
-        db_pool.putconn(conn)
-
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('logged_in'):
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-def async_route(f):
-    @wraps(f)
-    def wrapped(*args, **kwargs):
-        try:
-            loop = EventLoopManager.get_loop()
-            return loop.run_until_complete(f(*args, **kwargs))
-        except Exception as e:
-            logger.error(f"❌ Async route error: {str(e)}")
-            raise
-    return wrapped
 
 # Telegram client manager
 class TelegramManager:
@@ -482,6 +499,17 @@ def toggle_bot():
                 main.SOURCE_CHANNEL = source
                 main.DESTINATION_CHANNEL = destination
 
+                # Update database status
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO bot_status (is_running)
+                            VALUES (true)
+                            ON CONFLICT (id) DO UPDATE 
+                            SET is_running = true,
+                                updated_at = CURRENT_TIMESTAMP
+                        """)
+
                 # Start bot in a daemon thread
                 def start_bot():
                     try:
@@ -527,6 +555,17 @@ def toggle_bot():
                 return jsonify({'error': str(e)}), 500
         else:
             try:
+                # Update database status
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO bot_status (is_running)
+                            VALUES (false)
+                            ON CONFLICT (id) DO UPDATE 
+                            SET is_running = false,
+                                updated_at = CURRENT_TIMESTAMP
+                        """)
+
                 # Stop bot by clearing its session
                 main.SESSION_STRING = None
                 main.SOURCE_CHANNEL = None
@@ -640,6 +679,12 @@ def clear_replacements():
     except Exception as e:
         logger.error(f"❌ Clear replacements error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/async_test')
+@async_route
+async def async_test():
+    await asyncio.sleep(1)
+    return "Hello, async world!"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
