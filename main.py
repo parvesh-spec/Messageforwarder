@@ -8,8 +8,6 @@ import asyncio
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from flask import Flask, jsonify
-import time
-from collections import deque
 
 # Create a small Flask app for health checks
 health_app = Flask(__name__)
@@ -19,12 +17,12 @@ def health_check():
     return jsonify({"status": "ok"}), 200
 
 # Global variables
-MESSAGE_QUEUE = deque(maxlen=1000)  # Store messages when client is reconnecting
 MESSAGE_IDS = {}  # source_msg_id: destination_msg_id mapping
 TEXT_REPLACEMENTS = {}
 SOURCE_CHANNEL = None
 DESTINATION_CHANNEL = None
 client = None
+PORT = 8084  # Health check server port
 
 # Set up logging
 logging.basicConfig(
@@ -37,12 +35,18 @@ logger = logging.getLogger(__name__)
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
+# Telegram session string (to be set by app.py)
+SESSION_STRING = None
+
 # Database connection pool
 db_pool = psycopg2.pool.ThreadedConnectionPool(
     minconn=1,
     maxconn=10,
     dsn=os.getenv('DATABASE_URL')
 )
+
+# Lock for thread safety
+db_lock = threading.Lock()
 
 def get_db():
     """Get database connection from pool"""
@@ -58,72 +62,6 @@ def release_db(conn):
     """Release connection back to pool"""
     if conn:
         db_pool.putconn(conn)
-
-def get_bot_state():
-    """Get current bot state from database"""
-    conn = None
-    try:
-        conn = get_db()
-        if not conn:
-            return None
-
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            # First check if we need to update schema
-            cur.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = 'bot_state' 
-                AND column_name = 'reconnect_attempts'
-            """)
-            if not cur.fetchone():
-                cur.execute("""
-                    ALTER TABLE bot_state 
-                    ADD COLUMN reconnect_attempts INTEGER DEFAULT 0
-                """)
-
-            cur.execute("""
-                SELECT 
-                    session_string, 
-                    source_channel, 
-                    destination_channel, 
-                    is_running,
-                    COALESCE(reconnect_attempts, 0) as reconnect_attempts
-                FROM bot_state
-                WHERE is_running = true
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """)
-            return cur.fetchone()
-    except Exception as e:
-        logger.error(f"❌ Bot state query error: {str(e)}")
-        return None
-    finally:
-        if conn:
-            release_db(conn)
-
-def update_reconnect_attempts(attempts):
-    """Update reconnection attempts counter"""
-    conn = None
-    try:
-        conn = get_db()
-        if not conn:
-            return False
-
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE bot_state 
-                SET reconnect_attempts = %s,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE is_running = true
-            """, (attempts,))
-            conn.commit()  # Ensure changes are committed
-        return True
-    except Exception as e:
-        logger.error(f"❌ Reconnect attempts update error: {str(e)}")
-        return False
-    finally:
-        if conn:
-            release_db(conn)
 
 def load_channel_config():
     """Load channel configuration from database"""
@@ -194,6 +132,9 @@ def load_replacements():
 
 def apply_text_replacements(text):
     """Apply text replacements to message"""
+    # Always reload replacements before applying
+    load_replacements()
+
     if not text:
         return text
 
@@ -205,75 +146,31 @@ def apply_text_replacements(text):
 
     return result
 
-async def process_queued_messages():
-    """Process any messages that were queued during client disconnection"""
-    global MESSAGE_QUEUE
-
-    if not client or not client.is_connected():
-        return
-
-    while MESSAGE_QUEUE:
-        try:
-            message = MESSAGE_QUEUE.popleft()
-            text = message.get('text', '')
-            entities = message.get('entities', None)
-
-            if text and TEXT_REPLACEMENTS:
-                text = apply_text_replacements(text)
-
-            dest_id = str(DESTINATION_CHANNEL)
-            if not dest_id.startswith('-100'):
-                dest_id = f"-100{dest_id.lstrip('-')}"
-
-            dest_channel = await client.get_entity(int(dest_id))
-            sent_message = await client.send_message(
-                dest_channel,
-                text,
-                formatting_entities=entities
-            )
-            MESSAGE_IDS[message['id']] = sent_message.id
-            logger.info("✅ Queued message processed")
-        except Exception as e:
-            logger.error(f"❌ Error processing queued message: {str(e)}")
-            # Put message back in queue if processing failed
-            MESSAGE_QUEUE.appendleft(message)
-            break
-
-async def setup_client(session_string=None):
+async def setup_client():
     """Initialize Telegram client with session string"""
-    global client
+    global client, SESSION_STRING
     try:
-        # Check if we already have a working client
-        if client and client.is_connected() and await client.is_user_authorized():
-            return True
+        # Try to get SESSION_STRING from environment if not already set
+        if not SESSION_STRING:
+            SESSION_STRING = os.getenv('SESSION_STRING')
 
-        # Get bot state if no session string provided
-        if not session_string:
-            bot_state = get_bot_state()
-            if not bot_state or not bot_state['is_running']:
-                logger.warning("⚠️ No active bot state found")
-                return False
-            session_string = bot_state['session_string']
-
-        if not session_string:
-            logger.warning("⚠️ No session string available")
+        if not SESSION_STRING:
+            logger.warning("⚠️ No session string provided, serving health checks only")
+            # Start health check server when no session is available
+            health_app.run(host='0.0.0.0', port=PORT)
             return False
 
-        # Create new client instance with persistent connection settings
+        # Create new client instance with session
         client = TelegramClient(
-            StringSession(session_string),
+            StringSession(SESSION_STRING),
             API_ID,
             API_HASH,
             device_model="Replit Bot",
             system_version="Linux",
-            app_version="1.0",
-            retry_delay=1,
-            connection_retries=None,  # Infinite retries
-            auto_reconnect=True,
-            request_retries=10,
-            flood_sleep_threshold=60  # Increase flood wait handling
+            app_version="1.0"
         )
 
+        # Connect and verify authorization
         await client.connect()
         if not await client.is_user_authorized():
             logger.error("❌ Bot not authorized")
@@ -281,13 +178,31 @@ async def setup_client(session_string=None):
             client = None
             return False
 
-        # Setup event handlers with improved error handling and persistence
+        me = await client.get_me()
+        logger.info(f"✅ Bot running as: {me.first_name} (ID: {me.id})")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Client setup error: {str(e)}")
+        if client:
+            try:
+                await client.disconnect()
+            except:
+                pass
+            client = None
+        return False
+
+async def setup_handlers():
+    """Set up message handlers"""
+    global client
+    try:
         @client.on(events.NewMessage())
         async def handle_new_message(event):
             try:
                 if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
                     return
 
+                # Format channel IDs
                 chat_id = str(event.chat_id)
                 source_id = str(SOURCE_CHANNEL)
                 if not chat_id.startswith('-100'):
@@ -295,53 +210,32 @@ async def setup_client(session_string=None):
                 if not source_id.startswith('-100'):
                     source_id = f"-100{source_id.lstrip('-')}"
 
+                # Verify source channel
                 if chat_id != source_id:
                     return
 
-                # Queue message if client is reconnecting
-                if not client or not client.is_connected():
-                    MESSAGE_QUEUE.append({
-                        'id': event.message.id,
-                        'text': event.message.text,
-                        'entities': event.message.entities
-                    })
-                    logger.info("✅ Message queued for later processing")
-                    return
-
+                # Process message
                 message_text = event.message.text if event.message.text else ""
                 if message_text and TEXT_REPLACEMENTS:
                     message_text = apply_text_replacements(message_text)
 
+                # Format destination channel ID
                 dest_id = str(DESTINATION_CHANNEL)
                 if not dest_id.startswith('-100'):
                     dest_id = f"-100{dest_id.lstrip('-')}"
 
-                for retry in range(3):  # Add retries for sending messages
-                    try:
-                        dest_channel = await client.get_entity(int(dest_id))
-                        sent_message = await client.send_message(
-                            dest_channel,
-                            message_text,
-                            formatting_entities=event.message.entities
-                        )
-                        MESSAGE_IDS[event.message.id] = sent_message.id
-                        logger.info("✅ Message forwarded")
-                        break
-                    except Exception as e:
-                        if retry == 2:  # Last retry
-                            raise
-                        await asyncio.sleep(1)  # Wait before retry
+                # Send to destination
+                dest_channel = await client.get_entity(int(dest_id))
+                sent_message = await client.send_message(
+                    dest_channel,
+                    message_text,
+                    formatting_entities=event.message.entities
+                )
+                MESSAGE_IDS[event.message.id] = sent_message.id
+                logger.info("✅ Message forwarded")
 
             except Exception as e:
                 logger.error(f"❌ Message handler error: {str(e)}")
-                # Queue message on error
-                if event.message:
-                    MESSAGE_QUEUE.append({
-                        'id': event.message.id,
-                        'text': event.message.text,
-                        'entities': event.message.entities
-                    })
-                    logger.info("✅ Message queued after error")
 
         @client.on(events.MessageEdited())
         async def handle_edit(event):
@@ -383,121 +277,110 @@ async def setup_client(session_string=None):
             except Exception as e:
                 logger.error(f"❌ Edit handler error: {str(e)}")
 
-        @client.on(events.Raw())
-        async def handle_disconnect(event):
-            if isinstance(event, events.ConnectionLost):
-                logger.warning("⚠️ Connection lost, will auto-reconnect...")
-
-        me = await client.get_me()
-        logger.info(f"✅ Bot running as: {me.first_name} (ID: {me.id})")
         return True
 
     except Exception as e:
-        logger.error(f"❌ Client setup error: {str(e)}")
-        if client:
-            try:
-                await client.disconnect()
-            except:
-                pass
-            client = None
+        logger.error(f"❌ Handler setup error: {str(e)}")
         return False
-
-class HealthServer:
-    def __init__(self):
-        self.port = 8084
-        self.max_retries = 3
-        self.current_retry = 0
-
-    def start(self):
-        """Start health check server with port fallback"""
-        while self.current_retry < self.max_retries:
-            try:
-                logger.info(f"Starting health server on port {self.port}")
-                health_app.run(host='0.0.0.0', port=self.port)
-                break
-            except Exception as e:
-                logger.error(f"❌ Health server error on port {self.port}: {str(e)}")
-                self.current_retry += 1
-                if self.current_retry < self.max_retries:
-                    self.port = 9000 + self.current_retry  # Try ports 9001, 9002
-                    continue
-                logger.error("❌ All health server attempts failed")
-                break
 
 async def main():
     """Main bot function"""
     global client, SOURCE_CHANNEL, DESTINATION_CHANNEL
 
-    while True:  # Keep checking for bot state
+    try:
+        # Setup client
+        if not await setup_client():
+            return False
+
+        # Load configuration
+        if not load_channel_config():
+            logger.error("❌ Failed to load channels")
+            return False
+
+        # Load replacements
+        if not load_replacements():
+            logger.warning("⚠️ No replacements loaded")
+
+        # Setup handlers
+        if not await setup_handlers():
+            logger.error("❌ Failed to setup handlers")
+            return False
+
+        logger.info("\n🤖 Bot is ready")
+        logger.info(f"📱 Source: {SOURCE_CHANNEL}")
+        logger.info(f"📱 Destination: {DESTINATION_CHANNEL}")
+        logger.info(f"📚 Replacements: {len(TEXT_REPLACEMENTS)}")
+
+        # Keep the bot running
         try:
-            # Get current bot state
-            bot_state = get_bot_state()
-            if not bot_state or not bot_state['is_running']:
-                logger.info("⏸️ Bot is paused")
-                await asyncio.sleep(5)  # Check every 5 seconds
-                continue
+            while SESSION_STRING:  # Only run while we have a valid session
+                # Check client connection
+                if not client or not client.is_connected():
+                    logger.error("❌ Client disconnected, attempting to reconnect")
+                    if not await setup_client():
+                        break
 
-            # Update global variables
-            SOURCE_CHANNEL = bot_state['source_channel']
-            DESTINATION_CHANNEL = bot_state['destination_channel']
-            reconnect_attempts = bot_state['reconnect_attempts']
+                # Reload configuration and replacements
+                if load_channel_config():
+                    logger.info("✅ Channel config refreshed")
+                if load_replacements():
+                    logger.info("✅ Replacements refreshed")
 
-            # Check reconnect attempts
-            if reconnect_attempts >= 10:
-                logger.error("❌ Max reconnection attempts reached")
-                with get_db() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("UPDATE bot_state SET is_running = false WHERE is_running = true")
-                await asyncio.sleep(60)  # Wait before allowing new attempts
-                continue
+                # Wait before next check
+                await asyncio.sleep(30)  # Check every 30 seconds
 
-            # Setup client if needed
-            if not client or not client.is_connected():
-                # Try to setup client
-                if not await setup_client(bot_state['session_string']):
-                    reconnect_attempts += 1
-                    update_reconnect_attempts(reconnect_attempts)
-                    await asyncio.sleep(5 * (reconnect_attempts + 1))  # Exponential backoff
-                    continue
-
-                # Reset reconnect attempts on success
-                update_reconnect_attempts(0)
-                logger.info("✅ Client connected and ready")
-
-                # Load configuration
-                if not load_channel_config():
-                    logger.error("❌ Failed to load channels")
-                    continue
-
-                # Load replacements
-                if not load_replacements():
-                    logger.warning("⚠️ No replacements loaded")
-
-                # Process any queued messages
-                await process_queued_messages()
-
-            # Keep the bot running and check state periodically
-            await asyncio.sleep(30)  # Check every 30 seconds
-
+        except KeyboardInterrupt:
+            logger.info("👋 Bot stopped by user")
+            return True
+        except asyncio.CancelledError:
+            logger.info("👋 Bot stopping...")
+            return True
         except Exception as e:
-            logger.error(f"❌ Main loop error: {str(e)}")
-            if client:
-                try:
+            logger.error(f"❌ Runtime error: {str(e)}")
+            return False
+
+    except Exception as e:
+        logger.error(f"❌ Bot error: {str(e)}")
+        return False
+
+    finally:
+        if client:
+            try:
+                if client.is_connected():
                     await client.disconnect()
-                except:
-                    pass
-                client = None
-            await asyncio.sleep(5)
+            except:
+                pass
+            client = None
+        return True
+
+def start_health_server():
+    """Start health check server in a separate thread"""
+    global PORT  # Declare global at start of function
+    try:
+        health_app.run(host='0.0.0.0', port=PORT, debug=False)
+    except Exception as e:
+        logger.error(f"❌ Health check server error: {str(e)}")
+        # Try alternative port if main port is busy
+        try:
+            PORT = 9001  # Use a higher port range
+            health_app.run(host='0.0.0.0', port=PORT, debug=False)
+        except Exception as e:
+            logger.error(f"❌ Health check server retry error: {str(e)}")
+            try:
+                PORT = 9002  # Try one more time
+                health_app.run(host='0.0.0.0', port=PORT, debug=False)
+            except Exception as e:
+                logger.error(f"❌ All health check server attempts failed: {str(e)}")
 
 if __name__ == "__main__":
     try:
         # Start health check server in a separate thread
-        health_server = HealthServer()
         health_thread = threading.Thread(
-            target=health_server.start,
+            target=start_health_server,
             daemon=True
         )
         health_thread.start()
+        logger.info(f"✅ Health check server started on port {PORT}")
 
         # Run bot
         loop = asyncio.new_event_loop()
@@ -513,3 +396,6 @@ if __name__ == "__main__":
 
     except Exception as e:
         logger.error(f"❌ Fatal error: {str(e)}")
+        # Ensure the bot still runs even if health check fails
+        if not SESSION_STRING:
+            logger.warning("⚠️ No session string provided, waiting for configuration")
