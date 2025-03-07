@@ -442,19 +442,10 @@ def toggle_bot():
         import main
         if status:
             try:
-                # Stop any existing bot instance
-                if session.get('bot_running'):
-                    main.SESSION_STRING = None
-                    main.SOURCE_CHANNEL = None
-                    main.DESTINATION_CHANNEL = None
-                    EventLoopManager.reset()
-                    logger.info("✅ Previous bot instance stopped")
-
-                # Configure new bot instance
+                # Share session with main.py
                 main.SESSION_STRING = session_string
                 main.SOURCE_CHANNEL = source
                 main.DESTINATION_CHANNEL = destination
-                logger.info("✅ Bot configuration updated")
 
                 # Start bot in a daemon thread
                 def start_bot():
@@ -464,21 +455,26 @@ def toggle_bot():
                         asyncio.set_event_loop(loop)
 
                         try:
-                            # Start the bot
                             loop.run_until_complete(main.main())
                         except Exception as e:
-                            logger.error(f"❌ Bot runtime error: {str(e)}")
+                            logger.error(f"❌ Bot startup error: {str(e)}")
                         finally:
                             try:
-                                # Clean up resources
+                                # Cleanup loop
                                 if loop.is_running():
                                     loop.stop()
                                 loop.close()
-                            except Exception as e:
-                                logger.error(f"❌ Loop cleanup error: {str(e)}")
-
+                            except:
+                                pass
                     except Exception as e:
-                        logger.error(f"❌ Bot thread error: {str(e)}")
+                        logger.error(f"❌ Thread error: {str(e)}")
+
+                # Stop any existing bot instance
+                if session.get('bot_running'):
+                    main.SESSION_STRING = None
+                    main.SOURCE_CHANNEL = None
+                    main.DESTINATION_CHANNEL = None
+                    EventLoopManager.reset()
 
                 # Start new bot thread
                 bot_thread = threading.Thread(target=start_bot, daemon=True)
@@ -493,12 +489,6 @@ def toggle_bot():
 
             except Exception as e:
                 logger.error(f"❌ Bot start error: {str(e)}")
-                # Reset bot state on error
-                main.SESSION_STRING = None
-                main.SOURCE_CHANNEL = None
-                main.DESTINATION_CHANNEL = None
-                session['bot_running'] = False
-                EventLoopManager.reset()
                 return jsonify({'error': str(e)}), 500
         else:
             try:
@@ -600,13 +590,4 @@ def clear_replacements():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    # Set debug mode off for production
-    app.config['DEBUG'] = False
-
-    # Enable HTTPS redirect and secure cookies
-    if not app.debug:
-        app.config['SESSION_COOKIE_SECURE'] = True
-        app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-
-    # Always serve on port 5000 for Replit
     app.run(host='0.0.0.0', port=5000)
