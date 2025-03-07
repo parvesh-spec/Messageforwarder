@@ -7,6 +7,14 @@ from psycopg2 import pool
 import asyncio
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from flask import Flask, jsonify
+
+# Create a small Flask app for health checks
+health_app = Flask(__name__)
+
+@health_app.route('/')
+def health_check():
+    return jsonify({"status": "ok"}), 200
 
 # Set up logging
 logging.basicConfig(
@@ -136,7 +144,9 @@ async def setup_client():
             SESSION_STRING = os.getenv('SESSION_STRING')
             
         if not SESSION_STRING:
-            logger.error("❌ No session string provided")
+            logger.warning("⚠️ No session string provided, serving health checks only")
+            # Start health check server when no session is available
+            health_app.run(host='0.0.0.0', port=5000)
             return False
 
         # Create new client instance with session
@@ -334,6 +344,14 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        # Start health check server in a separate thread
+        health_thread = threading.Thread(
+            target=lambda: health_app.run(host='0.0.0.0', port=5000, debug=False),
+            daemon=True
+        )
+        health_thread.start()
+        logger.info("✅ Health check server started on port 5000")
+        
         # Run bot
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
