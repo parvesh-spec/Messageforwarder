@@ -35,9 +35,6 @@ logger = logging.getLogger(__name__)
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
-# Telegram session string (to be set by app.py)
-SESSION_STRING = None
-
 # Database connection pool
 db_pool = psycopg2.pool.ThreadedConnectionPool(
     minconn=1,
@@ -146,23 +143,77 @@ def apply_text_replacements(text):
 
     return result
 
-async def setup_client():
-    """Initialize Telegram client with session string"""
-    global client, SESSION_STRING
+def load_session_from_db(phone_number):
+    """Load session string from database"""
+    conn = None
     try:
-        # Try to get SESSION_STRING from environment if not already set
-        if not SESSION_STRING:
-            SESSION_STRING = os.getenv('SESSION_STRING')
+        conn = get_db()
+        if not conn:
+            return None
 
-        if not SESSION_STRING:
-            logger.warning("⚠️ No session string provided, serving health checks only")
-            # Start health check server when no session is available
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT session_string 
+                FROM telethon_sessions 
+                WHERE phone_number = %s 
+                ORDER BY updated_at DESC 
+                LIMIT 1
+            """, (phone_number,))
+            result = cur.fetchone()
+            return result['session_string'] if result else None
+
+    except Exception as e:
+        logger.error(f"❌ Session load error: {str(e)}")
+        return None
+    finally:
+        if conn:
+            release_db(conn)
+
+def save_session_to_db(phone_number, session_string):
+    """Save session string to database"""
+    conn = None
+    try:
+        conn = get_db()
+        if not conn:
+            return False
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO telethon_sessions (phone_number, session_string)
+                VALUES (%s, %s)
+                ON CONFLICT (phone_number) 
+                DO UPDATE SET 
+                    session_string = EXCLUDED.session_string,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (phone_number, session_string))
+            return True
+
+    except Exception as e:
+        logger.error(f"❌ Session save error: {str(e)}")
+        return False
+    finally:
+        if conn:
+            release_db(conn)
+
+
+async def setup_client():
+    """Initialize Telegram client with session string from DB"""
+    global client
+    phone_number = os.getenv('PHONE_NUMBER')
+    try:
+        if not phone_number:
+            logger.warning("⚠️ No phone number provided, serving health checks only")
             health_app.run(host='0.0.0.0', port=PORT)
             return False
 
-        # Create new client instance with session
+        session_string = load_session_from_db(phone_number)
+        if not session_string:
+            logger.warning("⚠️ No session string found in DB for this phone number, serving health checks only")
+            health_app.run(host='0.0.0.0', port=PORT)
+            return False
+
         client = TelegramClient(
-            StringSession(SESSION_STRING),
+            StringSession(session_string),
             API_ID,
             API_HASH,
             device_model="Replit Bot",
@@ -170,7 +221,6 @@ async def setup_client():
             app_version="1.0"
         )
 
-        # Connect and verify authorization
         await client.connect()
         if not await client.is_user_authorized():
             logger.error("❌ Bot not authorized")
@@ -313,13 +363,7 @@ async def main():
 
         # Keep the bot running
         try:
-            while SESSION_STRING:  # Only run while we have a valid session
-                # Check client connection
-                if not client or not client.is_connected():
-                    logger.error("❌ Client disconnected, attempting to reconnect")
-                    if not await setup_client():
-                        break
-
+            while client and client.is_connected(): #Only run while we have a valid client connection
                 # Reload configuration and replacements
                 if load_channel_config():
                     logger.info("✅ Channel config refreshed")
@@ -372,6 +416,7 @@ def start_health_server():
             except Exception as e:
                 logger.error(f"❌ All health check server attempts failed: {str(e)}")
 
+
 if __name__ == "__main__":
     try:
         # Start health check server in a separate thread
@@ -397,5 +442,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"❌ Fatal error: {str(e)}")
         # Ensure the bot still runs even if health check fails
-        if not SESSION_STRING:
-            logger.warning("⚠️ No session string provided, waiting for configuration")
