@@ -402,6 +402,28 @@ async def setup_client(session_string=None):
             client = None
         return False
 
+class HealthServer:
+    def __init__(self):
+        self.port = 8084
+        self.max_retries = 3
+        self.current_retry = 0
+
+    def start(self):
+        """Start health check server with port fallback"""
+        while self.current_retry < self.max_retries:
+            try:
+                logger.info(f"Starting health server on port {self.port}")
+                health_app.run(host='0.0.0.0', port=self.port)
+                break
+            except Exception as e:
+                logger.error(f"❌ Health server error on port {self.port}: {str(e)}")
+                self.current_retry += 1
+                if self.current_retry < self.max_retries:
+                    self.port = 9000 + self.current_retry  # Try ports 9001, 9002
+                    continue
+                logger.error("❌ All health server attempts failed")
+                break
+
 async def main():
     """Main bot function"""
     global client, SOURCE_CHANNEL, DESTINATION_CHANNEL
@@ -422,7 +444,7 @@ async def main():
 
             # Check reconnect attempts
             if reconnect_attempts >= 10:
-                logger.error("❌ Max reconnection attempts reached, resetting bot state")
+                logger.error("❌ Max reconnection attempts reached")
                 with get_db() as conn:
                     with conn.cursor() as cur:
                         cur.execute("UPDATE bot_state SET is_running = false WHERE is_running = true")
@@ -466,28 +488,6 @@ async def main():
                     pass
                 client = None
             await asyncio.sleep(5)
-
-class HealthServer:
-    def __init__(self):
-        self.port = 8084
-        self.max_retries = 3
-        self.current_retry = 0
-
-    def start(self):
-        """Start health check server with port fallback"""
-        while self.current_retry < self.max_retries:
-            try:
-                logger.info(f"Starting health server on port {self.port}")
-                health_app.run(host='0.0.0.0', port=self.port, debug=False)
-                break
-            except Exception as e:
-                logger.error(f"❌ Health server error on port {self.port}: {str(e)}")
-                self.current_retry += 1
-                if self.current_retry < self.max_retries:
-                    self.port = 9000 + self.current_retry  # Try ports 9001, 9002
-                    continue
-                logger.error("❌ All health server attempts failed")
-                break
 
 if __name__ == "__main__":
     try:
