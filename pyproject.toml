@@ -2,16 +2,16 @@
 name = "repl-nix-workspace"
 version = "0.1.0"
 description = "Add your description here"
-
-[tool.poetry.dependencies]
-python = ">=3.11"
-flask = "^3.1.0"
-flask-login = "^0.6.3"
-flask-session = "^0.8.0"
-hypercorn = "^0.17.3"
-telethon = "^1.39.0"
-asgiref = "^3.8.1"
-psycopg2-binary = "^2.9.10"
-flask-sqlalchemy = "^3.1.1"
-sqlalchemy = "^2.0.38"
-twilio = "^9.4.6"
+requires-python = ">=3.11"
+dependencies = [
+    "flask[async]>=3.1.0",
+    "flask-login>=0.6.3",
+    "flask-session>=0.8.0",
+    "hypercorn>=0.17.3",
+    "telethon>=1.39.0",
+    "asgiref>=3.8.1",
+    "psycopg2-binary>=2.9.10",
+    "flask-sqlalchemy>=3.1.1",
+    "sqlalchemy>=2.0.38",
+    "twilio>=9.4.6",
+]
