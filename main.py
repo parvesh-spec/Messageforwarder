@@ -129,8 +129,12 @@ def apply_text_replacements(text):
 
 async def setup_client():
     """Initialize Telegram client with session string"""
-    global client
+    global client, SESSION_STRING
     try:
+        # Try to get SESSION_STRING from environment if not already set
+        if not SESSION_STRING:
+            SESSION_STRING = os.getenv('SESSION_STRING')
+            
         if not SESSION_STRING:
             logger.error("❌ No session string provided")
             return False
