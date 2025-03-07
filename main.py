@@ -362,10 +362,15 @@ def start_health_server():
         logger.error(f"❌ Health check server error: {str(e)}")
         # Try alternative port if main port is busy
         try:
-            PORT = 8085  # Use global PORT
+            PORT = 9001  # Use a higher port range
             health_app.run(host='0.0.0.0', port=PORT, debug=False)
         except Exception as e:
             logger.error(f"❌ Health check server retry error: {str(e)}")
+            try:
+                PORT = 9002  # Try one more time
+                health_app.run(host='0.0.0.0', port=PORT, debug=False)
+            except Exception as e:
+                logger.error(f"❌ All health check server attempts failed: {str(e)}")
 
 if __name__ == "__main__":
     try:

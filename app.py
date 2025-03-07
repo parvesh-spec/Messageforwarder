@@ -226,10 +226,18 @@ telegram_manager = TelegramManager(
 
 @app.route('/')
 def login():
-    if session.get('logged_in'):
-        logger.info("✅ User already logged in, redirecting to dashboard")
-        return redirect(url_for('dashboard'))
-    return render_template('login.html')
+    try:
+        # Check if user is already logged in
+        if session.get('logged_in') and session.get('session_string'):
+            logger.info("✅ User already logged in, redirecting to dashboard")
+            return redirect(url_for('dashboard'))
+
+        # Clear any stale session data
+        session.clear()
+        return render_template('login.html')
+    except Exception as e:
+        logger.error(f"❌ Login route error: {str(e)}")
+        return render_template('login.html')
 
 @app.route('/send-otp', methods=['POST'])
 @async_route
@@ -275,12 +283,14 @@ async def send_otp():
 @async_route
 async def verify_otp():
     try:
+        # Verify we have valid session data for OTP verification
         phone = session.get('user_phone')
         phone_code_hash = session.get('phone_code_hash')
         otp = request.form.get('otp')
         password = request.form.get('password')
 
         if not phone or not phone_code_hash:
+            session.clear()  # Clear invalid session
             return jsonify({'error': 'Session expired. Please request a new OTP.'}), 400
 
         if not otp:
@@ -294,7 +304,7 @@ async def verify_otp():
                 await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
 
             except PhoneCodeExpiredError:
-                session.pop('phone_code_hash', None)
+                session.clear()  # Clear invalid session
                 return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
 
             except PhoneCodeInvalidError:
@@ -310,25 +320,27 @@ async def verify_otp():
                     await client.sign_in(password=password)
                 except Exception as e:
                     logger.error(f"❌ 2FA error: {str(e)}")
-                    session.pop('phone_code_hash', None)
+                    session.clear()  # Clear invalid session
                     return jsonify({'error': 'Invalid 2FA password'}), 400
 
             if await client.is_user_authorized():
+                # Set all required session data
                 session['logged_in'] = True
                 session['session_string'] = client.session.save()
                 logger.info("✅ Login successful")
                 return jsonify({'message': 'Login successful'})
             else:
-                session.pop('phone_code_hash', None)
+                session.clear()  # Clear invalid session
                 return jsonify({'error': 'Authentication failed. Please try again.'}), 400
 
         except Exception as e:
             logger.error(f"❌ Sign in error: {str(e)}")
-            session.pop('phone_code_hash', None)
+            session.clear()  # Clear invalid session
             return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         logger.error(f"❌ Critical error in verify_otp: {str(e)}")
+        session.clear()  # Clear invalid session
         return jsonify({'error': str(e)}), 500
 
 @app.route('/dashboard')
@@ -339,35 +351,52 @@ async def dashboard():
         # Create new event loop for this request
         loop = EventLoopManager.ensure_loop()
 
-        # Verify session string exists
-        if not session.get('session_string'):
-            logger.error("❌ No session string found")
+        # Verify all required session data exists
+        if not all([session.get('logged_in'), session.get('session_string')]):
+            logger.error("❌ Incomplete session data")
+            session.clear()  # Clear invalid session
             return redirect(url_for('login'))
 
         # Get client using event loop manager
-        client = await telegram_manager.get_auth_client()
-        if not await client.is_user_authorized():
-            logger.error("❌ Client not authorized")
+        try:
+            client = await telegram_manager.get_auth_client()
+            if not await client.is_user_authorized():
+                logger.error("❌ Client not authorized")
+                session.clear()
+                return redirect(url_for('login'))
+        except Exception as e:
+            logger.error(f"❌ Client error: {str(e)}")
+            session.clear()
             return redirect(url_for('login'))
 
+        # Get channels list
         channels = []
-        async for dialog in client.iter_dialogs():
-            if dialog.is_channel:
-                channels.append({
-                    'id': dialog.id,
-                    'name': dialog.name
-                })
+        try:
+            async for dialog in client.iter_dialogs():
+                if dialog.is_channel:
+                    channels.append({
+                        'id': dialog.id,
+                        'name': dialog.name
+                    })
+        except Exception as e:
+            logger.error(f"❌ Channel list error: {str(e)}")
+            channels = []  # Continue with empty list rather than redirect
 
         # Get last selected channels
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute("""
-                    SELECT source_channel, destination_channel 
-                    FROM channel_config 
-                    ORDER BY updated_at DESC 
-                    LIMIT 1
-                """)
-                last_config = cur.fetchone()
+        last_config = None
+        try:
+            with get_db() as conn:
+                with conn.cursor(cursor_factory=DictCursor) as cur:
+                    cur.execute("""
+                        SELECT source_channel, destination_channel 
+                        FROM channel_config 
+                        ORDER BY updated_at DESC 
+                        LIMIT 1
+                    """)
+                    last_config = cur.fetchone()
+        except Exception as e:
+            logger.error(f"❌ Database error: {str(e)}")
+            # Continue without last config
 
         return render_template('dashboard.html', 
                             channels=channels,
@@ -376,6 +405,7 @@ async def dashboard():
 
     except Exception as e:
         logger.error(f"❌ Dashboard error: {str(e)}")
+        session.clear()
         return redirect(url_for('login'))
 
 @app.route('/logout')
@@ -390,6 +420,7 @@ def logout():
         return redirect(url_for('login'))
     except Exception as e:
         logger.error(f"❌ Logout error: {str(e)}")
+        session.clear()  # Ensure session is cleared even on error
         return redirect(url_for('login'))
 
 @app.route('/update-channels', methods=['POST'])
