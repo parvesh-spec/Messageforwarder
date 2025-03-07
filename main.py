@@ -8,6 +8,7 @@ import asyncio
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from flask import Flask, jsonify
+import time
 
 # Create a small Flask app for health checks
 health_app = Flask(__name__)
@@ -35,18 +36,12 @@ logger = logging.getLogger(__name__)
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
-# Telegram session string (to be set by app.py)
-SESSION_STRING = None
-
 # Database connection pool
 db_pool = psycopg2.pool.ThreadedConnectionPool(
     minconn=1,
     maxconn=10,
     dsn=os.getenv('DATABASE_URL')
 )
-
-# Lock for thread safety
-db_lock = threading.Lock()
 
 def get_db():
     """Get database connection from pool"""
@@ -62,6 +57,50 @@ def release_db(conn):
     """Release connection back to pool"""
     if conn:
         db_pool.putconn(conn)
+
+def get_bot_state():
+    """Get current bot state from database"""
+    conn = None
+    try:
+        conn = get_db()
+        if not conn:
+            return None
+
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT session_string, source_channel, destination_channel, is_running
+                FROM bot_state
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """)
+            return cur.fetchone()
+    except Exception as e:
+        logger.error(f"❌ Bot state query error: {str(e)}")
+        return None
+    finally:
+        if conn:
+            release_db(conn)
+
+def update_bot_state(is_running, session_string=None, source=None, destination=None):
+    """Update bot state in database"""
+    conn = None
+    try:
+        conn = get_db()
+        if not conn:
+            return False
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO bot_state (is_running, session_string, source_channel, destination_channel)
+                VALUES (%s, %s, %s, %s)
+            """, (is_running, session_string, source, destination))
+        return True
+    except Exception as e:
+        logger.error(f"❌ Bot state update error: {str(e)}")
+        return False
+    finally:
+        if conn:
+            release_db(conn)
 
 def load_channel_config():
     """Load channel configuration from database"""
@@ -150,9 +189,10 @@ async def setup_client():
     """Initialize Telegram client with session string"""
     global client, SESSION_STRING
     try:
-        # Try to get SESSION_STRING from environment if not already set
-        if not SESSION_STRING:
-            SESSION_STRING = os.getenv('SESSION_STRING')
+        #Try to get bot state from database
+        bot_state = get_bot_state()
+        if bot_state:
+            SESSION_STRING = bot_state['session_string']
 
         if not SESSION_STRING:
             logger.warning("⚠️ No session string provided, serving health checks only")
@@ -287,71 +327,68 @@ async def main():
     """Main bot function"""
     global client, SOURCE_CHANNEL, DESTINATION_CHANNEL
 
-    try:
-        # Setup client
-        if not await setup_client():
-            return False
-
-        # Load configuration
-        if not load_channel_config():
-            logger.error("❌ Failed to load channels")
-            return False
-
-        # Load replacements
-        if not load_replacements():
-            logger.warning("⚠️ No replacements loaded")
-
-        # Setup handlers
-        if not await setup_handlers():
-            logger.error("❌ Failed to setup handlers")
-            return False
-
-        logger.info("\n🤖 Bot is ready")
-        logger.info(f"📱 Source: {SOURCE_CHANNEL}")
-        logger.info(f"📱 Destination: {DESTINATION_CHANNEL}")
-        logger.info(f"📚 Replacements: {len(TEXT_REPLACEMENTS)}")
-
-        # Keep the bot running
+    while True:  # Keep checking for bot state
         try:
-            while SESSION_STRING:  # Only run while we have a valid session
-                # Check client connection
-                if not client or not client.is_connected():
-                    logger.error("❌ Client disconnected, attempting to reconnect")
-                    if not await setup_client():
-                        break
+            # Get current bot state
+            bot_state = get_bot_state()
+            if not bot_state or not bot_state['is_running']:
+                logger.info("⏸️ Bot is paused")
+                await asyncio.sleep(5)  # Check every 5 seconds
+                continue
 
-                # Reload configuration and replacements
-                if load_channel_config():
-                    logger.info("✅ Channel config refreshed")
-                if load_replacements():
-                    logger.info("✅ Replacements refreshed")
+            # Update global variables
+            SOURCE_CHANNEL = bot_state['source_channel']
+            DESTINATION_CHANNEL = bot_state['destination_channel']
 
-                # Wait before next check
-                await asyncio.sleep(30)  # Check every 30 seconds
+            # Setup client if needed
+            if not client or not client.is_connected():
+                client = TelegramClient(
+                    StringSession(bot_state['session_string']),
+                    API_ID,
+                    API_HASH,
+                    device_model="Replit Bot",
+                    system_version="Linux",
+                    app_version="1.0"
+                )
 
-        except KeyboardInterrupt:
-            logger.info("👋 Bot stopped by user")
-            return True
-        except asyncio.CancelledError:
-            logger.info("👋 Bot stopping...")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Runtime error: {str(e)}")
-            return False
-
-    except Exception as e:
-        logger.error(f"❌ Bot error: {str(e)}")
-        return False
-
-    finally:
-        if client:
-            try:
-                if client.is_connected():
+                await client.connect()
+                if not await client.is_user_authorized():
+                    logger.error("❌ Bot not authorized")
                     await client.disconnect()
-            except:
-                pass
-            client = None
-        return True
+                    client = None
+                    continue
+
+                # Load configuration
+                if not load_channel_config():
+                    logger.error("❌ Failed to load channels")
+                    continue
+
+                # Load replacements
+                if not load_replacements():
+                    logger.warning("⚠️ No replacements loaded")
+
+                # Setup handlers
+                if not await setup_handlers():
+                    logger.error("❌ Failed to setup handlers")
+                    continue
+
+                logger.info("\n🤖 Bot is ready")
+                logger.info(f"📱 Source: {SOURCE_CHANNEL}")
+                logger.info(f"📱 Destination: {DESTINATION_CHANNEL}")
+                logger.info(f"📚 Replacements: {len(TEXT_REPLACEMENTS)}")
+
+            # Keep the bot running and check state periodically
+            await asyncio.sleep(30)  # Check every 30 seconds
+
+        except Exception as e:
+            logger.error(f"❌ Main loop error: {str(e)}")
+            if client:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+                client = None
+            await asyncio.sleep(5)  # Wait before retrying
 
 def start_health_server():
     """Start health check server in a separate thread"""
@@ -396,6 +433,3 @@ if __name__ == "__main__":
 
     except Exception as e:
         logger.error(f"❌ Fatal error: {str(e)}")
-        # Ensure the bot still runs even if health check fails
-        if not SESSION_STRING:
-            logger.warning("⚠️ No session string provided, waiting for configuration")

@@ -474,75 +474,28 @@ def toggle_bot():
             logger.error("❌ No session string found")
             return jsonify({'error': 'Session expired, please login again'}), 401
 
-        import main
-        if status:
-            try:
-                # Share session with main.py
-                main.SESSION_STRING = session_string
-                main.SOURCE_CHANNEL = source
-                main.DESTINATION_CHANNEL = destination
+        # Update bot state in database
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                if status:
+                    # Start bot
+                    cur.execute("""
+                        INSERT INTO bot_state (is_running, session_string, source_channel, destination_channel)
+                        VALUES (true, %s, %s, %s)
+                    """, (session_string, source, destination))
+                    logger.info("✅ Bot state set to running")
+                else:
+                    # Stop bot
+                    cur.execute("""
+                        INSERT INTO bot_state (is_running, session_string, source_channel, destination_channel)
+                        VALUES (false, %s, %s, %s)
+                    """, (session_string, source, destination))
+                    logger.info("✅ Bot state set to stopped")
 
-                # Start bot in a daemon thread
-                def start_bot():
-                    try:
-                        # Create new event loop for bot thread
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-
-                        try:
-                            loop.run_until_complete(main.main())
-                        except Exception as e:
-                            logger.error(f"❌ Bot startup error: {str(e)}")
-                        finally:
-                            try:
-                                # Cleanup loop
-                                if loop.is_running():
-                                    loop.stop()
-                                loop.close()
-                            except:
-                                pass
-                    except Exception as e:
-                        logger.error(f"❌ Thread error: {str(e)}")
-
-                # Stop any existing bot instance
-                if session.get('bot_running'):
-                    main.SESSION_STRING = None
-                    main.SOURCE_CHANNEL = None
-                    main.DESTINATION_CHANNEL = None
-                    EventLoopManager.reset()
-
-                # Start new bot thread
-                bot_thread = threading.Thread(target=start_bot, daemon=True)
-                bot_thread.start()
-                session['bot_running'] = True
-                logger.info("✅ Bot started successfully")
-
-                return jsonify({
-                    'status': True,
-                    'message': 'Bot is now running'
-                })
-
-            except Exception as e:
-                logger.error(f"❌ Bot start error: {str(e)}")
-                return jsonify({'error': str(e)}), 500
-        else:
-            try:
-                # Stop bot by clearing its session
-                main.SESSION_STRING = None
-                main.SOURCE_CHANNEL = None
-                main.DESTINATION_CHANNEL = None
-                session['bot_running'] = False
-                EventLoopManager.reset()
-                logger.info("✅ Bot stopped successfully")
-
-                return jsonify({
-                    'status': False,
-                    'message': 'Bot is now stopped'
-                })
-
-            except Exception as e:
-                logger.error(f"❌ Bot stop error: {str(e)}")
-                return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'status': status,
+            'message': f'Bot is now {"running" if status else "stopped"}'
+        })
 
     except Exception as e:
         logger.error(f"❌ Bot toggle error: {str(e)}")
@@ -642,4 +595,5 @@ def clear_replacements():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
+    # ALWAYS serve the app on port 5000, even if there are problems serving that port
     app.run(host='0.0.0.0', port=5000)
