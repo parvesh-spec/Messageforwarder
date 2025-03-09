@@ -50,39 +50,55 @@ class TelegramManager:
         self.api_hash = api_hash
         self._lock = threading.Lock()
         self._client = None
-
-        # Initialize client during startup
-        loop.run_until_complete(self._initialize_client())
+        self._loop = None
 
     async def _initialize_client(self):
         """Initialize the Telegram client"""
-        if not self._client:
-            self._client = TelegramClient(
-                StringSession(),
-                self.api_id,
-                self.api_hash,
-                device_model="Replit Web",
-                system_version="Linux",
-                app_version="1.0",
-                loop=loop
-            )
-            await self._client.connect()
-            logger.info("✅ Telegram client initialized")
+        try:
+            if not self._client:
+                self._client = TelegramClient(
+                    StringSession(),
+                    self.api_id,
+                    self.api_hash,
+                    device_model="Replit Web",
+                    system_version="Linux",
+                    app_version="1.0"
+                )
+                await self._client.connect()
+                logger.info("✅ Telegram client initialized")
+        except Exception as e:
+            logger.error(f"❌ Client initialization error: {str(e)}")
+            self._client = None
+            raise
 
     async def get_client(self):
         """Get the Telegram client instance"""
         with self._lock:
-            if not self._client:
-                await self._initialize_client()
-            elif not self._client.is_connected():
-                await self._client.connect()
-            return self._client
+            try:
+                if not self._client:
+                    await self._initialize_client()
+                elif not self._client.is_connected():
+                    await self._client.connect()
 
-    async def cleanup(self):
+                if not self._client.is_connected():
+                    raise Exception("Failed to establish connection with Telegram")
+
+                return self._client
+            except Exception as e:
+                logger.error(f"❌ Client connection error: {str(e)}")
+                await self._cleanup_client()
+                raise
+
+    async def _cleanup_client(self):
         """Cleanup the client connection"""
-        if self._client and self._client.is_connected():
-            await self._client.disconnect()
-            self._client = None
+        if self._client:
+            try:
+                if self._client.is_connected():
+                    await self._client.disconnect()
+            except:
+                pass
+            finally:
+                self._client = None
 
 # Database pool for connections
 db_pool = psycopg2.pool.ThreadedConnectionPool(
@@ -304,7 +320,7 @@ async def forwarding():
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 # Check telegram authorization
                 cur.execute("""
-                    SELECT telegram_id
+                    SELECT telegram_id, telegram_username, auth_date
                     FROM users
                     WHERE id = %s
                 """, (user_id,))
@@ -336,13 +352,22 @@ async def forwarding():
         if telegram_id:
             try:
                 client = await telegram_manager.get_client()
+                logger.info("✅ Got Telegram client")
+
+                # Verify connection
                 if not client.is_connected():
                     await client.connect()
+                    logger.info("✅ Connected to Telegram")
 
+                # Get all dialogs (channels)
                 async for dialog in client.iter_dialogs():
                     if dialog.is_channel:
+                        channel_id = str(dialog.id)
+                        if not channel_id.startswith('-100'):
+                            channel_id = f'-100{channel_id.lstrip("-")}'
+
                         channels.append({
-                            'id': str(dialog.id),  # Convert to string for JavaScript
+                            'id': channel_id,
                             'name': dialog.name
                         })
 
@@ -351,7 +376,7 @@ async def forwarding():
                 logger.error(f"❌ Channel list error: {str(e)}")
                 return render_template('dashboard/forwarding.html',
                                   telegram_authorized=True,
-                                  error="Failed to fetch channels. Please try refreshing the page.")
+                                  error=f"Failed to fetch channels: {str(e)}. Please try logging out and back in.")
 
         return render_template('dashboard/forwarding.html',
                           telegram_authorized=True,
@@ -365,14 +390,7 @@ async def forwarding():
         logger.error(f"❌ Forwarding page error: {str(e)}")
         return render_template('dashboard/forwarding.html',
                           telegram_authorized=False,
-                          error="An error occurred loading the forwarding page")
-
-# Initialize the Telegram manager
-telegram_manager = TelegramManager(
-    int(os.getenv('API_ID')),
-    os.getenv('API_HASH')
-)
-
+                          error="An error occurred loading the forwarding page. Please try again.")
 
 @app.route('/send-otp', methods=['POST'])
 @async_route
@@ -812,6 +830,13 @@ def handle_db_error(e, operation):
     else:
         logger.error(f"❌ Database error in {operation}: {error_msg}")
         return "An unexpected error occurred"
+
+
+# Initialize the Telegram manager
+telegram_manager = TelegramManager(
+    int(os.getenv('API_ID')),
+    os.getenv('API_HASH')
+)
 
 
 if __name__ == '__main__':
