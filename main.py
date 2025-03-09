@@ -184,7 +184,7 @@ async def setup_user_handlers(user_id, client):
         return False
 
     try:
-        @client.on(events.NewMessage(pattern=""))
+        @client.on(events.NewMessage())
         async def handle_new_message(event):
             try:
                 if user_id not in USER_SESSIONS:
@@ -201,57 +201,54 @@ async def setup_user_handlers(user_id, client):
 
                 # Format channel IDs for comparison
                 chat_id = str(event.chat_id)
+                if not chat_id.startswith('-100'):
+                    chat_id = f"-100{chat_id.lstrip('-')}"
+
                 source_id = str(source)
+                if not source_id.startswith('-100'):
+                    source_id = f"-100{source_id.lstrip('-')}"
 
-                # Add detailed logging
-                logger.info(f"Received message - Chat ID: {chat_id}, Source ID: {source_id}")
-                logger.info(f"Raw message content: {event.message.text if event.message.text else 'No text'}")
-
-                # Normalize channel IDs for comparison
-                chat_id = chat_id.replace('-100', '') if chat_id.startswith('-100') else chat_id
-                source_id = source_id.replace('-100', '') if source_id.startswith('-100') else source_id
-
-                # Compare normalized IDs
+                # Compare exact channel IDs
                 if chat_id != source_id:
-                    logger.info(f"Message ignored - Not from source channel. Chat: {chat_id}, Source: {source_id}")
                     return
 
                 # Process message
-                message_text = event.message.text if event.message.text else ""
+                message = event.message
+                message_text = message.text if message.text else ""
                 if message_text:
                     message_text = apply_text_replacements(message_text, user_id)
-                    logger.info(f"Processed message text: {message_text}")
 
-                # Format destination channel ID
+                # Get destination channel ID
                 dest_id = str(destination)
                 if not dest_id.startswith('-100'):
-                    dest_id = f"-100{dest_id}"
+                    dest_id = f"-100{dest_id.lstrip('-')}"
 
                 try:
                     # Get destination channel
                     dest_channel = await client.get_entity(int(dest_id))
-                    logger.info(f"Found destination channel: {dest_channel.title}")
+                    logger.info(f"✅ Forwarding message to {dest_channel.title}")
 
-                    # Send message
+                    # Forward message
                     sent_message = await client.send_message(
                         dest_channel,
                         message_text,
-                        formatting_entities=event.message.entities
+                        file=message.media if message.media else None,
+                        formatting_entities=message.entities
                     )
-                    logger.info(f"Message sent successfully to {dest_channel.title}")
 
-                    # Store message mapping for this user
+                    # Store message mapping
                     if user_id not in MESSAGE_IDS:
                         MESSAGE_IDS[user_id] = {}
-                    MESSAGE_IDS[user_id][event.message.id] = sent_message.id
+                    MESSAGE_IDS[user_id][message.id] = sent_message.id
+                    logger.info(f"✅ Message forwarded successfully")
 
                 except Exception as e:
-                    logger.error(f"Failed to forward message: {str(e)}")
+                    logger.error(f"❌ Message forward error: {str(e)}")
 
             except Exception as e:
-                logger.error(f"❌ Message handler error for user {user_id}: {str(e)}")
+                logger.error(f"❌ Message handler error: {str(e)}")
 
-        @client.on(events.MessageEdited(pattern=""))
+        @client.on(events.MessageEdited())
         async def handle_edit(event):
             try:
                 if user_id not in USER_SESSIONS:
@@ -266,31 +263,33 @@ async def setup_user_handlers(user_id, client):
 
                 # Format channel IDs
                 chat_id = str(event.chat_id)
+                if not chat_id.startswith('-100'):
+                    chat_id = f"-100{chat_id.lstrip('-')}"
+
                 source_id = str(source)
+                if not source_id.startswith('-100'):
+                    source_id = f"-100{source_id.lstrip('-')}"
 
-                # Normalize channel IDs for comparison
-                chat_id = chat_id.replace('-100', '') if chat_id.startswith('-100') else chat_id
-                source_id = source_id.replace('-100', '') if source_id.startswith('-100') else source_id
-
-                # Compare normalized IDs
+                # Compare exact channel IDs
                 if chat_id != source_id:
                     return
 
-                # Get message mapping for this user
+                # Get message mapping
                 msg_ids = MESSAGE_IDS.get(user_id, {})
                 dest_msg_id = msg_ids.get(event.message.id)
                 if not dest_msg_id:
                     return
 
-                # Process message
-                message_text = event.message.text
+                # Process edited message
+                message = event.message
+                message_text = message.text if message.text else ""
                 if message_text:
                     message_text = apply_text_replacements(message_text, user_id)
 
-                # Format destination channel ID
+                # Format destination ID
                 dest_id = str(destination)
                 if not dest_id.startswith('-100'):
-                    dest_id = f"-100{dest_id}"
+                    dest_id = f"-100{dest_id.lstrip('-')}"
 
                 try:
                     # Edit destination message
@@ -299,20 +298,22 @@ async def setup_user_handlers(user_id, client):
                         dest_channel,
                         dest_msg_id,
                         message_text,
-                        formatting_entities=event.message.entities
+                        file=message.media if message.media else None,
+                        formatting_entities=message.entities
                     )
-                    logger.info(f"Message edit synced in {dest_channel.title}")
+                    logger.info(f"✅ Message edit synced")
+
                 except Exception as e:
-                    logger.error(f"Failed to edit message: {str(e)}")
+                    logger.error(f"❌ Edit sync error: {str(e)}")
 
             except Exception as e:
-                logger.error(f"❌ Edit handler error for user {user_id}: {str(e)}")
+                logger.error(f"❌ Edit handler error: {str(e)}")
 
-        logger.info(f"✅ Event handlers set up successfully for user {user_id}")
+        logger.info(f"✅ Event handlers set up for user {user_id}")
         return True
 
     except Exception as e:
-        logger.error(f"❌ Handler setup error for user {user_id}: {str(e)}")
+        logger.error(f"❌ Handler setup error: {str(e)}")
         return False
 
 async def manage_user_session(user_id):
