@@ -152,7 +152,13 @@ def load_user_replacements(user_id):
             for row in cur.fetchall():
                 replacements[row['original_text']] = row['replacement_text']
 
-            logger.info(f"✅ Loaded {len(replacements)} replacements for user {user_id}")
+            if replacements:
+                logger.info(f"✅ Loaded {len(replacements)} replacements for user {user_id}")
+                for orig, repl in replacements.items():
+                    logger.info(f"   '{orig}' → '{repl}'")
+            else:
+                logger.info(f"ℹ️ No replacements found for user {user_id}")
+
             return replacements
 
     except Exception as e:
@@ -169,10 +175,19 @@ def apply_text_replacements(text, user_id):
 
     result = text
     replacements = USER_SESSIONS[user_id].get('replacements', {})
-    for original, replacement in replacements.items():
+
+    # Sort replacements by length (longest first) to avoid partial replacements
+    sorted_replacements = sorted(
+        replacements.items(), 
+        key=lambda x: len(x[0]), 
+        reverse=True
+    )
+
+    # Apply each replacement
+    for original, replacement in sorted_replacements:
         if original in result:
             result = result.replace(original, replacement)
-            logger.info(f"✅ Replaced: {original} → {replacement} for user {user_id}")
+            logger.info(f"✅ Replaced: '{original}' → '{replacement}'")
 
     return result
 
