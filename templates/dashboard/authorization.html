@@ -20,12 +20,13 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="form-group">
                 <label>Phone Number (with country code)</label>
-                <input type="tel" id="phone" class="form-control" placeholder="+91XXXXXXXXXX" required>
+                <input type="tel" id="phone" class="form-control" pattern="^\+[0-9]{12}$" placeholder="+91XXXXXXXXXX" required>
+                <small class="form-text">Format: +91XXXXXXXXXX</small>
             </div>
 
             <div class="form-group" id="otp-group" style="display: none;">
                 <label>Enter OTP</label>
-                <input type="text" id="otp" class="form-control" placeholder="Enter OTP">
+                <input type="text" id="otp" class="form-control" pattern="[0-9]{5}" placeholder="Enter OTP">
             </div>
 
             <div class="form-group" id="password-group" style="display: none;">
@@ -41,18 +42,29 @@
 
 <script>
 async function handleAuth(event) {
-    event.preventDefault(); // Prevent form submission
-
+    event.preventDefault();
+    const form = document.getElementById('telegram-auth-form');
     const phone = document.getElementById('phone').value;
     const otp = document.getElementById('otp').value;
     const password = document.getElementById('password').value;
     const button = document.getElementById('auth-button');
     const token = document.querySelector('input[name="csrf_token"]').value;
 
+    // Validate phone number format
+    if (!otp && !phone.match(/^\+[0-9]{12}$/)) {
+        showMessage('Please enter a valid phone number in format: +91XXXXXXXXXX', true);
+        return;
+    }
+
+    // Show loading state
+    button.disabled = true;
+    button.classList.add('btn-loading');
+    const originalText = button.textContent;
+    button.textContent = otp ? 'Verifying...' : 'Sending OTP...';
+
     try {
         if (!otp) {
             // Send OTP
-            button.disabled = true;
             const response = await fetch('/send-otp', {
                 method: 'POST',
                 headers: {
@@ -78,7 +90,6 @@ async function handleAuth(event) {
             showMessage('OTP sent successfully');
         } else {
             // Verify OTP
-            button.disabled = true;
             const response = await fetch('/verify-otp', {
                 method: 'POST',
                 headers: {
@@ -108,10 +119,18 @@ async function handleAuth(event) {
         showMessage('An error occurred: ' + error.message, true);
     } finally {
         button.disabled = false;
+        button.classList.remove('btn-loading');
+        button.textContent = originalText;
     }
 }
 
 function showMessage(message, isError = false) {
+    // Remove any existing message
+    const existingMessage = document.querySelector('.alert');
+    if (existingMessage) {
+        existingMessage.remove();
+    }
+
     const messageDiv = document.createElement('div');
     messageDiv.className = `alert alert-${isError ? 'error' : 'success'}`;
     messageDiv.textContent = message;
@@ -119,9 +138,41 @@ function showMessage(message, isError = false) {
     const form = document.getElementById('telegram-auth-form');
     form.insertBefore(messageDiv, form.firstChild);
 
+    // Auto-hide message after 5 seconds
     setTimeout(() => messageDiv.remove(), 5000);
 }
 
 document.getElementById('telegram-auth-form').addEventListener('submit', handleAuth);
 </script>
+
+<style>
+.btn-loading {
+    opacity: 0.7;
+    cursor: not-allowed;
+}
+
+.form-text {
+    color: #666;
+    font-size: 0.8em;
+    margin-top: 0.25em;
+}
+
+.alert {
+    padding: 10px;
+    margin-bottom: 15px;
+    border-radius: 4px;
+}
+
+.alert-error {
+    background-color: #ffebee;
+    color: #c62828;
+    border: 1px solid #ef9a9a;
+}
+
+.alert-success {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+    border: 1px solid #a5d6a7;
+}
+</style>
 {% endblock %}
