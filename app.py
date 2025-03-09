@@ -76,18 +76,22 @@ class TelegramManager:
         with self._lock:
             try:
                 if self._client and self._client.is_connected():
-                    if session_string and self._client.session.save() != session_string:
-                        await self._cleanup_client()
-                    elif await self._client.is_user_authorized():
-                        return self._client
-                    else:
-                        await self._cleanup_client()
+                    if session_string:
+                        try:
+                            if self._client.session.save() == session_string and await self._client.is_user_authorized():
+                                return self._client
+                        except:
+                            pass
+                    await self._cleanup_client()
 
                 # Initialize new client with session string
                 await self._initialize_client(session_string)
-                if not await self._client.is_user_authorized():
+
+                # Only check authorization if session string was provided
+                if session_string and not await self._client.is_user_authorized():
                     await self._cleanup_client()
                     raise Exception("User not authorized")
+
                 return self._client
 
             except Exception as e:
@@ -105,6 +109,22 @@ class TelegramManager:
                 pass
             finally:
                 self._client = None
+
+    async def check_authorization(self, session_string):
+        """Check if a session is authorized"""
+        try:
+            client = await self.get_client(session_string)
+            is_authorized = await client.is_user_authorized()
+            await self._cleanup_client()
+            return is_authorized
+        except:
+            return False
+
+# Initialize the Telegram manager
+telegram_manager = TelegramManager(
+    int(os.getenv('API_ID')),
+    os.getenv('API_HASH')
+)
 
 # Database pool for connections
 db_pool = psycopg2.pool.ThreadedConnectionPool(
@@ -398,6 +418,7 @@ async def forwarding():
 @app.route('/send-otp', methods=['POST'])
 @async_route
 async def send_otp():
+    """Send OTP for Telegram authorization"""
     try:
         # Check if user already has a valid session
         with get_db() as conn:
@@ -411,9 +432,9 @@ async def send_otp():
 
                 if existing_session and existing_session['session_string']:
                     try:
-                        # Try to use existing session
-                        client = await telegram_manager.get_client(existing_session['session_string'])
-                        if await client.is_user_authorized():
+                        # Check if existing session is valid
+                        is_authorized = await telegram_manager.check_authorization(existing_session['session_string'])
+                        if is_authorized:
                             # Update session data
                             session['telegram_id'] = existing_session['telegram_id']
                             session['session_string'] = existing_session['session_string']
@@ -421,7 +442,7 @@ async def send_otp():
                             return jsonify({'message': 'Already authorized'}), 200
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to reuse session: {str(e)}")
-                        # If session is invalid, continue with new auth
+                        # Clear invalid session
                         cur.execute("""
                             UPDATE users 
                             SET session_string = NULL 
@@ -868,12 +889,6 @@ def handle_db_error(e, operation):
         logger.error(f"❌ Database error in {operation}: {error_msg}")
         return "An unexpected error occurred"
 
-
-# Initialize the Telegram manager
-telegram_manager = TelegramManager(
-    int(os.getenv('API_ID')),
-    os.getenv('API_HASH')
-)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
