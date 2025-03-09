@@ -76,23 +76,22 @@ class TelegramManager:
         """Get the Telegram client instance"""
         with self._lock:
             try:
+                # If client exists and is connected
                 if self._client and self._client.is_connected():
-                    if session_string:
-                        try:
-                            if self._client.session.save() == session_string and await self._client.is_user_authorized():
-                                return self._client
-                        except:
-                            pass
-                    await self._cleanup_client()
+                    # If no session string is provided, return current client
+                    if not session_string:
+                        return self._client
 
-                # Initialize new client with session string
+                    # If session string matches and client is authorized, return it
+                    if self._client.session.save() == session_string:
+                        if await self._client.is_user_authorized():
+                            return self._client
+
+                # Clear existing client
+                await self._cleanup_client()
+
+                # Initialize new client
                 await self._initialize_client(session_string)
-
-                # Only check authorization if session string was provided
-                if session_string and not await self._client.is_user_authorized():
-                    await self._cleanup_client()
-                    raise Exception("User not authorized")
-
                 return self._client
 
             except Exception as e:
@@ -116,9 +115,9 @@ class TelegramManager:
         try:
             client = await self.get_client(session_string)
             is_authorized = await client.is_user_authorized()
-            await self._cleanup_client()
             return is_authorized
-        except:
+        except Exception as e:
+            logger.error(f"❌ Authorization check error: {str(e)}")
             return False
 
 # Initialize the Telegram manager
@@ -421,42 +420,10 @@ async def forwarding():
 async def send_otp():
     """Send OTP for Telegram authorization"""
     try:
-        # Check if user already has a valid session
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute("""
-                    SELECT telegram_id, telegram_username, auth_date, session_string
-                    FROM users
-                    WHERE id = %s AND session_string IS NOT NULL
-                """, (session.get('user_id'),))
-                existing_session = cur.fetchone()
-
-                if existing_session and existing_session['session_string']:
-                    try:
-                        # Check if existing session is valid
-                        is_authorized = await telegram_manager.check_authorization(existing_session['session_string'])
-                        if is_authorized:
-                            # Update session data
-                            session['telegram_id'] = existing_session['telegram_id']
-                            session['session_string'] = existing_session['session_string']
-                            logger.info("✅ Reused existing Telegram session")
-                            return jsonify({'message': 'Already authorized'}), 200
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to reuse session: {str(e)}")
-                        # Clear invalid session
-                        cur.execute("""
-                            UPDATE users 
-                            SET session_string = NULL 
-                            WHERE id = %s
-                        """, (session.get('user_id'),))
-
         # Store important session data
-        important_data = {
-            'user_id': session.get('user_id'),
-            'csrf_token': session.get('csrf_token')
-        }
+        important_data = {k: session.get(k) for k in ['user_id', 'csrf_token']}
 
-        # Initialize new client for OTP
+        # Initialize phone validation
         phone = request.form.get('phone')
         if not phone:
             return jsonify({'error': 'Phone number is required'}), 400
@@ -469,16 +436,15 @@ async def send_otp():
             client = await telegram_manager.get_client()
             sent = await client.send_code_request(phone)
 
-            # Keep important session data
+            # Clear session but preserve important data
             session.clear()
-            for key, value in important_data.items():
-                session[key] = value
+            session.update(important_data)
 
-            # Store phone data separately
+            # Store authentication data
             session['user_phone'] = phone
             session['phone_code_hash'] = sent.phone_code_hash
-            session['otp_sent_at'] = int(time.time())  # Store OTP sent timestamp
-            session.permanent = True  # Make session permanent
+            session['otp_sent_at'] = int(time.time())
+            session.permanent = True
 
             logger.info(f"✅ OTP sent successfully to {phone}")
             return jsonify({'message': 'OTP sent successfully'})
@@ -497,29 +463,28 @@ async def send_otp():
 @app.route('/verify-otp', methods=['POST'])
 @async_route
 async def verify_otp():
+    """Verify OTP and complete Telegram authorization"""
     try:
+        # Get all required data
         phone = session.get('user_phone')
         phone_code_hash = session.get('phone_code_hash')
-        otp_sent_at = session.get('otp_sent_at')
+        otp_sent_at = session.get('otp_sent_at', 0)
         otp = request.form.get('otp')
         password = request.form.get('password')
 
-        # Validate OTP expiry (5 minutes)
-        if not otp_sent_at or (int(time.time()) - otp_sent_at) > 300:
+        # Validate data presence
+        if not all([phone, phone_code_hash, otp]):
+            return jsonify({'error': 'Missing required data'}), 400
+
+        # Check OTP expiry (5 minutes)
+        if (int(time.time()) - otp_sent_at) > 300:
             return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
-
-        if not phone or not phone_code_hash:
-            return jsonify({'error': 'Session expired. Please request a new OTP.'}), 400
-
-        if not otp:
-            return jsonify({'error': 'OTP is required'}), 400
 
         try:
             client = await telegram_manager.get_client()
-            max_retries = 3
-            retry_count = 0
 
-            while retry_count < max_retries:
+            # Sign in with retries
+            for attempt in range(3):
                 try:
                     await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
                     break
@@ -529,28 +494,21 @@ async def verify_otp():
                             'error': 'two_factor_needed',
                             'message': 'Two-factor authentication required'
                         })
-                    try:
-                        await client.sign_in(password=password)
-                        break
-                    except Exception as e:
-                        logger.error(f"❌ 2FA error: {str(e)}")
-                        return jsonify({'error': 'Invalid 2FA password'}), 400
+                    await client.sign_in(password=password)
+                    break
                 except Exception as e:
-                    if "The phone code expired" in str(e):
-                        return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
-                    retry_count += 1
-                    if retry_count >= max_retries:
+                    if "phone code expired" in str(e).lower() or attempt == 2:
                         raise
-                    await asyncio.sleep(1)  # Wait before retry
+                    await asyncio.sleep(1)
 
+            # Verify successful authorization
             if await client.is_user_authorized():
-                # Get user info
                 me = await client.get_me()
                 session_string = client.session.save()
 
-                # Store or update user in database with telegram info
+                # Update database
                 with get_db() as conn:
-                    with conn.cursor(cursor_factory=DictCursor) as cur:
+                    with conn.cursor() as cur:
                         cur.execute("""
                             UPDATE users 
                             SET telegram_id = %s,
@@ -559,23 +517,23 @@ async def verify_otp():
                                 auth_date = CURRENT_TIMESTAMP,
                                 session_string = %s
                             WHERE id = %s
-                            RETURNING id
                         """, (me.id, me.first_name, me.username, session_string, session.get('user_id')))
 
-                        if not cur.fetchone():
-                            return jsonify({'error': 'User not found'}), 404
-
-                # Set session data
+                # Update session
                 session['telegram_id'] = me.id
                 session['session_string'] = session_string
                 logger.info(f"✅ Telegram authorization successful for user {me.id}")
+
                 return jsonify({'message': 'Authorization successful'})
             else:
-                return jsonify({'error': 'Authentication failed. Please try again.'}), 400
+                return jsonify({'error': 'Authorization failed'}), 400
 
         except Exception as e:
-            logger.error(f"❌ Sign in error: {str(e)}")
-            return jsonify({'error': str(e)}), 500
+            error_msg = str(e)
+            logger.error(f"❌ Verification error: {error_msg}")
+            if "phone code expired" in error_msg.lower():
+                return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
+            return jsonify({'error': error_msg}), 400
 
     except Exception as e:
         logger.error(f"❌ Critical error in verify_otp: {str(e)}")
@@ -911,4 +869,4 @@ def handle_db_error(e, operation):
 
 
 if __name__ == '__main__':
-        app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000)
