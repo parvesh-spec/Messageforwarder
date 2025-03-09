@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime, timedelta
-from flask import Flask, render_template, request, session, redirect, url_for, jsonify
+from flask import Flask, render_template, request, session, redirect, url_for, jsonify, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_session import Session
 from flask_wtf.csrf import CSRFProtect
@@ -16,6 +16,7 @@ from telethon.sessions import StringSession
 import asyncio
 from functools import wraps
 import threading
+import time
 
 # Configure Flask application
 app = Flask(__name__)
@@ -24,16 +25,14 @@ app.config.update(
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    DEBUG=True,
-    WTF_CSRF_ENABLED=True,  # Enable CSRF protection
-    WTF_CSRF_SECRET_KEY=os.environ.get('CSRF_SECRET_KEY', os.urandom(24))  # Separate CSRF secret key
+    DEBUG=True
 )
 
 # Initialize session
 Session(app)
 
-# Initialize CSRF protection after session
-csrf = CSRFProtect()
+# Initialize CSRF protection
+csrf = CSRFProtect(app)
 csrf.init_app(app)
 
 class TelegramManager:
@@ -205,28 +204,41 @@ def register():
 @app.route('/register', methods=['POST'])
 def register_post():
     form = RegisterForm()
-    if form.validate_on_submit():
-        email = form.email.data
-        password = form.password.data
+    try:
+        if form.validate_on_submit():
+            email = form.email.data
+            password = form.password.data
 
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-                if cur.fetchone():
-                    form.email.errors.append('Email already registered')
-                    return render_template('auth/register.html', form=form)
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    # Check if email exists
+                    cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+                    if cur.fetchone():
+                        flash('Email already registered', 'error')
+                        return render_template('auth/register.html', form=form)
 
-                cur.execute("""
-                    INSERT INTO users (email, password_hash)
-                    VALUES (%s, %s)
-                    RETURNING id
-                """, (email, generate_password_hash(password)))
+                    # Create new user
+                    cur.execute("""
+                        INSERT INTO users (email, password_hash)
+                        VALUES (%s, %s)
+                        RETURNING id
+                    """, (email, generate_password_hash(password)))
 
-                user_id = cur.fetchone()[0]
-                session['user_id'] = user_id
-                return redirect(url_for('dashboard'))
+                    user_id = cur.fetchone()[0]
+                    session['user_id'] = user_id
+                    flash('Registration successful!', 'success')
+                    return redirect(url_for('dashboard'))
+        else:
+            for field, errors in form.errors.items():
+                for error in errors:
+                    flash(f"{field}: {error}", 'error')
+            return render_template('auth/register.html', form=form)
 
-    return render_template('auth/register.html', form=form)
+    except Exception as e:
+        app.logger.error(f"Registration error: {str(e)}")
+        flash('An error occurred during registration. Please try again.', 'error')
+        return render_template('auth/register.html', form=form)
+
 
 @app.route('/logout')
 def logout():
