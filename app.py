@@ -63,16 +63,26 @@ def create_tables():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS bot_status (
                     id SERIAL PRIMARY KEY,
+                    user_id INTEGER,
                     is_running BOOLEAN NOT NULL DEFAULT false,
                     session_string TEXT,
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             """)
 
-            # Other table creation statements remain unchanged...
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    telegram_id INTEGER UNIQUE NOT NULL,
+                    first_name TEXT,
+                    username TEXT
+                )
+            """)
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS text_replacements (
                     id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
                     original_text TEXT NOT NULL,
                     replacement_text TEXT NOT NULL,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -82,11 +92,13 @@ def create_tables():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS channel_config (
                     id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
                     source_channel TEXT NOT NULL,
                     destination_channel TEXT NOT NULL,
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
 
 # Call create_tables on startup (after get_db is defined)
 create_tables()
@@ -278,6 +290,11 @@ def login():
         logger.error(f"❌ Login route error: {str(e)}")
         return render_template('login.html')
 
+def get_user_session_key(telegram_id):
+    """Generate a unique session key for each user"""
+    return f"user_{telegram_id}_session"
+
+
 @app.route('/send-otp', methods=['POST'])
 @async_route
 async def send_otp():
@@ -294,13 +311,6 @@ async def send_otp():
 
             # Clear any existing session data
             session.clear()
-
-            # Check if already authorized
-            if await client.is_user_authorized():
-                session['user_phone'] = phone
-                session['logged_in'] = True
-                session['session_string'] = client.session.save()
-                return jsonify({'message': 'Already authorized', 'already_authorized': True})
 
             # Send OTP
             sent = await client.send_code_request(phone)
@@ -322,14 +332,13 @@ async def send_otp():
 @async_route
 async def verify_otp():
     try:
-        # Verify we have valid session data for OTP verification
         phone = session.get('user_phone')
         phone_code_hash = session.get('phone_code_hash')
         otp = request.form.get('otp')
         password = request.form.get('password')
 
         if not phone or not phone_code_hash:
-            session.clear()  # Clear invalid session
+            session.clear()
             return jsonify({'error': 'Session expired. Please request a new OTP.'}), 400
 
         if not otp:
@@ -343,7 +352,7 @@ async def verify_otp():
                 await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
 
             except PhoneCodeExpiredError:
-                session.clear()  # Clear invalid session
+                session.clear()
                 return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
 
             except PhoneCodeInvalidError:
@@ -359,27 +368,44 @@ async def verify_otp():
                     await client.sign_in(password=password)
                 except Exception as e:
                     logger.error(f"❌ 2FA error: {str(e)}")
-                    session.clear()  # Clear invalid session
+                    session.clear()
                     return jsonify({'error': 'Invalid 2FA password'}), 400
 
             if await client.is_user_authorized():
-                # Set all required session data
+                # Get user info
+                me = await client.get_me()
+
+                # Store or update user in database
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO users (telegram_id, first_name, username)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (telegram_id) DO UPDATE
+                            SET first_name = EXCLUDED.first_name,
+                                username = EXCLUDED.username
+                            RETURNING id
+                        """, (me.id, me.first_name, me.username))
+                        conn.commit()
+
+                # Set session data
                 session['logged_in'] = True
+                session['user_id'] = me.id
                 session['session_string'] = client.session.save()
                 logger.info("✅ Login successful")
                 return jsonify({'message': 'Login successful'})
             else:
-                session.clear()  # Clear invalid session
+                session.clear()
                 return jsonify({'error': 'Authentication failed. Please try again.'}), 400
 
         except Exception as e:
             logger.error(f"❌ Sign in error: {str(e)}")
-            session.clear()  # Clear invalid session
+            session.clear()
             return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         logger.error(f"❌ Critical error in verify_otp: {str(e)}")
-        session.clear()  # Clear invalid session
+        session.clear()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/dashboard')
@@ -387,13 +413,9 @@ async def verify_otp():
 @async_route
 async def dashboard():
     try:
-        # Create new event loop for this request
-        loop = EventLoopManager.ensure_loop()
-
-        # Verify all required session data exists
-        if not all([session.get('logged_in'), session.get('session_string')]):
+        if not all([session.get('logged_in'), session.get('user_id'), session.get('session_string')]):
             logger.error("❌ Incomplete session data")
-            session.clear()  # Clear invalid session
+            session.clear()
             return redirect(url_for('login'))
 
         # Get client using event loop manager
@@ -421,36 +443,31 @@ async def dashboard():
             logger.error(f"❌ Channel list error: {str(e)}")
             channels = []
 
-        # Get last selected channels and bot status
+        # Get user-specific data
+        user_id = session.get('user_id')
         last_config = None
         initial_bot_status = False
         try:
             with get_db() as conn:
                 with conn.cursor(cursor_factory=DictCursor) as cur:
-                    # Get last channel config
+                    # Get last channel config for this user
                     cur.execute("""
                         SELECT source_channel, destination_channel 
                         FROM channel_config 
+                        WHERE user_id = %s
                         ORDER BY updated_at DESC 
                         LIMIT 1
-                    """)
+                    """, (user_id,))
                     last_config = cur.fetchone()
 
-                    # Get current bot status, insert default if none exists
-                    cur.execute("""
-                        INSERT INTO bot_status (is_running) 
-                        VALUES (false) 
-                        ON CONFLICT (id) DO NOTHING 
-                        RETURNING is_running
-                    """)
-                    conn.commit()
-
+                    # Get bot status for this user
                     cur.execute("""
                         SELECT is_running 
                         FROM bot_status 
+                        WHERE user_id = %s
                         ORDER BY updated_at DESC 
                         LIMIT 1
-                    """)
+                    """, (user_id,))
                     status_row = cur.fetchone()
                     if status_row:
                         initial_bot_status = status_row['is_running']
@@ -458,10 +475,12 @@ async def dashboard():
                     # If bot should be running, ensure session is shared
                     if initial_bot_status:
                         import main
-                        main.SESSION_STRING = session.get('session_string')
-                        if last_config:
-                            main.SOURCE_CHANNEL = last_config['source_channel']
-                            main.DESTINATION_CHANNEL = last_config['destination_channel']
+                        main.add_user_session(
+                            user_id=user_id,
+                            session_string=session.get('session_string'),
+                            source_channel=last_config['source_channel'] if last_config else None,
+                            destination_channel=last_config['destination_channel'] if last_config else None
+                        )
 
         except Exception as e:
             logger.error(f"❌ Database error: {str(e)}")
@@ -477,30 +496,16 @@ async def dashboard():
         session.clear()
         return redirect(url_for('login'))
 
-@app.route('/logout')
-def logout():
-    try:
-        # Clean up Telegram resources
-        telegram_manager.cleanup()
-
-        # Clear flask session
-        session.clear()
-        logger.info("✅ Logged out successfully")
-        return redirect(url_for('login'))
-    except Exception as e:
-        logger.error(f"❌ Logout error: {str(e)}")
-        session.clear()  # Ensure session is cleared even on error
-        return redirect(url_for('login'))
-
 @app.route('/update-channels', methods=['POST'])
 @login_required
 def update_channels():
     try:
         source = request.form.get('source')
         destination = request.form.get('destination')
+        user_id = session.get('user_id')
 
-        if not source or not destination:
-            return jsonify({'error': 'Both channels required'}), 400
+        if not all([source, destination, user_id]):
+            return jsonify({'error': 'Missing required data'}), 400
 
         # Format channel IDs
         if not source.startswith('-100'):
@@ -512,13 +517,17 @@ def update_channels():
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO channel_config (source_channel, destination_channel)
-                    VALUES (%s, %s)
-                """, (source, destination))
+                    INSERT INTO channel_config (user_id, source_channel, destination_channel)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET source_channel = EXCLUDED.source_channel,
+                        destination_channel = EXCLUDED.destination_channel,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (user_id, source, destination))
 
-        # Update session
-        session['source_channel'] = source
-        session['dest_channel'] = destination
+        # Update running bot if exists
+        import main
+        main.update_user_channels(user_id, source, destination)
 
         return jsonify({'message': 'Channels updated successfully'})
 
@@ -526,72 +535,55 @@ def update_channels():
         logger.error(f"❌ Channel update error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-# Update toggle_bot route to store session_string
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
 def toggle_bot():
     try:
         status = request.form.get('status') == 'true'
-        source = session.get('source_channel')
-        destination = session.get('dest_channel')
-
-        if not source or not destination:
-            logger.error("❌ Missing channel configuration")
-            return jsonify({'error': 'Configure channels first'}), 400
-
+        user_id = session.get('user_id')
         session_string = session.get('session_string')
+
+        if not user_id:
+            return jsonify({'error': 'User not authenticated'}), 401
+
         if not session_string:
-            logger.error("❌ No session string found")
             return jsonify({'error': 'Session expired, please login again'}), 401
+
+        # Get user's channels
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT source_channel, destination_channel
+                    FROM channel_config
+                    WHERE user_id = %s
+                """, (user_id,))
+                channels = cur.fetchone()
+
+        if not channels:
+            return jsonify({'error': 'Configure channels first'}), 400
 
         import main
         if status:
             try:
-                # Update database status first with session string
+                # Update database status
                 with get_db() as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
-                            INSERT INTO bot_status (is_running, session_string)
-                            VALUES (true, %s)
-                            ON CONFLICT (id) DO UPDATE 
+                            INSERT INTO bot_status (user_id, is_running, session_string)
+                            VALUES (%s, true, %s)
+                            ON CONFLICT (user_id) DO UPDATE 
                             SET is_running = true,
                                 session_string = EXCLUDED.session_string,
                                 updated_at = CURRENT_TIMESTAMP
-                        """, (session_string,))
+                        """, (user_id, session_string))
 
-                # Share configuration with main.py
-                main.SESSION_STRING = session_string
-                main.SOURCE_CHANNEL = source
-                main.DESTINATION_CHANNEL = destination
-
-                # Start bot in a daemon thread
-                def start_bot():
-                    try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            loop.run_until_complete(main.main())
-                        except Exception as e:
-                            logger.error(f"❌ Bot startup error: {str(e)}")
-                        finally:
-                            if loop.is_running():
-                                loop.stop()
-                            loop.close()
-                    except Exception as e:
-                        logger.error(f"❌ Thread error: {str(e)}")
-
-                # Stop any existing bot instance
-                if session.get('bot_running'):
-                    main.SESSION_STRING = None
-                    main.SOURCE_CHANNEL = None
-                    main.DESTINATION_CHANNEL = None
-                    EventLoopManager.reset()
-
-                # Start new bot thread
-                bot_thread = threading.Thread(target=start_bot, daemon=True)
-                bot_thread.start()
-                session['bot_running'] = True
-                logger.info("✅ Bot started successfully")
+                # Add user session to main.py
+                main.add_user_session(
+                    user_id=user_id,
+                    session_string=session_string,
+                    source_channel=channels['source_channel'],
+                    destination_channel=channels['destination_channel']
+                )
 
                 return jsonify({
                     'status': True,
@@ -603,25 +595,20 @@ def toggle_bot():
                 return jsonify({'error': str(e)}), 500
         else:
             try:
-                # Update database status first
+                # Update database status
                 with get_db() as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
-                            INSERT INTO bot_status (is_running, session_string)
-                            VALUES (false, NULL)
-                            ON CONFLICT (id) DO UPDATE 
+                            INSERT INTO bot_status (user_id, is_running, session_string)
+                            VALUES (%s, false, NULL)
+                            ON CONFLICT (user_id) DO UPDATE 
                             SET is_running = false,
                                 session_string = NULL,
                                 updated_at = CURRENT_TIMESTAMP
-                        """)
+                        """, (user_id,))
 
-                # Stop bot
-                main.SESSION_STRING = None
-                main.SOURCE_CHANNEL = None
-                main.DESTINATION_CHANNEL = None
-                session['bot_running'] = False
-                EventLoopManager.reset()
-                logger.info("✅ Bot stopped successfully")
+                # Remove user session from main.py
+                main.remove_user_session(user_id)
 
                 return jsonify({
                     'status': False,
@@ -636,22 +623,20 @@ def toggle_bot():
         logger.error(f"❌ Bot toggle error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/static/<path:filename>')
-def serve_static(filename):
-    return send_from_directory('static', filename)
-
-
+# Update replacement routes to be user-specific
 @app.route('/get-replacements')
 @login_required
 def get_replacements():
     try:
+        user_id = session.get('user_id')
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute("""
                     SELECT original_text, replacement_text 
                     FROM text_replacements
+                    WHERE user_id = %s
                     ORDER BY id DESC
-                """)
+                """, (user_id,))
                 replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
                 return jsonify(replacements)
     except Exception as e:
@@ -664,21 +649,21 @@ def add_replacement():
     try:
         original = request.form.get('original')
         replacement = request.form.get('replacement')
+        user_id = session.get('user_id')
 
-        if not original or not replacement:
-            return jsonify({'error': 'Both original and replacement text required'}), 400
+        if not all([original, replacement, user_id]):
+            return jsonify({'error': 'Missing required data'}), 400
 
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO text_replacements (original_text, replacement_text)
-                    VALUES (%s, %s)
-                """, (original, replacement))
+                    INSERT INTO text_replacements (user_id, original_text, replacement_text)
+                    VALUES (%s, %s, %s)
+                """, (user_id, original, replacement))
 
-        # Force reload in main.py
+        # Update replacements in main.py
         import main
-        main.load_replacements()
-        logger.info("✅ New replacement added and reloaded")
+        main.update_user_replacements(user_id)
 
         return jsonify({'message': 'Replacement added successfully'})
     except Exception as e:
@@ -690,20 +675,21 @@ def add_replacement():
 def remove_replacement():
     try:
         original = request.form.get('original')
-        if not original:
-            return jsonify({'error': 'Original text required'}), 400
+        user_id = session.get('user_id')
+
+        if not all([original, user_id]):
+            return jsonify({'error': 'Missing required data'}), 400
 
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     DELETE FROM text_replacements 
-                    WHERE original_text = %s
-                """, (original,))
+                    WHERE user_id = %s AND original_text = %s
+                """, (user_id, original))
 
-        # Force reload in main.py
+        # Update replacements in main.py
         import main
-        main.load_replacements()
-        logger.info("✅ Replacement removed and reloaded")
+        main.update_user_replacements(user_id)
 
         return jsonify({'message': 'Replacement removed successfully'})
     except Exception as e:
@@ -714,16 +700,18 @@ def remove_replacement():
 @login_required
 def clear_replacements():
     try:
+        user_id = session.get('user_id')
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM text_replacements")
+                cur.execute("""
+                    DELETE FROM text_replacements
+                    WHERE user_id = %s
+                """, (user_id,))
 
-        # Force reload in main.py
+        # Update replacements in main.py
         import main
-        main.TEXT_REPLACEMENTS.clear()
-        main.load_replacements()
+        main.update_user_replacements(user_id)
 
-        logger.info("✅ All replacements cleared and reloaded")
         return jsonify({'message': 'All replacements cleared'})
     except Exception as e:
         logger.error(f"❌ Clear replacements error: {str(e)}")

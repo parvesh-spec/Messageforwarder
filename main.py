@@ -10,13 +10,9 @@ from telethon.sessions import StringSession
 from flask import Flask, jsonify
 import time
 
-# Global variables
-MESSAGE_IDS = {}  # source_msg_id: destination_msg_id mapping
-TEXT_REPLACEMENTS = {}
-SOURCE_CHANNEL = None
-DESTINATION_CHANNEL = None
-client = None
-SESSION_STRING = None
+# Global variables for multi-user support
+USER_SESSIONS = {}  # user_id: {client, source, destination, replacements}
+MESSAGE_IDS = {}  # user_id: {source_msg_id: destination_msg_id}
 
 # Set up logging
 logging.basicConfig(
@@ -61,38 +57,17 @@ def release_db(conn):
     if conn:
         db_pool.putconn(conn)
 
-async def setup_client(max_retries=3, retry_delay=5):
-    """Initialize Telegram client with session string and retry logic"""
-    global client, SESSION_STRING
-
+async def setup_client(user_id, session_string, max_retries=3, retry_delay=5):
+    """Initialize Telegram client for a specific user"""
     for attempt in range(max_retries):
         try:
-            # Get latest session string from database if not set
-            if not SESSION_STRING:
-                conn = get_db()
-                if conn:
-                    try:
-                        with conn.cursor(cursor_factory=DictCursor) as cur:
-                            cur.execute("""
-                                SELECT session_string 
-                                FROM bot_status 
-                                WHERE is_running = true 
-                                ORDER BY updated_at DESC 
-                                LIMIT 1
-                            """)
-                            result = cur.fetchone()
-                            if result and result['session_string']:
-                                SESSION_STRING = result['session_string']
-                    finally:
-                        release_db(conn)
-
-            if not SESSION_STRING:
-                logger.warning("⚠️ No session string available")
-                return False
+            if not session_string:
+                logger.warning(f"⚠️ No session string for user {user_id}")
+                return None
 
             # Create new client instance
             client = TelegramClient(
-                StringSession(SESSION_STRING),
+                StringSession(session_string),
                 API_ID,
                 API_HASH,
                 device_model="Replit Bot",
@@ -105,7 +80,7 @@ async def setup_client(max_retries=3, retry_delay=5):
             try:
                 await asyncio.wait_for(client.connect(), timeout=30)
             except asyncio.TimeoutError:
-                logger.error("❌ Connection timeout, retrying...")
+                logger.error(f"❌ Connection timeout for user {user_id}, retrying...")
                 if client:
                     await client.disconnect()
                 time.sleep(retry_delay)
@@ -113,124 +88,118 @@ async def setup_client(max_retries=3, retry_delay=5):
 
             # Verify authorization
             if not await client.is_user_authorized():
-                logger.error("❌ Bot not authorized")
+                logger.error(f"❌ Bot not authorized for user {user_id}")
                 await client.disconnect()
-                client = None
-                return False
+                return None
 
             me = await client.get_me()
-            logger.info(f"✅ Bot running as: {me.first_name} (ID: {me.id})")
-            return True
+            logger.info(f"✅ Bot running for user {user_id} as: {me.first_name} (ID: {me.id})")
+            return client
 
         except Exception as e:
-            logger.error(f"❌ Client setup error (attempt {attempt + 1}/{max_retries}): {str(e)}")
-            if client:
-                try:
-                    await client.disconnect()
-                except:
-                    pass
-            client = None
+            logger.error(f"❌ Client setup error for user {user_id} (attempt {attempt + 1}/{max_retries}): {str(e)}")
             time.sleep(retry_delay)
 
-    logger.error("❌ All connection attempts failed")
-    return False
+    logger.error(f"❌ All connection attempts failed for user {user_id}")
+    return None
 
-def load_channel_config():
-    """Load channel configuration from database"""
-    global SOURCE_CHANNEL, DESTINATION_CHANNEL
+def load_user_config(user_id):
+    """Load channel configuration for a specific user"""
     conn = None
     try:
         conn = get_db()
         if not conn:
-            return False
+            return None, None
 
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
                 SELECT source_channel, destination_channel 
                 FROM channel_config 
+                WHERE user_id = %s
                 ORDER BY updated_at DESC 
                 LIMIT 1
-            """)
+            """, (user_id,))
             result = cur.fetchone()
 
             if result:
-                SOURCE_CHANNEL = result['source_channel']
-                DESTINATION_CHANNEL = result['destination_channel']
-                logger.info(f"✅ Loaded channels - Source: {SOURCE_CHANNEL}, Dest: {DESTINATION_CHANNEL}")
-                return True
+                return result['source_channel'], result['destination_channel']
             else:
-                logger.warning("❌ No channel configuration found")
-                return False
+                logger.warning(f"❌ No channel configuration found for user {user_id}")
+                return None, None
 
     except Exception as e:
-        logger.error(f"❌ Channel config error: {str(e)}")
-        return False
+        logger.error(f"❌ Channel config error for user {user_id}: {str(e)}")
+        return None, None
     finally:
         if conn:
             release_db(conn)
 
-def load_replacements():
-    """Load text replacements from database"""
-    global TEXT_REPLACEMENTS
+def load_user_replacements(user_id):
+    """Load text replacements for a specific user"""
     conn = None
     try:
         conn = get_db()
         if not conn:
-            return False
+            return {}
 
         with conn.cursor(cursor_factory=DictCursor) as cur:
-            # Clear existing replacements first
-            TEXT_REPLACEMENTS.clear()
-
             cur.execute("""
                 SELECT original_text, replacement_text 
                 FROM text_replacements 
+                WHERE user_id = %s
                 ORDER BY LENGTH(original_text) DESC
-            """)
+            """, (user_id,))
 
+            replacements = {}
             for row in cur.fetchall():
-                TEXT_REPLACEMENTS[row['original_text']] = row['replacement_text']
+                replacements[row['original_text']] = row['replacement_text']
 
-            logger.info(f"✅ Loaded {len(TEXT_REPLACEMENTS)} replacements")
-            return True
+            logger.info(f"✅ Loaded {len(replacements)} replacements for user {user_id}")
+            return replacements
 
     except Exception as e:
-        logger.error(f"❌ Replacements error: {str(e)}")
-        TEXT_REPLACEMENTS.clear()
-        return False
+        logger.error(f"❌ Replacements error for user {user_id}: {str(e)}")
+        return {}
     finally:
         if conn:
             release_db(conn)
 
-def apply_text_replacements(text):
-    """Apply text replacements to message"""
-    # Always reload replacements before applying
-    load_replacements()
-
-    if not text:
+def apply_text_replacements(text, user_id):
+    """Apply text replacements for a specific user"""
+    if not text or user_id not in USER_SESSIONS:
         return text
 
     result = text
-    for original, replacement in TEXT_REPLACEMENTS.items():
+    replacements = USER_SESSIONS[user_id].get('replacements', {})
+    for original, replacement in replacements.items():
         if original in result:
             result = result.replace(original, replacement)
-            logger.info(f"✅ Replaced: {original} → {replacement}")
+            logger.info(f"✅ Replaced: {original} → {replacement} for user {user_id}")
 
     return result
 
-async def setup_handlers():
-    """Set up message handlers"""
-    global client
+async def setup_user_handlers(user_id, client):
+    """Set up message handlers for a specific user"""
+    if not client:
+        return False
+
     try:
         @client.on(events.NewMessage())
         async def handle_new_message(event):
             try:
-                if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
+                if user_id not in USER_SESSIONS:
+                    return
+
+                session = USER_SESSIONS[user_id]
+                source = session.get('source')
+                destination = session.get('destination')
+
+                if not source or not destination:
                     return
 
                 # Format channel IDs
                 chat_id = str(event.chat_id)
-                source_id = str(SOURCE_CHANNEL)
+                source_id = str(source)
                 if not chat_id.startswith('-100'):
                     chat_id = f"-100{chat_id.lstrip('-')}"
                 if not source_id.startswith('-100'):
@@ -242,11 +211,11 @@ async def setup_handlers():
 
                 # Process message
                 message_text = event.message.text if event.message.text else ""
-                if message_text and TEXT_REPLACEMENTS:
-                    message_text = apply_text_replacements(message_text)
+                if message_text:
+                    message_text = apply_text_replacements(message_text, user_id)
 
                 # Format destination channel ID
-                dest_id = str(DESTINATION_CHANNEL)
+                dest_id = str(destination)
                 if not dest_id.startswith('-100'):
                     dest_id = f"-100{dest_id.lstrip('-')}"
 
@@ -257,20 +226,32 @@ async def setup_handlers():
                     message_text,
                     formatting_entities=event.message.entities
                 )
-                MESSAGE_IDS[event.message.id] = sent_message.id
-                logger.info("✅ Message forwarded")
+
+                # Store message mapping for this user
+                if user_id not in MESSAGE_IDS:
+                    MESSAGE_IDS[user_id] = {}
+                MESSAGE_IDS[user_id][event.message.id] = sent_message.id
+                logger.info(f"✅ Message forwarded for user {user_id}")
 
             except Exception as e:
-                logger.error(f"❌ Message handler error: {str(e)}")
+                logger.error(f"❌ Message handler error for user {user_id}: {str(e)}")
 
         @client.on(events.MessageEdited())
         async def handle_edit(event):
             try:
-                if not SOURCE_CHANNEL or not DESTINATION_CHANNEL:
+                if user_id not in USER_SESSIONS:
                     return
 
+                session = USER_SESSIONS[user_id]
+                source = session.get('source')
+                destination = session.get('destination')
+
+                if not source or not destination:
+                    return
+
+                # Format channel IDs
                 chat_id = str(event.chat_id)
-                source_id = str(SOURCE_CHANNEL)
+                source_id = str(source)
                 if not chat_id.startswith('-100'):
                     chat_id = f"-100{chat_id.lstrip('-')}"
                 if not source_id.startswith('-100'):
@@ -279,18 +260,23 @@ async def setup_handlers():
                 if chat_id != source_id:
                     return
 
-                dest_msg_id = MESSAGE_IDS.get(event.message.id)
+                # Get message mapping for this user
+                msg_ids = MESSAGE_IDS.get(user_id, {})
+                dest_msg_id = msg_ids.get(event.message.id)
                 if not dest_msg_id:
                     return
 
+                # Process message
                 message_text = event.message.text
-                if message_text and TEXT_REPLACEMENTS:
-                    message_text = apply_text_replacements(message_text)
+                if message_text:
+                    message_text = apply_text_replacements(message_text, user_id)
 
-                dest_id = str(DESTINATION_CHANNEL)
+                # Format destination channel ID
+                dest_id = str(destination)
                 if not dest_id.startswith('-100'):
                     dest_id = f"-100{dest_id.lstrip('-')}"
 
+                # Edit destination message
                 dest_channel = await client.get_entity(int(dest_id))
                 await client.edit_message(
                     dest_channel,
@@ -298,146 +284,158 @@ async def setup_handlers():
                     message_text,
                     formatting_entities=event.message.entities
                 )
-                logger.info("✅ Edit synced")
+                logger.info(f"✅ Edit synced for user {user_id}")
 
             except Exception as e:
-                logger.error(f"❌ Edit handler error: {str(e)}")
+                logger.error(f"❌ Edit handler error for user {user_id}: {str(e)}")
 
         return True
 
     except Exception as e:
-        logger.error(f"❌ Handler setup error: {str(e)}")
+        logger.error(f"❌ Handler setup error for user {user_id}: {str(e)}")
         return False
 
-async def main():
-    """Main bot function"""
-    global client, SOURCE_CHANNEL, DESTINATION_CHANNEL
-
-    try:
-        # Setup client
-        if not await setup_client():
-            return False
-
-        # Load configuration
-        if not load_channel_config():
-            logger.error("❌ Failed to load channels")
-            return False
-
-        # Load replacements
-        if not load_replacements():
-            logger.warning("⚠️ No replacements loaded")
-
-        # Setup handlers
-        if not await setup_handlers():
-            logger.error("❌ Failed to setup handlers")
-            return False
-
-        logger.info("\n🤖 Bot is ready")
-        logger.info(f"📱 Source: {SOURCE_CHANNEL}")
-        logger.info(f"📱 Destination: {DESTINATION_CHANNEL}")
-        logger.info(f"📚 Replacements: {len(TEXT_REPLACEMENTS)}")
-
-        # Keep the bot running
+async def manage_user_session(user_id):
+    """Manage a user's bot session"""
+    while True:
         try:
-            while True:
-                # Check if bot should still be running from database
-                conn = get_db()
-                if conn:
-                    try:
-                        with conn.cursor(cursor_factory=DictCursor) as cur:
-                            cur.execute("SELECT is_running FROM bot_status ORDER BY updated_at DESC LIMIT 1")
-                            result = cur.fetchone()
-                            if not result or not result['is_running']:
-                                logger.info("👋 Bot stopped by user")
-                                break
-                    finally:
-                        release_db(conn)
+            # Check if bot should still be running
+            conn = get_db()
+            if conn:
+                try:
+                    with conn.cursor(cursor_factory=DictCursor) as cur:
+                        cur.execute("""
+                            SELECT is_running, session_string 
+                            FROM bot_status 
+                            WHERE user_id = %s AND is_running = true
+                            ORDER BY updated_at DESC 
+                            LIMIT 1
+                        """, (user_id,))
+                        result = cur.fetchone()
+                        if not result or not result['is_running']:
+                            logger.info(f"👋 Bot stopped for user {user_id}")
+                            break
 
-                # Check client connection and reconnect if needed
-                if not client or not client.is_connected():
-                    logger.error("❌ Client disconnected, attempting to reconnect")
-                    if not await setup_client():
-                        # If reconnection fails, check if we should still be running
-                        continue
+                        # Update session if changed
+                        if user_id in USER_SESSIONS:
+                            client = USER_SESSIONS[user_id].get('client')
+                            if client and not client.is_connected():
+                                logger.error(f"❌ Client disconnected for user {user_id}, attempting to reconnect")
+                                client = await setup_client(user_id, result['session_string'])
+                                if client:
+                                    USER_SESSIONS[user_id]['client'] = client
+                                    await setup_user_handlers(user_id, client)
+                finally:
+                    release_db(conn)
 
-                # Reload configuration and replacements
-                if load_channel_config():
-                    logger.info("✅ Channel config refreshed")
-                if load_replacements():
-                    logger.info("✅ Replacements refreshed")
+            # Reload user configuration
+            source, destination = load_user_config(user_id)
+            if source and destination and user_id in USER_SESSIONS:
+                USER_SESSIONS[user_id].update({
+                    'source': source,
+                    'destination': destination
+                })
 
-                # Wait before next check
-                await asyncio.sleep(30)
+            # Reload user replacements
+            replacements = load_user_replacements(user_id)
+            if user_id in USER_SESSIONS:
+                USER_SESSIONS[user_id]['replacements'] = replacements
 
-        except KeyboardInterrupt:
-            logger.info("👋 Bot stopped by user")
-            return True
-        except asyncio.CancelledError:
-            logger.info("👋 Bot stopping...")
+            # Wait before next check
+            await asyncio.sleep(30)
+
+        except Exception as e:
+            logger.error(f"❌ Session management error for user {user_id}: {str(e)}")
+            await asyncio.sleep(30)
+
+def add_user_session(user_id, session_string, source_channel=None, destination_channel=None):
+    """Add or update a user's session"""
+    async def setup_session():
+        try:
+            client = await setup_client(user_id, session_string)
+            if client:
+                # Initialize or update user session
+                USER_SESSIONS[user_id] = {
+                    'client': client,
+                    'source': source_channel,
+                    'destination': destination_channel,
+                    'replacements': load_user_replacements(user_id)
+                }
+
+                # Setup handlers
+                if await setup_user_handlers(user_id, client):
+                    # Start session management loop
+                    asyncio.create_task(manage_user_session(user_id))
+                    logger.info(f"✅ Session started for user {user_id}")
+                    return True
+            return False
+        except Exception as e:
+            logger.error(f"❌ Session setup error for user {user_id}: {str(e)}")
+            return False
+
+    # Run setup in event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    success = loop.run_until_complete(setup_session())
+    loop.close()
+    return success
+
+def remove_user_session(user_id):
+    """Remove a user's session"""
+    if user_id in USER_SESSIONS:
+        try:
+            session = USER_SESSIONS[user_id]
+            client = session.get('client')
+            if client:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(client.disconnect())
+                loop.close()
+            USER_SESSIONS.pop(user_id)
+            if user_id in MESSAGE_IDS:
+                MESSAGE_IDS.pop(user_id)
+            logger.info(f"✅ Session removed for user {user_id}")
             return True
         except Exception as e:
-            logger.error(f"❌ Runtime error: {str(e)}")
-            return False
+            logger.error(f"❌ Session removal error for user {user_id}: {str(e)}")
+    return False
 
-    except Exception as e:
-        logger.error(f"❌ Bot error: {str(e)}")
-        return False
+def update_user_channels(user_id, source, destination):
+    """Update a user's channel configuration"""
+    if user_id in USER_SESSIONS:
+        USER_SESSIONS[user_id].update({
+            'source': source,
+            'destination': destination
+        })
+        logger.info(f"✅ Channels updated for user {user_id}")
 
-    finally:
-        if client:
-            try:
-                if client.is_connected():
-                    await client.disconnect()
-            except:
-                pass
-            client = None
-        return True
-
-def start_health_server():
-    """Start health check server in a separate thread"""
-    try:
-        # Try ports in sequence until one works
-        ports = [8084, 9001, 9002]
-        for port in ports:
-            try:
-                health_app.run(host='0.0.0.0', port=port, debug=False)
-                logger.info(f"✅ Health check server started on port {port}")
-                break
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to start health check server on port {port}: {str(e)}")
-                if port == ports[-1]:
-                    logger.error("❌ Could not start health check server on any port")
-                continue
-
-    except Exception as e:
-        logger.error(f"❌ Health check server error: {str(e)}")
+def update_user_replacements(user_id):
+    """Update a user's text replacements"""
+    if user_id in USER_SESSIONS:
+        USER_SESSIONS[user_id]['replacements'] = load_user_replacements(user_id)
+        logger.info(f"✅ Replacements updated for user {user_id}")
 
 if __name__ == "__main__":
     try:
-        # Only start health check server if bot is not running
-        if not SESSION_STRING:
-            # Start health check server in a separate thread
-            health_thread = threading.Thread(
-                target=start_health_server,
-                daemon=True
-            )
-            health_thread.start()
-            logger.info("✅ Started health check server thread")
+        # Start health check server in a separate thread
+        health_thread = threading.Thread(
+            target=lambda: health_app.run(host='0.0.0.0', port=9001, debug=False),
+            daemon=True
+        )
+        health_thread.start()
+        logger.info("✅ Started health check server")
 
-        # Run bot
+        # Keep the main thread running
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(main())
+            loop.run_forever()
         except KeyboardInterrupt:
             logger.info("👋 Bot stopped by user")
         finally:
-            if client and client.is_connected():
-                loop.run_until_complete(client.disconnect())
             loop.close()
 
     except Exception as e:
         logger.error(f"❌ Fatal error: {str(e)}")
-        # Ensure the bot still runs even if health check fails
-        if not SESSION_STRING:
+        if not USER_SESSIONS:
             logger.warning("⚠️ No session string provided, waiting for configuration")
