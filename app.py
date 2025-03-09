@@ -2,7 +2,7 @@ import os
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
@@ -13,9 +13,11 @@ import psycopg2
 from psycopg2.extras import DictCursor
 from psycopg2 import pool
 from flask_session import Session
+from datetime import timedelta
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
+from flask_wtf.csrf import CSRFProtect
 
 # Set up logging
 logging.basicConfig(
@@ -31,9 +33,11 @@ app.config.update(
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    DEBUG=True,
-    WTF_CSRF_ENABLED=False  # Disable CSRF protection
+    DEBUG=True
 )
+
+# Initialize CSRF protection
+csrf = CSRFProtect(app)
 
 # Initialize session
 Session(app)
@@ -201,13 +205,13 @@ def login_post():
 
 @app.route('/register')
 def register():
-    form = RegisterForm(request.form)
+    form = RegisterForm()
     return render_template('auth/register.html', form=form)
 
 @app.route('/register', methods=['POST'])
 def register_post():
-    form = RegisterForm(request.form)
-    if not form.validate():
+    form = RegisterForm()
+    if not form.validate_on_submit():
         return render_template('auth/register.html', form=form)
 
     email = form.email.data
@@ -295,7 +299,6 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
-
 
 
 @app.route('/authorization')

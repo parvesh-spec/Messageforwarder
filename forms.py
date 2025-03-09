@@ -4,9 +4,6 @@ from wtforms.validators import DataRequired, Email, Length, EqualTo
 from email_validator import validate_email, EmailNotValidError
 
 class LoginForm(FlaskForm):
-    class Meta:
-        csrf = False  # Disable CSRF at form level
-
     email = StringField('Email', validators=[
         DataRequired(),
         Email(message='Invalid email address')
@@ -16,9 +13,6 @@ class LoginForm(FlaskForm):
     ])
 
 class RegisterForm(FlaskForm):
-    class Meta:
-        csrf = False  # Disable CSRF at form level
-
     email = StringField('Email', validators=[
         DataRequired(),
         Email(message='Invalid email address')
