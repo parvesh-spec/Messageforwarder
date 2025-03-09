@@ -188,6 +188,7 @@ async def setup_user_handlers(user_id, client):
         async def handle_new_message(event):
             try:
                 if user_id not in USER_SESSIONS:
+                    logger.info(f"No session found for user {user_id}")
                     return
 
                 session = USER_SESSIONS[user_id]
@@ -195,23 +196,25 @@ async def setup_user_handlers(user_id, client):
                 destination = session.get('destination')
 
                 if not source or not destination:
+                    logger.info(f"No source or destination channel configured for user {user_id}")
                     return
 
                 # Format channel IDs
                 chat_id = str(event.chat_id)
                 source_id = str(source)
 
-                # Add debug logging
-                logger.info(f"Received message in chat: {chat_id}, source channel: {source_id}")
+                # Add detailed logging
+                logger.info(f"Message received from chat: {chat_id}")
+                logger.info(f"Source channel configured: {source_id}")
+                logger.info(f"Message content: {event.message.text if event.message.text else 'No text'}")
 
                 # Strip -100 prefix if present for comparison
-                if chat_id.startswith('-100'):
-                    chat_id = chat_id[4:]
-                if source_id.startswith('-100'):
-                    source_id = source_id[4:]
+                chat_id = chat_id.lstrip('-100')
+                source_id = source_id.lstrip('-100')
 
                 # Compare stripped IDs
                 if chat_id != source_id:
+                    logger.info(f"Message not from source channel. Chat: {chat_id}, Source: {source_id}")
                     return
 
                 # Process message
@@ -267,10 +270,8 @@ async def setup_user_handlers(user_id, client):
                 source_id = str(source)
 
                 # Strip -100 prefix if present for comparison
-                if chat_id.startswith('-100'):
-                    chat_id = chat_id[4:]
-                if source_id.startswith('-100'):
-                    source_id = source_id[4:]
+                chat_id = chat_id.lstrip('-100')
+                source_id = source_id.lstrip('-100')
 
                 # Compare stripped IDs
                 if chat_id != source_id:
