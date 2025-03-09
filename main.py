@@ -201,8 +201,6 @@ async def setup_user_handlers(user_id, client):
                 if chat_id != source_id:
                     return
 
-                logger.info(f"📥 Message received from source channel")
-
                 # Process message
                 message = event.message
                 message_text = message.text if message.text else ""
@@ -217,7 +215,7 @@ async def setup_user_handlers(user_id, client):
 
                     # Forward message
                     dest_channel = await client.get_entity(int(dest_id))
-                    logger.info(f"📤 Forwarding message")
+                    logger.info(f"📥 Forwarding message to destination channel")
 
                     forward_start = int(time.time())
 
@@ -250,15 +248,14 @@ async def setup_user_handlers(user_id, client):
                                     source_id, dest_id, message_text,
                                     forward_start, forward_end
                                 ))
+                            logger.info("✅ Message forwarded successfully")
                         except Exception as db_error:
                             logger.error(f"❌ Database error: {str(db_error)}")
                         finally:
                             release_db(conn)
 
-                    logger.info(f"✅ Message forwarded")
-
                 except Exception as e:
-                    logger.error(f"❌ Forward error: {str(e)}")
+                    logger.error(f"❌ Message forward error: {str(e)}")
 
             except Exception as e:
                 logger.error(f"❌ Handler error: {str(e)}")
