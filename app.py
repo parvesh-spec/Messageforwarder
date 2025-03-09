@@ -1,7 +1,8 @@
 import os
 import logging
 import threading
-import time  # Add this import
+import time
+from datetime import datetime  # Add this import
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
@@ -297,14 +298,26 @@ def dashboard():
             """, (user_id,))
             replacements_count = cur.fetchone()[0]
 
+            # Get recent forwarding logs
+            cur.execute("""
+                SELECT source_message_id, dest_message_id, 
+                       message_text, received_at, forwarded_at
+                FROM forwarding_logs
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 5
+            """, (user_id,))
+            forwarding_logs = cur.fetchall()
+
     return render_template('dashboard/overview.html',
-                         telegram_authorized=check_telegram_auth(user),
-                         telegram_username=user['telegram_username'] if user else None,
-                         telegram_auth_date=user['auth_date'] if user else None,
-                         source_channel=config['source_channel'] if config else None,
-                         dest_channel=config['destination_channel'] if config else None,
-                         is_active=config['is_active'] if config else False,
-                         replacements_count=replacements_count)
+                       telegram_authorized=check_telegram_auth(user),
+                       telegram_username=user['telegram_username'] if user else None,
+                       telegram_auth_date=user['auth_date'] if user else None,
+                       source_channel=config['source_channel'] if config else None,
+                       dest_channel=config['destination_channel'] if config else None,
+                       is_active=config['is_active'] if config else False,
+                       replacements_count=replacements_count,
+                       forwarding_logs=forwarding_logs)
 
 
 @app.route('/authorization')
@@ -887,6 +900,11 @@ def handle_db_error(e, operation):
         logger.error(f"❌ Database error in {operation}: {error_msg}")
         return "An unexpected error occurred"
 
+
+# Add datetime filter
+@app.template_filter('datetime')
+def format_datetime(timestamp):
+    return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)

@@ -36,4 +36,82 @@
     <a href="{{ url_for('forwarding') }}" class="btn btn-primary">Configure Channels</a>
     {% endif %}
 </div>
+
+<div class="dashboard-card">
+    <h3>Recent Forwarding Logs</h3>
+    {% if forwarding_logs %}
+    <div class="logs-container">
+        {% for log in forwarding_logs %}
+        <div class="log-entry">
+            <div class="log-time">
+                <span class="time-label">Received:</span>
+                <span class="time-value">{{ log.received_at|datetime }}</span>
+                <span class="time-label">Forwarded:</span>
+                <span class="time-value">{{ log.forwarded_at|datetime }}</span>
+                <span class="forward-time">({{ (log.forwarded_at - log.received_at)|round(2) }}s)</span>
+            </div>
+            <div class="log-message">{{ log.message_text[:100] + '...' if log.message_text|length > 100 else log.message_text }}</div>
+            <div class="log-ids">
+                <span class="id-label">Source ID:</span> {{ log.source_message_id }}
+                <span class="id-label">Dest ID:</span> {{ log.dest_message_id }}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p>No recent forwarding activity</p>
+    {% endif %}
+</div>
+
+<style>
+.logs-container {
+    margin-top: 15px;
+}
+
+.log-entry {
+    background: #f5f5f5;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 10px;
+}
+
+.log-time {
+    font-size: 0.9em;
+    color: #666;
+    margin-bottom: 8px;
+}
+
+.time-label {
+    font-weight: bold;
+    margin-right: 5px;
+}
+
+.time-value {
+    margin-right: 15px;
+}
+
+.forward-time {
+    color: #2196F3;
+    font-weight: bold;
+}
+
+.log-message {
+    background: white;
+    padding: 10px;
+    border-radius: 4px;
+    margin: 8px 0;
+    word-break: break-word;
+}
+
+.log-ids {
+    font-size: 0.8em;
+    color: #999;
+}
+
+.id-label {
+    font-weight: bold;
+    margin-right: 5px;
+    margin-left: 10px;
+}
+</style>
 {% endblock %}

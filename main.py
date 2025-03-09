@@ -187,8 +187,11 @@ async def setup_user_handlers(user_id, client):
         @client.on(events.NewMessage())
         async def handle_new_message(event):
             try:
+                # Log every message receipt
+                logger.info(f"📥 Received message in chat {event.chat_id}")
+
                 if user_id not in USER_SESSIONS:
-                    logger.info(f"No session found for user {user_id}")
+                    logger.info(f"❌ No session found for user {user_id}")
                     return
 
                 session = USER_SESSIONS[user_id]
@@ -196,7 +199,7 @@ async def setup_user_handlers(user_id, client):
                 destination = session.get('destination')
 
                 if not source or not destination:
-                    logger.info(f"No source or destination channel configured for user {user_id}")
+                    logger.info(f"❌ No source/destination configured for user {user_id}")
                     return
 
                 # Format channel IDs for comparison
@@ -210,6 +213,7 @@ async def setup_user_handlers(user_id, client):
 
                 # Compare exact channel IDs
                 if chat_id != source_id:
+                    logger.info(f"❌ Message not from source channel. Got {chat_id}, expected {source_id}")
                     return
 
                 # Process message
@@ -217,6 +221,7 @@ async def setup_user_handlers(user_id, client):
                 message_text = message.text if message.text else ""
                 if message_text:
                     message_text = apply_text_replacements(message_text, user_id)
+                    logger.info(f"📝 Processed text: {message_text}")
 
                 # Get destination channel ID
                 dest_id = str(destination)
@@ -226,7 +231,10 @@ async def setup_user_handlers(user_id, client):
                 try:
                     # Get destination channel
                     dest_channel = await client.get_entity(int(dest_id))
-                    logger.info(f"✅ Forwarding message to {dest_channel.title}")
+                    logger.info(f"📤 Forwarding to channel: {dest_channel.title}")
+
+                    # Store time before forwarding
+                    forward_start = int(time.time())
 
                     # Forward message
                     sent_message = await client.send_message(
@@ -240,74 +248,35 @@ async def setup_user_handlers(user_id, client):
                     if user_id not in MESSAGE_IDS:
                         MESSAGE_IDS[user_id] = {}
                     MESSAGE_IDS[user_id][message.id] = sent_message.id
-                    logger.info(f"✅ Message forwarded successfully")
+
+                    # Log forwarding time
+                    forward_end = int(time.time())
+
+                    # Store forwarding logs in database
+                    conn = get_db()
+                    if conn:
+                        try:
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    INSERT INTO forwarding_logs 
+                                    (user_id, source_message_id, dest_message_id, source_chat_id, 
+                                     dest_chat_id, message_text, received_at, forwarded_at)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                """, (
+                                    user_id, message.id, sent_message.id, 
+                                    source_id, dest_id, message_text,
+                                    forward_start, forward_end
+                                ))
+                        finally:
+                            release_db(conn)
+
+                    logger.info(f"✅ Message forwarded successfully in {forward_end - forward_start}s")
 
                 except Exception as e:
                     logger.error(f"❌ Message forward error: {str(e)}")
 
             except Exception as e:
                 logger.error(f"❌ Message handler error: {str(e)}")
-
-        @client.on(events.MessageEdited())
-        async def handle_edit(event):
-            try:
-                if user_id not in USER_SESSIONS:
-                    return
-
-                session = USER_SESSIONS[user_id]
-                source = session.get('source')
-                destination = session.get('destination')
-
-                if not source or not destination:
-                    return
-
-                # Format channel IDs
-                chat_id = str(event.chat_id)
-                if not chat_id.startswith('-100'):
-                    chat_id = f"-100{chat_id.lstrip('-')}"
-
-                source_id = str(source)
-                if not source_id.startswith('-100'):
-                    source_id = f"-100{source_id.lstrip('-')}"
-
-                # Compare exact channel IDs
-                if chat_id != source_id:
-                    return
-
-                # Get message mapping
-                msg_ids = MESSAGE_IDS.get(user_id, {})
-                dest_msg_id = msg_ids.get(event.message.id)
-                if not dest_msg_id:
-                    return
-
-                # Process edited message
-                message = event.message
-                message_text = message.text if message.text else ""
-                if message_text:
-                    message_text = apply_text_replacements(message_text, user_id)
-
-                # Format destination ID
-                dest_id = str(destination)
-                if not dest_id.startswith('-100'):
-                    dest_id = f"-100{dest_id.lstrip('-')}"
-
-                try:
-                    # Edit destination message
-                    dest_channel = await client.get_entity(int(dest_id))
-                    await client.edit_message(
-                        dest_channel,
-                        dest_msg_id,
-                        message_text,
-                        file=message.media if message.media else None,
-                        formatting_entities=message.entities
-                    )
-                    logger.info(f"✅ Message edit synced")
-
-                except Exception as e:
-                    logger.error(f"❌ Edit sync error: {str(e)}")
-
-            except Exception as e:
-                logger.error(f"❌ Edit handler error: {str(e)}")
 
         logger.info(f"✅ Event handlers set up for user {user_id}")
         return True
