@@ -33,11 +33,14 @@ app.config.update(
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
+    WTF_CSRF_TIME_LIMIT=3600,  # Increase CSRF token timeout to 1 hour
+    WTF_CSRF_SSL_STRICT=False,  # Disable SSL-only for CSRF tokens
     DEBUG=True
 )
 
 # Initialize CSRF protection
 csrf = CSRFProtect(app)
+csrf.init_app(app)
 
 # Initialize session
 Session(app)
@@ -218,7 +221,6 @@ def async_route(f):
 # Enhanced database connection context manager
 
 
-
 # Add error handling for database operations
 def handle_db_error(func):
     @wraps(func)
@@ -315,52 +317,54 @@ def login_post():
             session['telegram_id'] = user['telegram_id']
             return redirect(url_for('dashboard'))
 
-@app.route('/register')
+@app.route('/register', methods=['GET', 'POST'])
 def register():
+    """Handle both GET and POST for registration"""
     form = RegisterForm()
-    return render_template('auth/register.html', form=form)
 
-@app.route('/register', methods=['POST'])
-def register_post():
-    form = RegisterForm()
-    if not form.validate_on_submit():
-        # Get all form errors including CSRF
-        errors = []
-        for field, field_errors in form.errors.items():
-            if field == 'csrf_token':
-                # Refresh CSRF token on validation failure
+    if request.method == 'POST':
+        if not form.validate_on_submit():
+            # Handle CSRF errors specifically
+            if 'csrf_token' in form.errors:
+                # Generate a new CSRF token
                 form.csrf_token.data = form.csrf_token._value()
-                return render_template('auth/register.html', form=form, 
-                                        error="Please try submitting the form again.")
-            errors.extend(field_errors)
+                return render_template('auth/register.html', 
+                                    form=form,
+                                    error="Security token expired. Please try submitting the form again.")
 
-        # Return form with other validation errors
-        return render_template('auth/register.html', form=form)
+            # Handle other validation errors
+            return render_template('auth/register.html', form=form)
 
-    email = form.email.data
-    password = form.password.data
+        email = form.email.data
+        password = form.password.data
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-            if cur.fetchone():
-                form.email.errors.append('Email already registered')
-                return render_template('auth/register.html', form=form)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Check if email exists
+                cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+                if cur.fetchone():
+                    form.email.errors.append('Email already registered')
+                    return render_template('auth/register.html', form=form)
 
-            cur.execute("""
-                INSERT INTO users (email, password_hash)
-                VALUES (%s, %s)
-                RETURNING id
-            """, (email, generate_password_hash(password)))
+                # Create new user
+                cur.execute("""
+                    INSERT INTO users (email, password_hash)
+                    VALUES (%s, %s)
+                    RETURNING id
+                """, (email, generate_password_hash(password)))
 
-            user_id = cur.fetchone()[0]
+                user_id = cur.fetchone()[0]
 
-            # Clear and update session with new data
-            session.clear()
-            session['user_id'] = user_id
-            session['_fresh'] = True  # Mark session as fresh
+                # Clear and update session
+                session.clear()
+                session['user_id'] = user_id
+                session['_fresh'] = True
+                session.permanent = True
 
-            return redirect(url_for('dashboard'))
+                return redirect(url_for('dashboard'))
+
+    # GET request - just show the form
+    return render_template('auth/register.html', form=form)
 
 @app.route('/logout')
 def logout():
