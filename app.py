@@ -53,6 +53,8 @@ class TelegramManager:
         self._lock = threading.Lock()
         self._client = None
         self._loop = None
+        self._current_phone = None
+        self._current_hash = None
 
     async def _initialize_client(self, session_string=None):
         """Initialize the Telegram client"""
@@ -73,25 +75,24 @@ class TelegramManager:
             self._client = None
             raise
 
+    def save_verification_data(self, phone, hash_value):
+        """Save phone and hash for verification"""
+        self._current_phone = phone
+        self._current_hash = hash_value
+        logger.info("✅ Saved verification data")
+
+    def get_verification_data(self):
+        """Get saved verification data"""
+        return self._current_phone, self._current_hash
+
     async def get_client(self, session_string=None):
         """Get the Telegram client instance"""
         with self._lock:
             try:
-                # If client exists and is connected
                 if self._client and self._client.is_connected():
-                    # If no session string is provided, return current client
-                    if not session_string:
-                        return self._client
+                    return self._client
 
-                    # If session string matches and client is authorized, return it
-                    if self._client.session.save() == session_string:
-                        if await self._client.is_user_authorized():
-                            return self._client
-
-                # Clear existing client
                 await self._cleanup_client()
-
-                # Initialize new client
                 await self._initialize_client(session_string)
                 return self._client
 
@@ -110,16 +111,6 @@ class TelegramManager:
                 pass
             finally:
                 self._client = None
-
-    async def check_authorization(self, session_string):
-        """Check if a session is authorized"""
-        try:
-            client = await self.get_client(session_string)
-            is_authorized = await client.is_user_authorized()
-            return is_authorized
-        except Exception as e:
-            logger.error(f"❌ Authorization check error: {str(e)}")
-            return False
 
 # Initialize the Telegram manager
 telegram_manager = TelegramManager(
@@ -308,7 +299,6 @@ def dashboard():
                        forwarding_logs=forwarding_logs)
 
 
-
 @app.route('/authorization')
 @login_required
 def authorization():
@@ -435,7 +425,6 @@ async def send_otp():
         # Store important session data
         important_data = {k: session.get(k) for k in ['user_id', 'csrf_token']}
 
-        # Initialize phone validation
         phone = request.form.get('phone')
         if not phone:
             return jsonify({'error': 'Phone number is required'}), 400
@@ -446,132 +435,120 @@ async def send_otp():
             phone = '+' + phone
 
         try:
-            # Initialize client with proper error handling
-            client = None
-            try:
-                client = await telegram_manager.get_client()
-                if not client:
-                    raise Exception("Failed to initialize Telegram client")
-                logger.info("✅ Successfully initialized Telegram client")
-            except Exception as e:
-                logger.error(f"❌ Client initialization error: {str(e)}")
-                return jsonify({'error': 'Failed to connect to Telegram. Please try again.'}), 500
-
-            # Send OTP with proper error handling
-            try:
-                sent = await client.send_code_request(phone)
-                logger.info(f"✅ Successfully sent OTP to {phone}")
-            except PhoneNumberInvalidError:
-                logger.error(f"❌ Invalid phone number format: {phone}")
-                return jsonify({'error': 'Please enter a valid phone number with country code (e.g. +1234567890)'}), 400
-            except Exception as e:
-                logger.error(f"❌ Failed to send OTP: {str(e)}")
-                return jsonify({'error': 'Failed to send OTP. Please try again.'}), 500
-
-            # Clear session but preserve important data
-            session.clear()
-            session.update(important_data)
-
-            # Store authentication data
-            session['user_phone'] = phone
-            session['phone_code_hash'] = sent.phone_code_hash
-            session['otp_sent_at'] = int(time.time())
-            session.permanent = True
-
-            return jsonify({'message': 'OTP sent successfully'})
-
-        except Exception as e:
-            logger.error(f"❌ Send OTP error: {str(e)}")
-            return jsonify({'error': str(e)}), 500
-
-    except Exception as e:
-        logger.error(f"❌ Critical error in send_otp: {str(e)}")
-        return jsonify({'error': 'An unexpected error occurred. Please try again.'}), 500
-
-@app.route('/verify-otp', methods=['POST'])
-@async_route
-async def verify_otp():
-    """Verify OTP and complete Telegram authorization"""
-    try:
-        # Get all required data
-        phone = session.get('user_phone')
-        phone_code_hash = session.get('phone_code_hash')
-        otp_sent_at = session.get('otp_sent_at', 0)
-        otp = request.form.get('otp')
-        password = request.form.get('password')  # For 2FA if needed
-
-        # Validate data presence
-        if not all([phone, phone_code_hash, otp]):
-            return jsonify({'error': 'Missing required data'}), 400
-
-        # Check OTP expiry (5 minutes)
-        if (int(time.time()) - otp_sent_at) > 300:
-            return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
-
-        try:
             # Initialize client
             client = await telegram_manager.get_client()
             if not client:
                 raise Exception("Failed to initialize Telegram client")
             logger.info("✅ Got Telegram client")
 
-            # Sign in with retries
-            for attempt in range(3):
-                try:
-                    await client.sign_in(phone=phone, code=otp, phone_code_hash=phone_code_hash)
-                    break
-                except SessionPasswordNeededError:
-                    if not password:
-                        return jsonify({
-                            'error': 'two_factor_needed',
-                            'message': 'Two-factor authentication required'
-                        })
-                    await client.sign_in(password=password)
-                    break
-                except Exception as e:
-                    if "phone code expired" in str(e).lower() or attempt == 2:
-                        raise
-                    await asyncio.sleep(1)
+            # Send code request
+            try:
+                sent = await client.send_code_request(phone)
+                logger.info(f"✅ Successfully sent OTP to {phone}")
 
-            # Verify successful authorization
-            if await client.is_user_authorized():
-                me = await client.get_me()
-                session_string = client.session.save()
-
-                # Update database
-                with get_db() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            UPDATE users 
-                            SET telegram_id = %s,
-                                telegram_username = %s,
-                                auth_date = CURRENT_TIMESTAMP,
-                                session_string = %s
-                            WHERE id = %s
-                        """, (me.id, me.username, session_string, session.get('user_id')))
+                # Save verification data
+                telegram_manager.save_verification_data(phone, sent.phone_code_hash)
 
                 # Update session
-                session['telegram_id'] = me.id
-                session['session_string'] = session_string
-                logger.info(f"✅ Telegram authorization successful for user {me.id}")
+                session.clear()
+                session.update(important_data)
+                session['user_phone'] = phone
+                session['phone_code_hash'] = sent.phone_code_hash
+                session['otp_sent_at'] = int(time.time())
+                session.permanent = True
 
-                return jsonify({'message': 'Authorization successful'})
-            else:
-                logger.error("❌ Authorization failed after sign in")
-                return jsonify({'error': 'Authorization failed'}), 400
+                return jsonify({'message': 'OTP sent successfully'})
+
+            except PhoneNumberInvalidError:
+                logger.error(f"❌ Invalid phone number format: {phone}")
+                return jsonify({'error': 'Please enter a valid phone number with country code'}), 400
+            except Exception as e:
+                logger.error(f"❌ Failed to send OTP: {str(e)}")
+                return jsonify({'error': 'Failed to send OTP. Please try again.'}), 500
 
         except Exception as e:
-            error_msg = str(e)
-            logger.error(f"❌ Verification error: {error_msg}")
-            if "phone code expired" in error_msg.lower():
-                return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
-            elif "phone code invalid" in error_msg.lower():
-                return jsonify({'error': 'Invalid OTP. Please check and try again.'}), 400
-            return jsonify({'error': 'Failed to verify OTP. Please try again.'}), 400
+            logger.error(f"❌ Critical error: {str(e)}")
+            return jsonify({'error': 'Failed to connect to Telegram. Please try again.'}), 500
 
     except Exception as e:
-        logger.error(f"❌ Critical error in verify_otp: {str(e)}")
-        return jsonify({'error': 'An unexpected error occurred. Please try again.'}), 500
+        logger.error(f"❌ Unexpected error: {str(e)}")
+        return jsonify({'error': 'An unexpected error occurred'}), 500
+
+@app.route('/verify-otp', methods=['POST'])
+@async_route
+async def verify_otp():
+    """Verify OTP and complete Telegram authorization"""
+    try:
+        # Get verification data
+        stored_phone, stored_hash = telegram_manager.get_verification_data()
+        phone = session.get('user_phone', stored_phone)
+        phone_code_hash = session.get('phone_code_hash', stored_hash)
+        otp = request.form.get('otp')
+
+        if not all([phone, phone_code_hash, otp]):
+            logger.error("❌ Missing verification data")
+            return jsonify({'error': 'Please request a new OTP'}), 400
+
+        try:
+            # Get client
+            client = await telegram_manager.get_client()
+            if not client:
+                raise Exception("Failed to initialize Telegram client")
+            logger.info("✅ Got Telegram client for verification")
+
+            # Sign in
+            try:
+                await client.sign_in(phone=phone, code=otp, phone_code_hash=phone_code_hash)
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    session_string = client.session.save()
+
+                    # Update database
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                UPDATE users 
+                                SET telegram_id = %s,
+                                    telegram_username = %s,
+                                    auth_date = CURRENT_TIMESTAMP,
+                                    session_string = %s
+                                WHERE id = %s
+                            """, (me.id, me.username, session_string, session.get('user_id')))
+
+                    # Update session
+                    session['telegram_id'] = me.id
+                    session['session_string'] = session_string
+                    logger.info(f"✅ Successfully authorized user {me.id}")
+
+                    return jsonify({'message': 'Authorization successful'})
+                else:
+                    logger.error("❌ Authorization failed")
+                    return jsonify({'error': 'Authorization failed'}), 400
+
+            except SessionPasswordNeededError:
+                logger.info("2FA required")
+                return jsonify({
+                    'error': 'two_factor_needed',
+                    'message': 'Two-factor authentication required'
+                })
+            except Exception as e:
+                error_msg = str(e).lower()
+                logger.error(f"❌ Sign in error: {error_msg}")
+
+                if "phone code expired" in error_msg:
+                    return jsonify({'error': 'OTP expired. Please request a new one.'}), 400
+                elif "phone code invalid" in error_msg:
+                    return jsonify({'error': 'Invalid OTP. Please try again.'}), 400
+
+                return jsonify({'error': 'Failed to verify OTP'}), 400
+
+        except Exception as e:
+            logger.error(f"❌ Client error: {str(e)}")
+            return jsonify({'error': 'Failed to connect to Telegram'}), 500
+
+    except Exception as e:
+        logger.error(f"❌ Verification error: {str(e)}")
+        return jsonify({'error': 'An unexpected error occurred'}), 500
 
 @app.before_request
 def check_session_expiry():
