@@ -4,6 +4,10 @@
 <div class="auth-box">
     <h2>Create Account</h2>
 
+    {% if csrf_error %}
+        <div class="alert alert-error">Session expired. Please try again.</div>
+    {% endif %}
+
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
             {% for category, message in messages %}
@@ -13,7 +17,7 @@
     {% endwith %}
 
     <form method="POST">
-        {{ form.csrf_token }}
+        {{ form.hidden_tag() }}
         <div class="form-group">
             <label>Email Address</label>
             {{ form.email(class="form-control", placeholder="Enter your email") }}

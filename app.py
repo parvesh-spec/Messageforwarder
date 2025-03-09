@@ -20,20 +20,27 @@ import time
 
 # Configure Flask application
 app = Flask(__name__)
+
+# Configuration
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    DEBUG=True
+    DEBUG=True,
+    WTF_CSRF_ENABLED=True,
+    WTF_CSRF_SECRET_KEY=os.urandom(24),  # Separate key for CSRF
+    WTF_CSRF_TIME_LIMIT=3600  # 1 hour
 )
 
-# Initialize session
+# Initialize extensions
 Session(app)
-
-# Initialize CSRF protection
 csrf = CSRFProtect(app)
-csrf.init_app(app)
+
+# Error handler for CSRF errors
+@app.errorhandler(400)
+def handle_csrf_error(e):
+    return render_template('auth/register.html', form=RegisterForm(), csrf_error=True)
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -225,7 +232,9 @@ def register_post():
                     """, (email, generate_password_hash(password)))
 
                     user_id = cur.fetchone()[0]
+                    session.clear()  # Clear old session
                     session['user_id'] = user_id
+                    session.modified = True  # Mark session as modified
                     flash('Registration successful!', 'success')
                     return redirect(url_for('dashboard'))
         else:
@@ -238,6 +247,7 @@ def register_post():
         app.logger.error(f"Registration error: {str(e)}")
         flash('An error occurred during registration. Please try again.', 'error')
         return render_template('auth/register.html', form=form)
+
 
 
 @app.route('/logout')
