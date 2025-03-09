@@ -212,6 +212,17 @@ def register():
 def register_post():
     form = RegisterForm()
     if not form.validate_on_submit():
+        # Get all form errors including CSRF
+        errors = []
+        for field, field_errors in form.errors.items():
+            if field == 'csrf_token':
+                # Refresh CSRF token on validation failure
+                form.csrf_token.data = form.csrf_token._value()
+                return render_template('auth/register.html', form=form, 
+                                    error="Please try submitting the form again.")
+            errors.extend(field_errors)
+
+        # Return form with other validation errors
         return render_template('auth/register.html', form=form)
 
     email = form.email.data
@@ -231,7 +242,12 @@ def register_post():
             """, (email, generate_password_hash(password)))
 
             user_id = cur.fetchone()[0]
+
+            # Clear and update session with new data
+            session.clear()
             session['user_id'] = user_id
+            session['_fresh'] = True  # Mark session as fresh
+
             return redirect(url_for('dashboard'))
 
 @app.route('/logout')
@@ -299,6 +315,7 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
+
 
 
 @app.route('/authorization')

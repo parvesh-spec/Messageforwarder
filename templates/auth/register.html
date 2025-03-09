@@ -12,6 +12,10 @@
         {% endif %}
     {% endwith %}
 
+    {% if error %}
+        <div class="alert alert-danger">{{ error }}</div>
+    {% endif %}
+
     <form method="POST" action="{{ url_for('register_post') }}">
         {{ form.csrf_token }}
         <div class="form-group">
