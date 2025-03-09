@@ -1,23 +1,21 @@
 import os
 import logging
-import threading
-import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_session import Session
+from flask_wtf.csrf import CSRFProtect
+from forms import LoginForm, RegisterForm
+import psycopg2
+from psycopg2.extras import DictCursor
+from psycopg2 import pool
+from contextlib import contextmanager
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
 from telethon.sessions import StringSession
 import asyncio
 from functools import wraps
-import psycopg2
-from psycopg2.extras import DictCursor
-from psycopg2 import pool
-from flask_session import Session
-from datetime import timedelta
-from contextlib import contextmanager
-from werkzeug.security import generate_password_hash, check_password_hash
-from forms import LoginForm, RegisterForm
-from flask_wtf.csrf import CSRFProtect
+import threading
 
 # Configure Flask application
 app = Flask(__name__)
@@ -27,15 +25,16 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
     DEBUG=True,
-    WTF_CSRF_TIME_LIMIT=3600,  # 1 hour CSRF token validity
-    WTF_CSRF_SSL_STRICT=False  # Disable SSL-only for CSRF cookies
+    WTF_CSRF_ENABLED=True,  # Enable CSRF protection
+    WTF_CSRF_SECRET_KEY=os.environ.get('CSRF_SECRET_KEY', os.urandom(24))  # Separate CSRF secret key
 )
-
-# Initialize CSRF protection
-csrf = CSRFProtect(app)
 
 # Initialize session
 Session(app)
+
+# Initialize CSRF protection after session
+csrf = CSRFProtect()
+csrf.init_app(app)
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -206,28 +205,28 @@ def register():
 @app.route('/register', methods=['POST'])
 def register_post():
     form = RegisterForm()
-    if not form.validate_on_submit():
-        return render_template('auth/register.html', form=form)
+    if form.validate_on_submit():
+        email = form.email.data
+        password = form.password.data
 
-    email = form.email.data
-    password = form.password.data
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+                if cur.fetchone():
+                    form.email.errors.append('Email already registered')
+                    return render_template('auth/register.html', form=form)
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-            if cur.fetchone():
-                form.email.errors.append('Email already registered')
-                return render_template('auth/register.html', form=form)
+                cur.execute("""
+                    INSERT INTO users (email, password_hash)
+                    VALUES (%s, %s)
+                    RETURNING id
+                """, (email, generate_password_hash(password)))
 
-            cur.execute("""
-                INSERT INTO users (email, password_hash)
-                VALUES (%s, %s)
-                RETURNING id
-            """, (email, generate_password_hash(password)))
+                user_id = cur.fetchone()[0]
+                session['user_id'] = user_id
+                return redirect(url_for('dashboard'))
 
-            user_id = cur.fetchone()[0]
-            session['user_id'] = user_id
-            return redirect(url_for('dashboard'))
+    return render_template('auth/register.html', form=form)
 
 @app.route('/logout')
 def logout():
@@ -915,7 +914,7 @@ def handle_db_error(e, operation):
 # Add datetime filter
 @app.template_filter('datetime')
 def format_datetime(timestamp):
-    return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+    return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %HM:%S')
 
 # Set up logging
 logging.basicConfig(

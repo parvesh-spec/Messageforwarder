@@ -13,14 +13,15 @@
     {% endwith %}
 
     <form method="POST" action="{{ url_for('register_post') }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        {{ form.hidden_tag() }}  {# This includes the CSRF token #}
+
         <div class="form-group">
             <label>Email Address</label>
-            {{ form.email(class="form-control") }}
+            {{ form.email(class="form-control", placeholder="Enter your email") }}
             {% if form.email.errors %}
                 <div class="errors">
                     {% for error in form.email.errors %}
-                        <span>{{ error }}</span>
+                        <span class="error-text">{{ error }}</span>
                     {% endfor %}
                 </div>
             {% endif %}
@@ -28,11 +29,11 @@
 
         <div class="form-group">
             <label>Password</label>
-            {{ form.password(class="form-control") }}
+            {{ form.password(class="form-control", placeholder="Enter your password") }}
             {% if form.password.errors %}
                 <div class="errors">
                     {% for error in form.password.errors %}
-                        <span>{{ error }}</span>
+                        <span class="error-text">{{ error }}</span>
                     {% endfor %}
                 </div>
             {% endif %}
@@ -40,11 +41,11 @@
 
         <div class="form-group">
             <label>Confirm Password</label>
-            {{ form.confirm_password(class="form-control") }}
+            {{ form.confirm_password(class="form-control", placeholder="Confirm your password") }}
             {% if form.confirm_password.errors %}
                 <div class="errors">
                     {% for error in form.confirm_password.errors %}
-                        <span>{{ error }}</span>
+                        <span class="error-text">{{ error }}</span>
                     {% endfor %}
                 </div>
             {% endif %}
@@ -59,4 +60,13 @@
         <p>Already have an account? <a href="{{ url_for('login') }}">Login here</a></p>
     </div>
 </div>
+
+<style>
+.error-text {
+    color: #dc3545;
+    font-size: 0.875rem;
+    display: block;
+    margin-top: 0.25rem;
+}
+</style>
 {% endblock %}
