@@ -709,11 +709,20 @@ def toggle_bot():
 
                         # Start bot
                         import main
+                        source_channel = str(config['source_channel'])
+                        dest_channel = str(config['destination_channel'])
+
+                        # Ensure proper channel ID format
+                        if not source_channel.startswith('-100'):
+                            source_channel = f"-100{source_channel.lstrip('-')}"
+                        if not dest_channel.startswith('-100'):
+                            dest_channel = f"-100{dest_channel.lstrip('-')}"
+
                         success = main.add_user_session(
-                            user_id=int(telegram_id),  # Ensure telegram_id is an integer
+                            user_id=int(telegram_id),
                             session_string=session_string,
-                            source_channel=config['source_channel'],
-                            destination_channel=config['destination_channel']
+                            source_channel=source_channel,
+                            destination_channel=dest_channel
                         )
 
                         if not success:

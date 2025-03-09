@@ -233,7 +233,7 @@ async def setup_user_handlers(user_id, client):
                         MESSAGE_IDS[user_id] = {}
                     MESSAGE_IDS[user_id][message.id] = sent_message.id
 
-                    # Log to database
+                    # Store forwarding logs in database
                     conn = get_db()
                     if conn:
                         try:
