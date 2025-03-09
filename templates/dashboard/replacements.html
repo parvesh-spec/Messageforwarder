@@ -3,25 +3,26 @@
 {% block content %}
 <div class="dashboard-card">
     <h3>Text Replacements</h3>
-    
+
     <form id="replacement-form" class="dashboard-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-row">
             <div class="form-group">
                 <label>Original Text</label>
-                <input type="text" id="original" class="form-control" required>
+                <input type="text" id="original" name="original" class="form-control" required>
             </div>
-            
+
             <div class="form-group">
                 <label>Replace With</label>
-                <input type="text" id="replacement" class="form-control" required>
+                <input type="text" id="replacement" name="replacement" class="form-control" required>
             </div>
-            
+
             <div class="form-group" style="align-self: flex-end;">
                 <button type="submit" class="btn btn-primary">Add Replacement</button>
             </div>
         </div>
     </form>
-    
+
     <div id="replacements-list" class="replacement-list">
         {% if replacements %}
             {% for original, replacement in replacements.items() %}
@@ -34,7 +35,7 @@
             <p>No replacements added yet.</p>
         {% endif %}
     </div>
-    
+
     {% if replacements %}
     <button onclick="clearReplacements()" class="btn btn-secondary">Clear All Replacements</button>
     {% endif %}
@@ -43,51 +44,75 @@
 <script>
 async function addReplacement(event) {
     event.preventDefault();
-    const original = document.getElementById('original').value;
-    const replacement = document.getElementById('replacement').value;
+    const form = document.getElementById('replacement-form');
+    const button = form.querySelector('button[type="submit"]');
+    const token = document.querySelector('input[name="csrf_token"]').value;
+
+    // Show loading state
+    button.disabled = true;
+    button.textContent = 'Adding...';
 
     try {
+        const formData = new FormData();
+        formData.append('original', document.getElementById('original').value);
+        formData.append('replacement', document.getElementById('replacement').value);
+        formData.append('csrf_token', token);
+
         const response = await fetch('/add-replacement', {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRFToken': token
             },
-            body: `original=${encodeURIComponent(original)}&replacement=${encodeURIComponent(replacement)}`
+            body: formData
         });
+
         const data = await response.json();
-        
-        if (data.error) {
-            showMessage(data.error, true);
-        } else {
-            document.getElementById('original').value = '';
-            document.getElementById('replacement').value = '';
-            await loadReplacements();
-            showMessage('Replacement added successfully');
+
+        if (!response.ok) {
+            throw new Error(data.error || `Request failed with status ${response.status}`);
         }
+
+        // Clear form and reload replacements on success
+        form.reset();
+        await loadReplacements();
+        showMessage('Replacement added successfully');
     } catch (error) {
-        showMessage('An error occurred while adding replacement', true);
+        showMessage(error.message || 'Failed to add replacement', true);
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Add Replacement';
     }
 }
 
 async function removeReplacement(original) {
+    if (!confirm('Are you sure you want to remove this replacement?')) {
+        return;
+    }
+
     try {
+        const token = document.querySelector('input[name="csrf_token"]').value;
+        const formData = new FormData();
+        formData.append('original', original);
+        formData.append('csrf_token', token);
+
         const response = await fetch('/remove-replacement', {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRFToken': token
             },
-            body: `original=${encodeURIComponent(original)}`
+            body: formData
         });
+
         const data = await response.json();
-        
-        if (data.error) {
-            showMessage(data.error, true);
-        } else {
-            await loadReplacements();
-            showMessage('Replacement removed successfully');
+
+        if (!response.ok) {
+            throw new Error(data.error || `Request failed with status ${response.status}`);
         }
+
+        await loadReplacements();
+        showMessage('Replacement removed successfully');
     } catch (error) {
-        showMessage('An error occurred while removing replacement', true);
+        showMessage(error.message || 'Failed to remove replacement', true);
     }
 }
 
@@ -97,19 +122,24 @@ async function clearReplacements() {
     }
 
     try {
+        const token = document.querySelector('input[name="csrf_token"]').value;
         const response = await fetch('/clear-replacements', {
-            method: 'POST'
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': token
+            }
         });
+
         const data = await response.json();
-        
-        if (data.error) {
-            showMessage(data.error, true);
-        } else {
-            await loadReplacements();
-            showMessage('All replacements cleared');
+
+        if (!response.ok) {
+            throw new Error(data.error || `Request failed with status ${response.status}`);
         }
+
+        await loadReplacements();
+        showMessage('All replacements cleared');
     } catch (error) {
-        showMessage('An error occurred while clearing replacements', true);
+        showMessage(error.message || 'Failed to clear replacements', true);
     }
 }
 
@@ -117,7 +147,7 @@ async function loadReplacements() {
     try {
         const response = await fetch('/get-replacements');
         const data = await response.json();
-        
+
         const list = document.getElementById('replacements-list');
         if (Object.keys(data).length === 0) {
             list.innerHTML = '<p>No replacements added yet.</p>';
@@ -140,16 +170,95 @@ async function loadReplacements() {
 }
 
 function showMessage(message, isError = false) {
+    // Remove any existing message
+    const existingMessage = document.querySelector('.alert');
+    if (existingMessage) {
+        existingMessage.remove();
+    }
+
     const messageDiv = document.createElement('div');
-    messageDiv.className = `alert alert-${isError ? 'error' : 'success'}`;
+    messageDiv.className = `alert ${isError ? 'alert-error' : 'alert-success'}`;
     messageDiv.textContent = message;
-    
+
     const form = document.getElementById('replacement-form');
     form.insertBefore(messageDiv, form.firstChild);
-    
+
     setTimeout(() => messageDiv.remove(), 5000);
 }
 
 document.getElementById('replacement-form').addEventListener('submit', addReplacement);
 </script>
+
+<style>
+.dashboard-form {
+    margin-bottom: 20px;
+}
+
+.form-row {
+    display: flex;
+    gap: 15px;
+    align-items: flex-start;
+}
+
+.form-group {
+    flex: 1;
+}
+
+.alert {
+    padding: 10px;
+    margin-bottom: 15px;
+    border-radius: 4px;
+}
+
+.alert-error {
+    background-color: #ffebee;
+    color: #c62828;
+    border: 1px solid #ef9a9a;
+}
+
+.alert-success {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+    border: 1px solid #a5d6a7;
+}
+
+.replacement-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px;
+    border-bottom: 1px solid #eee;
+}
+
+.replacement-item:last-child {
+    border-bottom: none;
+}
+
+.btn-danger {
+    background-color: #f44336;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.btn-danger:hover {
+    background-color: #d32f2f;
+}
+
+.btn-secondary {
+    background-color: #757575;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-top: 20px;
+}
+
+.btn-secondary:hover {
+    background-color: #616161;
+}
+</style>
 {% endblock %}

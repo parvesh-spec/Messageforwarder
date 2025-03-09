@@ -694,6 +694,9 @@ def get_replacements():
 @login_required
 def add_replacement():
     try:
+        if not request.form:
+            return jsonify({'error': 'No form data received'}), 400
+
         original = request.form.get('original')
         replacement = request.form.get('replacement')
         user_id = session.get('user_id')
@@ -701,25 +704,41 @@ def add_replacement():
         if not all([original, replacement, user_id]):
             return jsonify({'error': 'Missing required data'}), 400
 
+        # Validate input lengths
+        if len(original) > 500 or len(replacement) > 500:
+            return jsonify({'error': 'Text too long (max 500 characters)'}), 400
+
         with get_db() as conn:
             with conn.cursor() as cur:
                 try:
+                    # Check if replacement already exists
+                    cur.execute("""
+                        SELECT COUNT(*) 
+                        FROM text_replacements 
+                        WHERE user_id = %s AND original_text = %s
+                    """, (user_id, original))
+
+                    if cur.fetchone()[0] > 0:
+                        return jsonify({'error': 'This replacement already exists'}), 400
+
+                    # Add new replacement
                     cur.execute("""
                         INSERT INTO text_replacements (user_id, original_text, replacement_text)
                         VALUES (%s, %s, %s)
                     """, (user_id, original, replacement))
+
+                    # Update bot if needed
+                    import main
+                    main.update_user_replacements(session.get('telegram_id'))
+
+                    return jsonify({'message': 'Replacement added successfully'})
                 except psycopg2.Error as e:
                     error_msg = handle_db_error(e, "add_replacement")
                     return jsonify({'error': error_msg}), 400
 
-        # Update bot
-        import main
-        main.update_user_replacements(session.get('telegram_id'))
-
-        return jsonify({'message': 'Replacement added successfully'})
     except Exception as e:
         logger.error(f"❌ Add replacement error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An error occurred while adding the replacement'}), 500
 
 @app.route('/remove-replacement', methods=['POST'])
 @login_required
