@@ -274,16 +274,7 @@ async def verify_otp():
             client = await telegram_manager.get_auth_client()
 
             try:
-                # Try signing in
                 await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
-
-            except PhoneCodeExpiredError:
-                session.clear()
-                return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
-
-            except PhoneCodeInvalidError:
-                return jsonify({'error': 'Invalid OTP. Please try again.'}), 400
-
             except SessionPasswordNeededError:
                 if not password:
                     return jsonify({
@@ -301,15 +292,17 @@ async def verify_otp():
                 # Get user info
                 me = await client.get_me()
 
-                # Store or update user in database
+                # Store or update user in database with login status
                 with get_db() as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
-                            INSERT INTO users (telegram_id, first_name, username)
-                            VALUES (%s, %s, %s)
+                            INSERT INTO users (telegram_id, first_name, username, is_logged_in, last_login_at)
+                            VALUES (%s, %s, %s, true, CURRENT_TIMESTAMP)
                             ON CONFLICT (telegram_id) DO UPDATE
                             SET first_name = EXCLUDED.first_name,
-                                username = EXCLUDED.username
+                                username = EXCLUDED.username,
+                                is_logged_in = true,
+                                last_login_at = CURRENT_TIMESTAMP
                             RETURNING id;
                         """, (me.id, me.first_name, me.username))
 
@@ -333,22 +326,21 @@ async def verify_otp():
         session.clear()
         return jsonify({'error': str(e)}), 500
 
-# Add improved session management code
-@app.before_request
-def check_session_expiry():
-    if request.endpoint != 'login' and request.endpoint != 'static' and request.endpoint != 'send-otp' and request.endpoint != 'verify-otp' and request.endpoint != 'check-auth' and request.endpoint != 'logout':
-        if not session.get('logged_in') or not session.get('telegram_id'):
-            session.clear()
-            return redirect(url_for('login'))
-
 @app.route('/logout')
 def logout():
     try:
         user_id = session.get('telegram_id')
         if user_id:
-            # Stop bot if running
+            # Update login status in database
             with get_db() as conn:
                 with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE users 
+                        SET is_logged_in = false 
+                        WHERE telegram_id = %s
+                    """, (user_id,))
+
+                    # Stop bot if running
                     cur.execute("""
                         UPDATE bot_status 
                         SET is_running = false,
@@ -367,21 +359,44 @@ def logout():
         session.clear()
         return redirect(url_for('login'))
 
-# Update login status check in dashboard
-@app.route('/check-auth')
-def check_auth():
-    try:
-        if not session.get('logged_in') or not session.get('telegram_id'):
-            return jsonify({'authenticated': False}), 401
+@app.before_request
+def check_session_expiry():
+    if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout']:
+        telegram_id = session.get('telegram_id')
+        if not telegram_id:
+            session.clear()
+            return redirect(url_for('login'))
 
-        # Verify telegram session is valid
-        user_id = session.get('telegram_id')
+        # Verify user is still logged in in database
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT id FROM users WHERE telegram_id = %s
-                """, (user_id,))
-                if not cur.fetchone():
+                    SELECT is_logged_in 
+                    FROM users 
+                    WHERE telegram_id = %s
+                """, (telegram_id,))
+                result = cur.fetchone()
+                if not result or not result[0]:
+                    session.clear()
+                    return redirect(url_for('login'))
+
+@app.route('/check-auth')
+def check_auth():
+    try:
+        telegram_id = session.get('telegram_id')
+        if not telegram_id:
+            return jsonify({'authenticated': False}), 401
+
+        # Verify user is logged in in database
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT is_logged_in 
+                    FROM users 
+                    WHERE telegram_id = %s
+                """, (telegram_id,))
+                result = cur.fetchone()
+                if not result or not result[0]:
                     session.clear()
                     return jsonify({'authenticated': False}), 401
 
@@ -390,7 +405,6 @@ def check_auth():
         logger.error(f"❌ Auth check error: {str(e)}")
         return jsonify({'authenticated': False}), 401
 
-# Update dashboard route
 @app.route('/dashboard')
 @login_required
 @async_route
