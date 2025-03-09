@@ -60,6 +60,22 @@
     </div>
 
     <script>
+        // Add session check functionality
+        function checkAuth() {
+            fetch('/check-auth')
+                .then(response => {
+                    if (!response.ok) {
+                        window.location.href = '/login';
+                    }
+                })
+                .catch(() => {
+                    window.location.href = '/login';
+                });
+        }
+
+        // Check auth status every minute
+        setInterval(checkAuth, 60000);
+
         function showMessage(message, isError = false) {
             const messageDiv = document.getElementById('status-message');
             messageDiv.innerHTML = message;

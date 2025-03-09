@@ -333,6 +333,64 @@ async def verify_otp():
         session.clear()
         return jsonify({'error': str(e)}), 500
 
+# Add improved session management code
+@app.before_request
+def check_session_expiry():
+    if request.endpoint != 'login' and request.endpoint != 'static' and request.endpoint != 'send-otp' and request.endpoint != 'verify-otp' and request.endpoint != 'check-auth' and request.endpoint != 'logout':
+        if not session.get('logged_in') or not session.get('telegram_id'):
+            session.clear()
+            return redirect(url_for('login'))
+
+@app.route('/logout')
+def logout():
+    try:
+        user_id = session.get('telegram_id')
+        if user_id:
+            # Stop bot if running
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE bot_status 
+                        SET is_running = false,
+                            session_string = NULL
+                        WHERE user_id = %s
+                    """, (user_id,))
+
+            # Remove user session from main.py
+            import main
+            main.remove_user_session(user_id)
+
+        session.clear()
+        return redirect(url_for('login'))
+    except Exception as e:
+        logger.error(f"❌ Logout error: {str(e)}")
+        session.clear()
+        return redirect(url_for('login'))
+
+# Update login status check in dashboard
+@app.route('/check-auth')
+def check_auth():
+    try:
+        if not session.get('logged_in') or not session.get('telegram_id'):
+            return jsonify({'authenticated': False}), 401
+
+        # Verify telegram session is valid
+        user_id = session.get('telegram_id')
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id FROM users WHERE telegram_id = %s
+                """, (user_id,))
+                if not cur.fetchone():
+                    session.clear()
+                    return jsonify({'authenticated': False}), 401
+
+        return jsonify({'authenticated': True})
+    except Exception as e:
+        logger.error(f"❌ Auth check error: {str(e)}")
+        return jsonify({'authenticated': False}), 401
+
+# Update dashboard route
 @app.route('/dashboard')
 @login_required
 @async_route
@@ -380,6 +438,8 @@ async def dashboard():
                         SELECT source_channel, destination_channel 
                         FROM channel_config 
                         WHERE user_id = %s
+                        ORDER BY updated_at DESC
+                        LIMIT 1
                     """, (telegram_id,))
                     last_config = cur.fetchone()
 
@@ -393,13 +453,12 @@ async def dashboard():
 
                     if status_row and status_row['is_running']:
                         initial_bot_status = True
-                        # If bot should be running and we have all required data
                         if last_config and status_row['session_string']:
                             import main
                             logger.info(f"✅ Initializing bot session for user {telegram_id}")
                             success = main.add_user_session(
                                 user_id=telegram_id,
-                                session_string=status_row['session_string'],
+                                session_string=session.get('session_string'),
                                 source_channel=last_config['source_channel'],
                                 destination_channel=last_config['destination_channel']
                             )
