@@ -80,21 +80,21 @@
 let configSaved = {% if source_channel and dest_channel %}true{% else %}false{% endif %};
 
 async function saveConfiguration() {
-    const source = document.getElementById('source-channel').value;
-    const dest = document.getElementById('dest-channel').value;
-    const token = document.querySelector('input[name="csrf_token"]').value;
-
-    if (!source || !dest) {
-        showMessage('Please select both source and destination channels', true);
-        return;
-    }
-
-    if (source === dest) {
-        showMessage('Source and destination channels cannot be the same', true);
-        return;
-    }
-
     try {
+        const source = document.getElementById('source-channel').value;
+        const dest = document.getElementById('dest-channel').value;
+        const token = document.querySelector('input[name="csrf_token"]').value;
+
+        if (!source || !dest) {
+            showMessage('Please select both source and destination channels', true);
+            return;
+        }
+
+        if (source === dest) {
+            showMessage('Source and destination channels cannot be the same', true);
+            return;
+        }
+
         const response = await fetch('/update-channels', {
             method: 'POST',
             headers: {

@@ -626,16 +626,17 @@ def update_channels():
         with get_db() as conn:
             with conn.cursor() as cur:
                 try:
-                    # Save configuration with is_active=false
+                    # First, delete any existing config
                     cur.execute("""
-                        INSERT INTO forwarding_configs (user_id, source_channel, destination_channel, is_active)
+                        DELETE FROM forwarding_configs 
+                        WHERE user_id = %s
+                    """, (user_id,))
+
+                    # Then insert new config
+                    cur.execute("""
+                        INSERT INTO forwarding_configs 
+                        (user_id, source_channel, destination_channel, is_active)
                         VALUES (%s, %s, %s, false)
-                        ON CONFLICT (user_id) 
-                        DO UPDATE SET 
-                            source_channel = EXCLUDED.source_channel,
-                            destination_channel = EXCLUDED.destination_channel,
-                            is_active = false,
-                            updated_at = CURRENT_TIMESTAMP
                     """, (user_id, source, destination))
 
                     # Stop any running forwarding
@@ -644,8 +645,9 @@ def update_channels():
 
                     return jsonify({'message': 'Channels updated successfully'})
                 except psycopg2.Error as e:
-                    error_msg = handle_db_error(e, "update_channels")
-                    return jsonify({'error': error_msg}), 400
+                    conn.rollback()
+                    logger.error(f"❌ Database error in update_channels: {str(e)}")
+                    return jsonify({'error': 'Failed to save channel configuration'}), 400
 
     except Exception as e:
         logger.error(f"❌ Channel update error: {str(e)}")
