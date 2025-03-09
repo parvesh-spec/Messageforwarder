@@ -253,18 +253,6 @@ def logout():
                     WHERE id = %s
                 """, (user_id,))
 
-                # Stop forwarding if active
-                cur.execute("""
-                    UPDATE forwarding_configs 
-                    SET is_active = false 
-                    WHERE user_id = %s
-                """, (user_id,))
-
-        # Remove user session from main.py if telegram was authorized
-        if session.get('telegram_id'):
-            import main
-            main.remove_user_session(session['telegram_id'])
-
     session.clear()
     return redirect(url_for('login'))
 
