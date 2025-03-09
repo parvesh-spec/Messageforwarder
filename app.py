@@ -493,11 +493,18 @@ async def send_otp():
 async def verify_otp():
     """Verify OTP and complete Telegram authorization"""
     try:
+        # Store important session data
+        important_data = {
+            k: session.get(k) 
+            for k in ['user_id', 'csrf_token', 'phone_code_hash', 'user_phone']
+        }
+
         # Get verification data
         stored_phone, stored_hash = telegram_manager.get_verification_data()
         phone = session.get('user_phone', stored_phone)
         phone_code_hash = session.get('phone_code_hash', stored_hash)
         otp = request.form.get('otp')
+        password = request.form.get('password')  # 2FA password if provided
 
         if not all([phone, phone_code_hash, otp]):
             logger.error("❌ Missing verification data")
@@ -512,10 +519,29 @@ async def verify_otp():
 
             # Sign in
             try:
-                await client.sign_in(phone=phone, code=otp, phone_code_hash=phone_code_hash)
+                if password:
+                    # If password provided, attempt 2FA login
+                    await client.sign_in(
+                        phone=phone,
+                        code=otp,
+                        password=password,
+                        phone_code_hash=phone_code_hash
+                    )
+                else:
+                    # Regular OTP verification
+                    await client.sign_in(
+                        phone=phone,
+                        code=otp,
+                        phone_code_hash=phone_code_hash
+                    )
+
                 if await client.is_user_authorized():
                     me = await client.get_me()
                     session_string = client.session.save()
+
+                    # Restore important session data
+                    session.clear()
+                    session.update(important_data)
 
                     # Update database
                     with get_db() as conn:
@@ -529,9 +555,10 @@ async def verify_otp():
                                 WHERE id = %s
                             """, (me.id, me.username, session_string, session.get('user_id')))
 
-                    # Update session
+                    # Update session with new data
                     session['telegram_id'] = me.id
                     session['session_string'] = session_string
+                    session.permanent = True
                     logger.info(f"✅ Successfully authorized user {me.id}")
 
                     return jsonify({'message': 'Authorization successful'})
@@ -540,6 +567,10 @@ async def verify_otp():
                     return jsonify({'error': 'Authorization failed'}), 400
 
             except SessionPasswordNeededError:
+                # Preserve session data when requesting 2FA
+                session.update(important_data)
+                session.permanent = True
+
                 logger.info("2FA required")
                 return jsonify({
                     'error': 'two_factor_needed',
@@ -553,6 +584,8 @@ async def verify_otp():
                     return jsonify({'error': 'OTP expired. Please request a new one.'}), 400
                 elif "phone code invalid" in error_msg:
                     return jsonify({'error': 'Invalid OTP. Please try again.'}), 400
+                elif "password is invalid" in error_msg:
+                    return jsonify({'error': 'Invalid 2FA password. Please try again.'}), 400
 
                 return jsonify({'error': 'Failed to verify OTP'}), 400
 
