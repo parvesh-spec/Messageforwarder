@@ -312,7 +312,7 @@ async def forwarding():
 
                 if not user['telegram_id']:
                     return render_template('dashboard/forwarding.html',
-                                        telegram_authorized=False)
+                                      telegram_authorized=False)
 
                 # Get channel config
                 cur.execute("""
@@ -336,28 +336,36 @@ async def forwarding():
         if telegram_id:
             try:
                 client = await telegram_manager.get_client()
+                if not client.is_connected():
+                    await client.connect()
+
                 async for dialog in client.iter_dialogs():
                     if dialog.is_channel:
                         channels.append({
-                            'id': dialog.id,
+                            'id': str(dialog.id),  # Convert to string for JavaScript
                             'name': dialog.name
                         })
+
+                logger.info(f"✅ Found {len(channels)} channels")
             except Exception as e:
                 logger.error(f"❌ Channel list error: {str(e)}")
+                return render_template('dashboard/forwarding.html',
+                                  telegram_authorized=True,
+                                  error="Failed to fetch channels. Please try refreshing the page.")
 
         return render_template('dashboard/forwarding.html',
-                            telegram_authorized=True,
-                            channels=channels,
-                            source_channel=config['source_channel'] if config else None,
-                            dest_channel=config['destination_channel'] if config else None,
-                            bot_status=config['is_active'] if config else False,
-                            replacements=replacements)
+                          telegram_authorized=True,
+                          channels=channels,
+                          source_channel=config['source_channel'] if config else None,
+                          dest_channel=config['destination_channel'] if config else None,
+                          bot_status=config['is_active'] if config else False,
+                          replacements=replacements)
 
     except Exception as e:
         logger.error(f"❌ Forwarding page error: {str(e)}")
         return render_template('dashboard/forwarding.html',
-                            telegram_authorized=False,
-                            error="An error occurred loading the forwarding page")
+                          telegram_authorized=False,
+                          error="An error occurred loading the forwarding page")
 
 # Initialize the Telegram manager
 telegram_manager = TelegramManager(

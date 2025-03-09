@@ -4,6 +4,10 @@
 <div class="dashboard-card">
     <h3>Channel Configuration</h3>
 
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+
     {% if not telegram_authorized %}
     <div class="alert alert-error">
         Please authorize your Telegram account first.
@@ -11,6 +15,7 @@
     </div>
     {% else %}
     <form id="channel-form" class="dashboard-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-group">
             <label>Source Channel</label>
             <select id="source-channel" class="form-control" required>
@@ -71,6 +76,7 @@ let channelsUpdated = false;
 async function updateChannels() {
     const source = document.getElementById('source-channel').value;
     const dest = document.getElementById('dest-channel').value;
+    const token = document.querySelector('input[name="csrf_token"]').value;
 
     if (!source || !dest) {
         return;
@@ -86,23 +92,27 @@ async function updateChannels() {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRFToken': token
             },
             body: `source=${encodeURIComponent(source)}&destination=${encodeURIComponent(dest)}`
         });
+
         const data = await response.json();
 
-        if (data.error) {
-            showMessage(data.error, true);
-        } else {
-            channelsUpdated = true;
-            showMessage('Channel configuration updated successfully');
+        if (!response.ok) {
+            throw new Error(data.error || `Request failed with status ${response.status}`);
         }
+
+        channelsUpdated = true;
+        showMessage('Channel configuration updated successfully');
     } catch (error) {
-        showMessage('An error occurred while updating channels', true);
+        showMessage(error.message || 'An error occurred while updating channels', true);
     }
 }
 
 async function toggleBot(element) {
+    const token = document.querySelector('input[name="csrf_token"]').value;
+
     if (!channelsUpdated && !element.checked) {
         const source = document.getElementById('source-channel').value;
         const dest = document.getElementById('dest-channel').value;
@@ -121,26 +131,33 @@ async function toggleBot(element) {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRFToken': token
             },
             body: `status=${element.checked}`
         });
+
         const data = await response.json();
 
-        if (data.error) {
-            showMessage(data.error, true);
-            element.checked = !element.checked;
-        } else {
-            showMessage(`Bot is now ${data.status ? 'running' : 'stopped'}`);
+        if (!response.ok) {
+            throw new Error(data.error || `Request failed with status ${response.status}`);
         }
+
+        showMessage(`Bot is now ${data.status ? 'running' : 'stopped'}`);
     } catch (error) {
-        showMessage('An error occurred while toggling bot status', true);
+        showMessage(error.message || 'An error occurred while toggling bot status', true);
         element.checked = !element.checked;
     }
 }
 
 function showMessage(message, isError = false) {
+    // Remove any existing message
+    const existingMessage = document.querySelector('.alert');
+    if (existingMessage) {
+        existingMessage.remove();
+    }
+
     const messageDiv = document.createElement('div');
-    messageDiv.className = `alert alert-${isError ? 'error' : 'success'}`;
+    messageDiv.className = `alert ${isError ? 'alert-error' : 'alert-success'}`;
     messageDiv.textContent = message;
 
     const form = document.getElementById('channel-form');
@@ -163,4 +180,105 @@ document.getElementById('bot-toggle').addEventListener('change', function() {
     toggleBot(this);
 });
 </script>
+
+<style>
+.dashboard-form {
+    margin-bottom: 20px;
+}
+
+.form-group {
+    margin-bottom: 15px;
+}
+
+.control-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.alert {
+    padding: 10px;
+    margin-bottom: 15px;
+    border-radius: 4px;
+}
+
+.alert-error {
+    background-color: #ffebee;
+    color: #c62828;
+    border: 1px solid #ef9a9a;
+}
+
+.alert-success {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+    border: 1px solid #a5d6a7;
+}
+
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 60px;
+    height: 34px;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #ccc;
+    transition: .4s;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 26px;
+    width: 26px;
+    left: 4px;
+    bottom: 4px;
+    background-color: white;
+    transition: .4s;
+}
+
+input:checked + .slider {
+    background-color: #2196F3;
+}
+
+input:checked + .slider:before {
+    transform: translateX(26px);
+}
+
+.slider.round {
+    border-radius: 34px;
+}
+
+.slider.round:before {
+    border-radius: 50%;
+}
+
+.replacements-preview {
+    margin: 10px 0;
+    padding: 10px;
+    background: #f5f5f5;
+    border-radius: 4px;
+}
+
+.replacement-badge {
+    display: inline-block;
+    padding: 5px 10px;
+    margin: 2px;
+    background: #e0e0e0;
+    border-radius: 15px;
+    font-size: 0.9em;
+}
+</style>
 {% endblock %}
