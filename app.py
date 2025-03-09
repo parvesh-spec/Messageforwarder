@@ -506,6 +506,9 @@ def update_channels():
         if not all([source, destination, user_id]):
             return jsonify({'error': 'Missing required data'}), 400
 
+        if source == destination:
+            return jsonify({'error': 'Source and destination channels cannot be the same'}), 400
+
         # Format channel IDs
         if not source.startswith('-100'):
             source = f"-100{source.lstrip('-')}"
@@ -522,7 +525,9 @@ def update_channels():
                     SET source_channel = EXCLUDED.source_channel,
                         destination_channel = EXCLUDED.destination_channel,
                         updated_at = CURRENT_TIMESTAMP
+                    RETURNING id
                 """, (user_id, source, destination))
+                conn.commit()
 
         # Update running bot if exists
         import main
@@ -555,11 +560,16 @@ def toggle_bot():
                     SELECT source_channel, destination_channel
                     FROM channel_config
                     WHERE user_id = %s
+                    ORDER BY updated_at DESC
+                    LIMIT 1
                 """, (user_id,))
                 channels = cur.fetchone()
 
         if not channels:
-            return jsonify({'error': 'Configure channels first'}), 400
+            return jsonify({'error': 'Please configure source and destination channels first'}), 400
+
+        if channels['source_channel'] == channels['destination_channel']:
+            return jsonify({'error': 'Source and destination channels cannot be the same'}), 400
 
         import main
         if status:
@@ -577,12 +587,15 @@ def toggle_bot():
                         """, (user_id, session_string))
 
                 # Add user session to main.py
-                main.add_user_session(
+                success = main.add_user_session(
                     user_id=user_id,
                     session_string=session_string,
                     source_channel=channels['source_channel'],
                     destination_channel=channels['destination_channel']
                 )
+
+                if not success:
+                    return jsonify({'error': 'Failed to start bot. Please try again.'}), 500
 
                 return jsonify({
                     'status': True,
