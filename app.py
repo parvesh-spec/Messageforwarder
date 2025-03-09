@@ -521,27 +521,27 @@ async def verify_otp():
                 # Get user info
                 me = await client.get_me()
 
-                # Store or update user in database with login status
+                # Store or update user in database with telegram info
                 with get_db() as conn:
-                    with conn.cursor() as cur:
+                    with conn.cursor(cursor_factory=DictCursor) as cur:
                         cur.execute("""
-                            INSERT INTO users (telegram_id, first_name, username, is_logged_in, last_login_at, email)
-                            VALUES (%s, %s, %s, true, CURRENT_TIMESTAMP, %s)
-                            ON CONFLICT (telegram_id) DO UPDATE
-                            SET first_name = EXCLUDED.first_name,
-                                username = EXCLUDED.username,
-                                is_logged_in = true,
-                                last_login_at = CURRENT_TIMESTAMP,
-                                email = EXCLUDED.email
-                            RETURNING id;
-                        """, (me.id, me.first_name, me.username, session.get('email', None))) # added email to the insert statement
+                            UPDATE users 
+                            SET telegram_id = %s,
+                                first_name = %s,
+                                telegram_username = %s,
+                                auth_date = CURRENT_TIMESTAMP
+                            WHERE id = %s
+                            RETURNING id
+                        """, (me.id, me.first_name, me.username, session.get('user_id')))
+
+                        if not cur.fetchone():
+                            return jsonify({'error': 'User not found'}), 404
 
                 # Set session data
-                session['logged_in'] = True
                 session['telegram_id'] = me.id
                 session['session_string'] = client.session.save()
-                logger.info(f"✅ Login successful for user {me.id}")
-                return jsonify({'message': 'Login successful'})
+                logger.info(f"✅ Telegram authorization successful for user {me.id}")
+                return jsonify({'message': 'Authorization successful'})
             else:
                 session.clear()
                 return jsonify({'error': 'Authentication failed. Please try again.'}), 400
@@ -669,7 +669,7 @@ def toggle_bot():
                     SELECT source_channel, destination_channel
                     FROM forwarding_configs
                     WHERE user_id = %s
-                """, (session.get('user_id'),)) # changed to user_id from telegram_id
+                """, (session.get('user_id'),))
                 channels = cur.fetchone()
 
         if not channels:
@@ -691,7 +691,7 @@ def toggle_bot():
                             SET is_running = true,
                                 session_string = EXCLUDED.session_string,
                                 updated_at = CURRENT_TIMESTAMP
-                        """, (session.get('user_id'), session_string)) # changed to user_id
+                        """, (session.get('user_id'), session_string))
 
                 # Start bot
                 success = main.add_user_session(
@@ -724,7 +724,7 @@ def toggle_bot():
                             SET is_running = false,
                                 session_string = NULL,
                                 updated_at = CURRENT_TIMESTAMP
-                        """, (session.get('user_id'),)) # changed to user_id
+                        """, (session.get('user_id'),))
 
                 # Stop bot
                 main.remove_user_session(telegram_id)

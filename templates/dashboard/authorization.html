@@ -3,7 +3,7 @@
 {% block content %}
 <div class="dashboard-card">
     <h3>Telegram Authorization</h3>
-    
+
     {% if telegram_authorized %}
     <div class="auth-status">
         <div class="status-badge active">
@@ -15,18 +15,19 @@
     <div class="auth-status">
         <div class="status-badge inactive">Not Connected</div>
         <p>Connect your Telegram account to start forwarding messages.</p>
-        
+
         <form id="telegram-auth-form" class="auth-form">
+            {{ csrf_token() }}
             <div class="form-group">
                 <label>Phone Number (with country code)</label>
                 <input type="tel" id="phone" class="form-control" placeholder="+91XXXXXXXXXX" required>
             </div>
-            
+
             <div class="form-group" id="otp-group" style="display: none;">
                 <label>Enter OTP</label>
                 <input type="text" id="otp" class="form-control" placeholder="Enter OTP">
             </div>
-            
+
             <div class="form-group" id="password-group" style="display: none;">
                 <label>Two-Factor Password (if enabled)</label>
                 <input type="password" id="password" class="form-control" placeholder="Enter 2FA password">
@@ -47,6 +48,7 @@ async function handleAuth(event) {
     const otp = document.getElementById('otp').value;
     const password = document.getElementById('password').value;
     const button = document.getElementById('auth-button');
+    const token = document.querySelector('input[name="csrf_token"]').value;
 
     try {
         if (!otp) {
@@ -56,11 +58,12 @@ async function handleAuth(event) {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-CSRFToken': token
                 },
                 body: `phone=${encodeURIComponent(phone)}`
             });
             const data = await response.json();
-            
+
             if (data.error) {
                 showMessage(data.error, true);
                 return;
@@ -76,6 +79,7 @@ async function handleAuth(event) {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-CSRFToken': token
                 },
                 body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
             });
@@ -102,10 +106,10 @@ function showMessage(message, isError = false) {
     const messageDiv = document.createElement('div');
     messageDiv.className = `alert alert-${isError ? 'error' : 'success'}`;
     messageDiv.textContent = message;
-    
+
     const form = document.getElementById('telegram-auth-form');
     form.insertBefore(messageDiv, form.firstChild);
-    
+
     setTimeout(() => messageDiv.remove(), 5000);
 }
 
