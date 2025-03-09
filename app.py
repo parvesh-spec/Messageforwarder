@@ -440,9 +440,8 @@ async def send_otp():
         if not phone:
             return jsonify({'error': 'Phone number is required'}), 400
 
-        if not phone.startswith('+91'):
-            return jsonify({'error': 'Phone number must start with +91'}), 400
-
+        # Remove the phone number validation check for +91
+        # Allow any valid phone number format
         try:
             # Get client and send OTP
             client = await telegram_manager.get_client()
@@ -463,7 +462,7 @@ async def send_otp():
 
         except PhoneNumberInvalidError:
             logger.error(f"❌ Invalid phone number: {phone}")
-            return jsonify({'error': 'Invalid phone number'}), 400
+            return jsonify({'error': 'Please enter a valid phone number with country code (e.g. +1234567890)'}), 400
         except Exception as e:
             logger.error(f"❌ Send OTP error: {str(e)}")
             return jsonify({'error': str(e)}), 500
