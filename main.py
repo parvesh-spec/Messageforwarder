@@ -80,8 +80,7 @@ async def setup_client(user_id, session_string, max_retries=3, retry_delay=5):
             try:
                 logger.info(f"🔄 Attempting to connect client for user {user_id}")
                 await client.connect()
-                await client.start()
-                logger.info(f"✅ Client connected and started for user {user_id}")
+                logger.info(f"✅ Client connected for user {user_id}")
 
                 if not await client.is_user_authorized():
                     logger.error(f"❌ Client not authorized for user {user_id}")
@@ -366,13 +365,17 @@ def add_user_session(user_id, session_string, source_channel=None, destination_c
                 logger.info(f"Source channel: {source_channel}")
                 logger.info(f"Destination channel: {destination_channel}")
 
-                # Setup handlers
+                # Setup handlers and keep client running
                 success = await setup_user_handlers(user_id, client)
                 if success:
-                    # Start session management loop
-                    asyncio.create_task(manage_user_session(user_id))
-                    logger.info(f"✅ Session started for user {user_id}")
-                    return True
+                    try:
+                        # Start client event loop
+                        await client.run_until_disconnected()
+                        logger.info(f"✅ Client running for user {user_id}")
+                        return True
+                    except Exception as e:
+                        logger.error(f"❌ Client run error: {str(e)}")
+                        return False
                 else:
                     logger.error(f"❌ Failed to setup handlers for user {user_id}")
                     return False
@@ -385,16 +388,7 @@ def add_user_session(user_id, session_string, source_channel=None, destination_c
         # Run setup in event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        success = loop.run_until_complete(setup_session())
-
-        # Keep the loop running in the background
-        if success:
-            asyncio.run_coroutine_threadsafe(
-                client.run_until_disconnected(), 
-                loop
-            )
-
-        return success
+        return loop.run_until_complete(setup_session())
     except Exception as e:
         logger.error(f"❌ Error in add_user_session: {str(e)}")
         return False

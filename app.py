@@ -320,6 +320,7 @@ def dashboard():
                        forwarding_logs=forwarding_logs)
 
 
+
 @app.route('/authorization')
 @login_required
 def authorization():
@@ -709,7 +710,7 @@ def toggle_bot():
                         # Start bot
                         import main
                         success = main.add_user_session(
-                            user_id=telegram_id,
+                            user_id=int(telegram_id),  # Ensure telegram_id is an integer
                             session_string=session_string,
                             source_channel=config['source_channel'],
                             destination_channel=config['destination_channel']
