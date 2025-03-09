@@ -2,7 +2,7 @@ import os
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
@@ -11,13 +11,13 @@ import asyncio
 from functools import wraps
 import psycopg2
 from psycopg2.extras import DictCursor
-import urllib.parse
-import psycopg2.pool
+from psycopg2 import pool
 from flask_session import Session
+from datetime import timedelta
+from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
 from flask_wtf.csrf import CSRFProtect
-from contextlib import contextmanager
 
 # Set up logging
 logging.basicConfig(
@@ -26,101 +26,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask app configuration with enhanced session and CSRF settings
+# Configure Flask application
 app = Flask(__name__)
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    WTF_CSRF_TIME_LIMIT=None,  # Make CSRF tokens never expire
-    WTF_CSRF_SSL_STRICT=False,  # Disable SSL-only for CSRF tokens
-    WTF_CSRF_ENABLED=True,
     DEBUG=True
 )
 
+# Initialize CSRF protection
+csrf = CSRFProtect(app)
+
 # Initialize session
 Session(app)
-
-# Initialize CSRF protection
-csrf = CSRFProtect()
-csrf.init_app(app)
-
-# Global variable for database pool
-db_pool = None
-
-def create_db_pool():
-    """Create database connection pool with proper SSL configuration"""
-    try:
-        # Parse database URL
-        db_url = os.getenv('DATABASE_URL')
-        result = urllib.parse.urlparse(db_url)
-
-        # Configure SSL
-        ssl_mode = "require"
-
-        # Create connection pool with SSL configuration
-        pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=1,
-            maxconn=10,
-            database=result.path[1:],
-            user=result.username,
-            password=result.password,
-            host=result.hostname,
-            port=result.port,
-            sslmode=ssl_mode
-        )
-        logger.info("✅ Database pool created successfully")
-        return pool
-    except Exception as e:
-        logger.error(f"❌ Failed to create database pool: {str(e)}")
-        raise
-
-def recreate_db_pool():
-    """Recreate the database connection pool"""
-    global db_pool
-    try:
-        if db_pool:
-            db_pool.closeall()
-        db_pool = create_db_pool()
-        return True
-    except Exception as e:
-        logger.error(f"❌ Failed to recreate database pool: {str(e)}")
-        return False
-
-# Initialize database pool
-try:
-    db_pool = create_db_pool()
-except Exception as e:
-    logger.error(f"❌ Initial database pool creation failed: {str(e)}")
-    raise
-
-@contextmanager
-def get_db():
-    """Database connection context manager with automatic reconnection"""
-    global db_pool
-    conn = None
-    try:
-        conn = db_pool.getconn()
-        conn.autocommit = True
-        yield conn
-    except psycopg2.OperationalError as e:
-        logger.error(f"❌ Database operational error: {str(e)}")
-        if recreate_db_pool():
-            conn = db_pool.getconn()
-            conn.autocommit = True
-            yield conn
-        else:
-            raise
-    except Exception as e:
-        logger.error(f"❌ Database error: {str(e)}")
-        raise
-    finally:
-        if conn:
-            try:
-                db_pool.putconn(conn)
-            except Exception as e:
-                logger.error(f"❌ Error returning connection to pool: {str(e)}")
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -216,57 +136,22 @@ def async_route(f):
             return jsonify({'error': str(e)}), 500
     return wrapped
 
-# Database pool configuration
+# Database pool for connections
+db_pool = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dsn=os.getenv('DATABASE_URL')
+)
 
-
-# Enhanced database connection context manager
-
-
-# Add error handling for database operations
-def handle_db_error(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except psycopg2.OperationalError as e:
-            logger.error(f"❌ Database operational error: {str(e)}")
-            # Try to recreate pool and retry once
-            try:
-                global db_pool
-                if db_pool:
-                    db_pool.closeall()
-                db_pool = create_db_pool()
-                return func(*args, **kwargs)
-            except Exception as retry_error:
-                logger.error(f"❌ Database retry failed: {str(retry_error)}")
-                raise
-        except Exception as e:
-            logger.error(f"❌ Database error: {str(e)}")
-            raise
-    return wrapper
-
-@handle_db_error
-def get_user_data(user_id):
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("""
-                SELECT * FROM users WHERE id = %s
-            """, (user_id,))
-            return cur.fetchone()
-
-# Update other database functions to use error handling decorator
-@handle_db_error
-def update_user_telegram(user_id, telegram_id, username, session_string):
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE users 
-                SET telegram_id = %s,
-                    telegram_username = %s,
-                    auth_date = CURRENT_TIMESTAMP,
-                    session_string = %s
-                WHERE id = %s
-            """, (telegram_id, username, session_string, user_id))
+# Database connection context manager
+@contextmanager
+def get_db():
+    conn = db_pool.getconn()
+    try:
+        conn.autocommit = True
+        yield conn
+    finally:
+        db_pool.putconn(conn)
 
 # Authentication decorator
 def login_required(f):
@@ -318,43 +203,36 @@ def login_post():
             session['telegram_id'] = user['telegram_id']
             return redirect(url_for('dashboard'))
 
-@app.route('/register', methods=['GET', 'POST'])
+@app.route('/register')
 def register():
-    """Handle both GET and POST for registration"""
     form = RegisterForm()
-
-    if request.method == 'POST':
-        if form.validate_on_submit():
-            email = form.email.data
-            password = form.password.data
-
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    # Check if email exists
-                    cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-                    if cur.fetchone():
-                        form.email.errors.append('Email already registered')
-                        return render_template('auth/register.html', form=form)
-
-                    # Create new user
-                    cur.execute("""
-                        INSERT INTO users (email, password_hash)
-                        VALUES (%s, %s)
-                        RETURNING id
-                    """, (email, generate_password_hash(password)))
-
-                    user_id = cur.fetchone()[0]
-
-                    # Clear session and create new fresh session
-                    session.clear()
-                    session['user_id'] = user_id
-                    session['_fresh'] = True
-                    session.permanent = True
-
-                    return redirect(url_for('dashboard'))
-
-    # GET request or form validation failed
     return render_template('auth/register.html', form=form)
+
+@app.route('/register', methods=['POST'])
+def register_post():
+    form = RegisterForm()
+    if not form.validate_on_submit():
+        return render_template('auth/register.html', form=form)
+
+    email = form.email.data
+    password = form.password.data
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+            if cur.fetchone():
+                form.email.errors.append('Email already registered')
+                return render_template('auth/register.html', form=form)
+
+            cur.execute("""
+                INSERT INTO users (email, password_hash)
+                VALUES (%s, %s)
+                RETURNING id
+            """, (email, generate_password_hash(password)))
+
+            user_id = cur.fetchone()[0]
+            session['user_id'] = user_id
+            return redirect(url_for('dashboard'))
 
 @app.route('/logout')
 def logout():
@@ -423,13 +301,18 @@ def dashboard():
                        forwarding_logs=forwarding_logs)
 
 
-
 @app.route('/authorization')
 @login_required
 def authorization():
     """Authorization page route handler"""
-    user_id = session.get('user_id')
-    user = get_user_data(user_id)
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT telegram_id, telegram_username, auth_date, session_string
+                FROM users 
+                WHERE id = %s
+            """, (session.get('user_id'),))
+            user = cur.fetchone()
 
     return render_template('dashboard/authorization.html',
                          telegram_authorized=check_telegram_auth(user),
@@ -439,7 +322,6 @@ def authorization():
 @app.route('/replacements')
 @login_required
 def replacements():
-    user_id = session.get('user_id')
     with get_db() as conn:
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
@@ -447,7 +329,7 @@ def replacements():
                 FROM text_replacements
                 WHERE user_id = %s
                 ORDER BY id DESC
-            """, (user_id,))
+            """, (session.get('user_id'),))
             replacements = {row['original_text']: row['replacement_text'] 
                           for row in cur.fetchall()}
 
@@ -462,14 +344,20 @@ async def forwarding():
     try:
         user_id = session.get('user_id')
 
-        user = get_user_data(user_id)
-
-        if not check_telegram_auth(user):
-            return render_template('dashboard/forwarding.html',
-                              telegram_authorized=False)
-
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
+                # Get user data with telegram auth info
+                cur.execute("""
+                    SELECT telegram_id, telegram_username, auth_date, session_string
+                    FROM users
+                    WHERE id = %s
+                """, (user_id,))
+                user = cur.fetchone()
+
+                if not check_telegram_auth(user):
+                    return render_template('dashboard/forwarding.html',
+                                      telegram_authorized=False)
+
                 # Get forwarding config
                 cur.execute("""
                     SELECT source_channel, destination_channel, is_active
@@ -618,7 +506,16 @@ async def verify_otp():
                     session_string = client.session.save()
 
                     # Update database
-                    update_user_telegram(session.get('user_id'), me.id, me.username, session_string)
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                UPDATE users 
+                                SET telegram_id = %s,
+                                    telegram_username = %s,
+                                    auth_date = CURRENT_TIMESTAMP,
+                                    session_string = %s
+                                WHERE id = %s
+                            """, (me.id, me.username, session_string, session.get('user_id')))
 
                     # Update session
                     session['telegram_id'] = me.id
@@ -664,16 +561,24 @@ def check_session_expiry():
             session.clear()
             return redirect(url_for('login'))
 
-        user = get_user_data(user_id)
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                # Check user login status and telegram auth
+                cur.execute("""
+                    SELECT is_logged_in, telegram_id, session_string 
+                    FROM users 
+                    WHERE id = %s
+                """, (user_id,))
+                user = cur.fetchone()
 
-        if not user or not user['is_logged_in']:
-            session.clear()
-            return redirect(url_for('login'))
+                if not user or not user['is_logged_in']:
+                    session.clear()
+                    return redirect(url_for('login'))
 
-        # Update session with telegram data if available
-        if user['telegram_id'] and user['session_string']:
-            session['telegram_id'] = user['telegram_id']
-            session['session_string'] = user['session_string']
+                # Update session with telegram data if available
+                if user['telegram_id'] and user['session_string']:
+                    session['telegram_id'] = user['telegram_id']
+                    session['session_string'] = user['session_string']
 
 @app.route('/check-auth')
 def check_auth():
@@ -935,8 +840,8 @@ def add_replacement():
                     return jsonify({'error': 'Failed to add replacement'}), 400
 
     except Exception as e:
-        logger.error(f"❌ Add replacement error: {str(e)}")
-        return jsonify({'error': 'Failed to add replacement'}), 400
+        logger.error(f"Error in add_replacement: {str(e)}")
+        return jsonify({'error': 'An error occurred while adding the replacement'}), 500
 
 @app.route('/remove-replacement', methods=['POST'])
 @login_required
@@ -993,6 +898,24 @@ def clear_replacements():
     except Exception as e:
         logger.error(f"❌ Clear replacements error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+def handle_db_error(e, operation):
+    """Handle database errors and return appropriate messages"""
+    error_msg = str(e)
+    if "violates foreign key constraint" in error_msg:
+        logger.error(f"❌ Foreign key error in {operation}: {error_msg}")
+        return "Session expired, please login again"
+    elif "violates unique constraint" in error_msg:
+        logger.error(f"❌ Unique constraint error in {operation}: {error_msg}")
+        if "text_replacements" in error_msg:
+            return "This text replacement already exists"
+        elif "channel_config" in error_msg:
+            return "Channel configuration already exists"
+        return "Operation failed due to duplicate entry"
+    else:
+        logger.error(f"❌ Database error in {operation}: {error_msg}")
+        return "An unexpected error occurred"
+
 
 # Add datetime filter
 @app.template_filter('datetime')
