@@ -174,5 +174,44 @@ document.getElementById('telegram-auth-form').addEventListener('submit', handleA
     color: #2e7d32;
     border: 1px solid #a5d6a7;
 }
+
+.auth-form {
+    max-width: 400px;
+    margin: 20px auto;
+}
+
+.form-group {
+    margin-bottom: 15px;
+}
+
+.form-control {
+    width: 100%;
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+.form-control:focus {
+    border-color: #2196f3;
+    outline: none;
+}
+
+.btn-primary {
+    background-color: #2196f3;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+    width: 100%;
+}
+
+.btn-primary:hover {
+    background-color: #1976d2;
+}
+
+.btn-primary:disabled {
+    background-color: #90caf9;
+}
 </style>
 {% endblock %}

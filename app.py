@@ -369,51 +369,53 @@ class TelegramManager:
         self.api_hash = api_hash
         self._lock = threading.Lock()
         self._client = None
+        self.loop = None
+
+    async def _init_client(self, session_string=None):
+        """Initialize a new client with proper error handling"""
+        try:
+            client = TelegramClient(
+                StringSession(session_string) if session_string else StringSession(),
+                self.api_id,
+                self.api_hash,
+                device_model="Replit Web",
+                system_version="Linux",
+                app_version="1.0",
+                loop=self.loop or asyncio.get_event_loop()
+            )
+
+            if not client.is_connected():
+                await client.connect()
+
+            return client
+        except Exception as e:
+            logger.error(f"❌ Client initialization error: {str(e)}")
+            raise
 
     async def get_auth_client(self):
         """Get a client for authentication or dashboard operations"""
         with self._lock:
             try:
-                # Check if we have a valid session
-                if self._client and self._client.is_connected() and await self._client.is_user_authorized():
+                if self._client and self._client.is_connected():
                     return self._client
 
-                # Get current session string
+                # Initialize event loop if needed
+                if not self.loop:
+                    self.loop = asyncio.get_event_loop()
+
+                # Get current session string if exists
                 session_string = session.get('session_string')
 
-                # Create new client if needed
-                if not self._client:
-                    self._client = TelegramClient(
-                        StringSession(session_string) if session_string else StringSession(),
-                        self.api_id,
-                        self.api_hash,
-                        device_model="Replit Web",
-                        system_version="Linux",
-                        app_version="1.0",
-                        loop=EventLoopManager.ensure_loop()
-                    )
-
-                # Connect if needed
-                if not self._client.is_connected():
-                    await self._client.connect()
+                # Initialize new client
+                self._client = await self._init_client(session_string)
 
                 # Verify authorization if we have a session
                 if session_string and not await self._client.is_user_authorized():
                     # Session expired, clear it
                     session.pop('session_string', None)
                     await self._cleanup_client()
-
                     # Create fresh client
-                    self._client = TelegramClient(
-                        StringSession(),
-                        self.api_id,
-                        self.api_hash,
-                        device_model="Replit Web",
-                        system_version="Linux",
-                        app_version="1.0",
-                        loop=EventLoopManager.ensure_loop()
-                    )
-                    await self._client.connect()
+                    self._client = await self._init_client()
 
                 return self._client
 
@@ -430,7 +432,8 @@ class TelegramManager:
                     await self._client.disconnect()
             except:
                 pass
-            self._client = None
+            finally:
+                self._client = None
 
 
 def handle_db_error(e, operation):
@@ -468,20 +471,26 @@ async def send_otp():
         if not phone.startswith('+91'):
             return jsonify({'error': 'Phone number must start with +91'}), 400
 
-        # Store current user_id before clearing session
-        current_user_id = session.get('user_id')
+        # Store current user_id and other important session data
+        user_data = {
+            'user_id': session.get('user_id'),
+            'csrf_token': session.get('csrf_token')
+        }
 
         try:
+            # Get client and send OTP
             client = await telegram_manager.get_auth_client()
-
-            # Clear session but keep important data
-            session.clear()
-            session['user_id'] = current_user_id
-
-            # Send OTP
             sent = await client.send_code_request(phone)
+
+            # Clear session but preserve important data
+            session.clear()
+            for key, value in user_data.items():
+                session[key] = value
+
+            # Store phone data
             session['user_phone'] = phone
             session['phone_code_hash'] = sent.phone_code_hash
+
             logger.info(f"✅ OTP sent successfully to {phone}")
             return jsonify({'message': 'OTP sent successfully'})
 
