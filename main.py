@@ -380,13 +380,14 @@ def add_user_session(user_id, session_string, source_channel=None, destination_c
         return False
 
 def remove_user_session(user_id):
-    """Remove a user's session"""
+    """Remove a user's session but keep forwarding config"""
     if user_id in USER_SESSIONS:
         try:
             session = USER_SESSIONS[user_id]
             client = session.get('client')
             if client:
                 try:
+                    # Create new event loop for cleanup
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     loop.run_until_complete(client.disconnect())
@@ -394,7 +395,9 @@ def remove_user_session(user_id):
                     logger.info(f"✅ Client disconnected for user {user_id}")
                 except Exception as e:
                     logger.error(f"❌ Client disconnect error: {str(e)}")
+                    # Even if disconnect fails, we should still clean up the session
 
+            # Clean up session data
             USER_SESSIONS.pop(user_id)
             if user_id in MESSAGE_IDS:
                 MESSAGE_IDS.pop(user_id)

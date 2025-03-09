@@ -208,6 +208,36 @@ def login_post():
 
             session['user_id'] = user['id']
             session['telegram_id'] = user['telegram_id']
+            session['session_string'] = user['session_string']
+
+            # If user has Telegram auth and forwarding was active, restart it
+            if user['telegram_id'] and user['session_string']:
+                cur.execute("""
+                    SELECT source_channel, destination_channel, is_active
+                    FROM forwarding_configs
+                    WHERE user_id = %s
+                """, (user['id'],))
+                config = cur.fetchone()
+
+                if config and config['is_active']:
+                    # Format channel IDs
+                    source_channel = str(config['source_channel'])
+                    dest_channel = str(config['destination_channel'])
+
+                    if not source_channel.startswith('-100'):
+                        source_channel = f"-100{source_channel.lstrip('-')}"
+                    if not dest_channel.startswith('-100'):
+                        dest_channel = f"-100{dest_channel.lstrip('-')}"
+
+                    # Restart forwarding
+                    import main
+                    main.add_user_session(
+                        user_id=int(user['telegram_id']),
+                        session_string=user['session_string'],
+                        source_channel=source_channel,
+                        destination_channel=dest_channel
+                    )
+
             return redirect(url_for('dashboard'))
 
 @app.route('/register')
@@ -251,13 +281,6 @@ def logout():
                     UPDATE users 
                     SET is_logged_in = false 
                     WHERE id = %s
-                """, (user_id,))
-
-                # Stop forwarding if active
-                cur.execute("""
-                    UPDATE forwarding_configs 
-                    SET is_active = false 
-                    WHERE user_id = %s
                 """, (user_id,))
 
         # Remove user session from main.py if telegram was authorized
@@ -910,7 +933,7 @@ def clear_replacements():
         logger.error(f"❌ Clear replacements error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-def handle_db_error(e, operation):
+def handle_dberror(e, operation):
     """Handle database errors and return appropriate messages"""
     error_msg = str(e)
     if "violates foreign key constraint" in error_msg:
