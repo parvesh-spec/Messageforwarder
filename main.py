@@ -181,6 +181,7 @@ def apply_text_replacements(text, user_id):
 async def setup_user_handlers(user_id, client):
     """Set up message handlers for a specific user"""
     if not client:
+        logger.error(f"❌ No client available for user {user_id}")
         return False
 
     try:
@@ -191,7 +192,7 @@ async def setup_user_handlers(user_id, client):
                 logger.info(f"📥 Received message in chat {event.chat_id}")
 
                 if user_id not in USER_SESSIONS:
-                    logger.info(f"❌ No session found for user {user_id}")
+                    logger.error(f"❌ No session found for user {user_id}")
                     return
 
                 session = USER_SESSIONS[user_id]
@@ -199,7 +200,7 @@ async def setup_user_handlers(user_id, client):
                 destination = session.get('destination')
 
                 if not source or not destination:
-                    logger.info(f"❌ No source/destination configured for user {user_id}")
+                    logger.error(f"❌ No source/destination configured for user {user_id}")
                     return
 
                 # Format channel IDs for comparison
@@ -244,13 +245,13 @@ async def setup_user_handlers(user_id, client):
                         formatting_entities=message.entities
                     )
 
+                    # Log forwarding time
+                    forward_end = int(time.time())
+
                     # Store message mapping
                     if user_id not in MESSAGE_IDS:
                         MESSAGE_IDS[user_id] = {}
                     MESSAGE_IDS[user_id][message.id] = sent_message.id
-
-                    # Log forwarding time
-                    forward_end = int(time.time())
 
                     # Store forwarding logs in database
                     conn = get_db()
@@ -260,13 +261,15 @@ async def setup_user_handlers(user_id, client):
                                 cur.execute("""
                                     INSERT INTO forwarding_logs 
                                     (user_id, source_message_id, dest_message_id, source_chat_id, 
-                                     dest_chat_id, message_text, received_at, forwarded_at)
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                     dest_chat_id, message_text, received_at, forwarded_at, created_at)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                                 """, (
                                     user_id, message.id, sent_message.id, 
                                     source_id, dest_id, message_text,
                                     forward_start, forward_end
                                 ))
+                        except Exception as db_error:
+                            logger.error(f"❌ Database error in message logging: {str(db_error)}")
                         finally:
                             release_db(conn)
 
