@@ -170,6 +170,24 @@ def get_db():
     finally:
         db_pool.putconn(conn)
 
+def handle_db_error(e, operation):
+    """Handle database errors and return appropriate messages"""
+    error_msg = str(e)
+    if "violates foreign key constraint" in error_msg:
+        logger.error(f"❌ Foreign key error in {operation}: {error_msg}")
+        return "Session expired, please login again"
+    elif "violates unique constraint" in error_msg:
+        logger.error(f"❌ Unique constraint error in {operation}: {error_msg}")
+        if "text_replacements" in error_msg:
+            return "This text replacement already exists"
+        elif "channel_config" in error_msg:
+            return "Channel configuration already exists"
+        return "Operation failed due to duplicate entry"
+    else:
+        logger.error(f"❌ Database error in {operation}: {error_msg}")
+        return "An unexpected error occurred"
+
+
 # Authentication decorator
 def login_required(f):
     @wraps(f)
@@ -421,14 +439,19 @@ def update_channels():
 
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO channel_config (user_id, source_channel, destination_channel)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE
-                    SET source_channel = EXCLUDED.source_channel,
-                        destination_channel = EXCLUDED.destination_channel,
-                        updated_at = CURRENT_TIMESTAMP
-                """, (telegram_id, source, destination))
+                try:
+                    cur.execute("""
+                        INSERT INTO channel_config (user_id, source_channel, destination_channel)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (user_id) 
+                        DO UPDATE SET 
+                            source_channel = EXCLUDED.source_channel,
+                            destination_channel = EXCLUDED.destination_channel,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (telegram_id, source, destination))
+                except psycopg2.Error as e:
+                    error_msg = handle_db_error(e, "update_channels")
+                    return jsonify({'error': error_msg}), 400
 
         # Update running bot if exists
         import main
@@ -572,8 +595,9 @@ def add_replacement():
                         INSERT INTO text_replacements (user_id, original_text, replacement_text)
                         VALUES (%s, %s, %s)
                     """, (telegram_id, original, replacement))
-                except psycopg2.IntegrityError:
-                    return jsonify({'error': 'This replacement already exists'}), 400
+                except psycopg2.Error as e:
+                    error_msg = handle_db_error(e, "add_replacement")
+                    return jsonify({'error': error_msg}), 400
 
         # Update bot
         import main
