@@ -52,12 +52,12 @@ class TelegramManager:
         self._client = None
         self._loop = None
 
-    async def _initialize_client(self):
+    async def _initialize_client(self, session_string=None):
         """Initialize the Telegram client"""
         try:
             if not self._client:
                 self._client = TelegramClient(
-                    StringSession(),
+                    StringSession(session_string) if session_string else StringSession(),
                     self.api_id,
                     self.api_hash,
                     device_model="Replit Web",
@@ -71,17 +71,21 @@ class TelegramManager:
             self._client = None
             raise
 
-    async def get_client(self):
+    async def get_client(self, session_string=None):
         """Get the Telegram client instance"""
         with self._lock:
             try:
-                if not self._client:
-                    await self._initialize_client()
-                elif not self._client.is_connected():
-                    await self._client.connect()
+                if self._client and self._client.is_connected():
+                    if await self._client.is_user_authorized():
+                        return self._client
+                    else:
+                        await self._cleanup_client()
 
-                if not self._client.is_connected():
-                    raise Exception("Failed to establish connection with Telegram")
+                # Initialize new client with session string
+                await self._initialize_client(session_string)
+
+                if not await self._client.is_user_authorized():
+                    raise Exception("User not authorized. Please log in again.")
 
                 return self._client
             except Exception as e:
@@ -314,13 +318,14 @@ async def forwarding():
     try:
         user_id = session.get('user_id')
         telegram_id = session.get('telegram_id')
+        session_string = session.get('session_string')
 
-        # Get user data
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 # Check telegram authorization
                 cur.execute("""
-                    SELECT telegram_id, telegram_username, auth_date
+                    SELECT telegram_id, telegram_username, auth_date,
+                           session_string
                     FROM users
                     WHERE id = %s
                 """, (user_id,))
@@ -349,15 +354,10 @@ async def forwarding():
 
         # Get channel list from Telegram
         channels = []
-        if telegram_id:
+        if telegram_id and session_string:
             try:
-                client = await telegram_manager.get_client()
+                client = await telegram_manager.get_client(session_string)
                 logger.info("✅ Got Telegram client")
-
-                # Verify connection
-                if not client.is_connected():
-                    await client.connect()
-                    logger.info("✅ Connected to Telegram")
 
                 # Get all dialogs (channels)
                 async for dialog in client.iter_dialogs():
@@ -376,7 +376,7 @@ async def forwarding():
                 logger.error(f"❌ Channel list error: {str(e)}")
                 return render_template('dashboard/forwarding.html',
                                   telegram_authorized=True,
-                                  error=f"Failed to fetch channels: {str(e)}. Please try logging out and back in.")
+                                  error="Failed to fetch channels. Please try logging out and authorizing your Telegram account again.")
 
         return render_template('dashboard/forwarding.html',
                           telegram_authorized=True,
@@ -483,10 +483,11 @@ async def verify_otp():
                             SET telegram_id = %s,
                                 first_name = %s,
                                 telegram_username = %s,
-                                auth_date = CURRENT_TIMESTAMP
+                                auth_date = CURRENT_TIMESTAMP,
+                                session_string = %s
                             WHERE id = %s
                             RETURNING id
-                        """, (me.id, me.first_name, me.username, session.get('user_id')))
+                        """, (me.id, me.first_name, me.username, client.session.save(), session.get('user_id')))
 
                         if not cur.fetchone():
                             return jsonify({'error': 'User not found'}), 404
@@ -837,7 +838,6 @@ telegram_manager = TelegramManager(
     int(os.getenv('API_ID')),
     os.getenv('API_HASH')
 )
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
