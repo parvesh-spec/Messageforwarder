@@ -317,81 +317,31 @@ async def forwarding():
                             telegram_authorized=False,
                             error="An error occurred loading the forwarding page")
 
-class EventLoopManager:
-    _instance = None
-    _lock = threading.Lock()
-    _loop = None
-
-    @classmethod
-    def get_loop(cls):
-        if cls._loop is None:
-            with cls._lock:
-                if cls._loop is None:
-                    try:
-                        cls._loop = asyncio.get_event_loop()
-                    except RuntimeError:
-                        cls._loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(cls._loop)
-                        logger.info("✅ Created new event loop")
-        return cls._loop
-
-    @classmethod
-    def ensure_loop(cls):
-        """Ensure we have a valid event loop"""
-        with cls._lock:
-            try:
-                loop = cls.get_loop()
-                if not loop.is_running():
-                    asyncio.set_event_loop(loop)
-                return loop
-            except Exception as e:
-                logger.error(f"❌ Loop setup error: {str(e)}")
-                cls.reset()
-                return cls.get_loop()
-
-    @classmethod
-    def reset(cls):
-        with cls._lock:
-            try:
-                if cls._loop and cls._loop.is_running():
-                    cls._loop.stop()
-                if cls._loop:
-                    cls._loop.close()
-            except:
-                pass
-            finally:
-                cls._loop = None
-                logger.info("✅ Reset event loop")
-
 class TelegramManager:
     def __init__(self, api_id, api_hash):
         self.api_id = api_id
         self.api_hash = api_hash
         self._lock = threading.Lock()
         self._client = None
-        self.loop = None
+        self._loop = None
 
     async def _init_client(self):
         """Initialize a new client with proper error handling"""
         try:
-            if not self.loop:
-                self.loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self.loop)
+            if not self._client:
+                self._client = TelegramClient(
+                    StringSession(),
+                    self.api_id,
+                    self.api_hash,
+                    device_model="Replit Web",
+                    system_version="Linux",
+                    app_version="1.0"
+                )
 
-            client = TelegramClient(
-                StringSession(),
-                self.api_id,
-                self.api_hash,
-                device_model="Replit Web",
-                system_version="Linux",
-                app_version="1.0",
-                loop=self.loop
-            )
+            if not self._client.is_connected():
+                await self._client.connect()
 
-            if not client.is_connected():
-                await client.connect()
-
-            return client
+            return self._client
         except Exception as e:
             logger.error(f"❌ Client initialization error: {str(e)}")
             raise
@@ -400,14 +350,8 @@ class TelegramManager:
         """Get a client for authentication or dashboard operations"""
         with self._lock:
             try:
-                if self._client:
-                    if not self._client.is_connected():
-                        await self._client.connect()
-                    return self._client
-
-                self._client = await self._init_client()
-                return self._client
-
+                client = await self._init_client()
+                return client
             except Exception as e:
                 logger.error(f"❌ Client creation error: {str(e)}")
                 await self._cleanup_client()
@@ -459,20 +403,19 @@ async def send_otp():
         if not phone.startswith('+91'):
             return jsonify({'error': 'Phone number must start with +91'}), 400
 
-        # Store current user_id and other important session data
-        user_data = {
+        # Store important session data
+        important_data = {
             'user_id': session.get('user_id'),
             'csrf_token': session.get('csrf_token')
         }
 
         try:
-            # Get client and send OTP
             client = await telegram_manager.get_auth_client()
             sent = await client.send_code_request(phone)
 
             # Clear session but preserve important data
             session.clear()
-            for key, value in user_data.items():
+            for key, value in important_data.items():
                 session[key] = value
 
             # Store phone data
