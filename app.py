@@ -2,7 +2,7 @@ import os
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
@@ -13,11 +13,9 @@ import psycopg2
 from psycopg2.extras import DictCursor
 from psycopg2 import pool
 from flask_session import Session
-from datetime import timedelta
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
-from flask_wtf.csrf import CSRFProtect
 
 # Set up logging
 logging.basicConfig(
@@ -33,11 +31,9 @@ app.config.update(
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    DEBUG=True
+    DEBUG=True,
+    WTF_CSRF_ENABLED=False  # Disable CSRF protection
 )
-
-# Initialize CSRF protection
-csrf = CSRFProtect(app)
 
 # Initialize session
 Session(app)

@@ -1,9 +1,8 @@
-from flask_wtf import FlaskForm
-from wtforms import StringField, PasswordField
+from wtforms import StringField, PasswordField, Form
 from wtforms.validators import DataRequired, Email, Length, EqualTo
 from email_validator import validate_email, EmailNotValidError
 
-class LoginForm(FlaskForm):
+class LoginForm(Form):
     email = StringField('Email', validators=[
         DataRequired(),
         Email(message='Invalid email address')
@@ -12,7 +11,7 @@ class LoginForm(FlaskForm):
         DataRequired()
     ])
 
-class RegisterForm(FlaskForm):
+class RegisterForm(Form):
     email = StringField('Email', validators=[
         DataRequired(),
         Email(message='Invalid email address')

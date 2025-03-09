@@ -13,7 +13,6 @@
     {% endwith %}
 
     <form method="POST" action="{{ url_for('register_post') }}">
-        {{ form.csrf_token }}
         <div class="form-group">
             <label>Email Address</label>
             {{ form.email(class="form-control") }}
