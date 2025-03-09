@@ -76,33 +76,34 @@ async def setup_client(user_id, session_string, max_retries=3, retry_delay=5):
                 retry_delay=retry_delay
             )
 
-            # Connect with timeout
+            # Connect and start
             try:
                 logger.info(f"🔄 Attempting to connect client for user {user_id}")
-                await asyncio.wait_for(client.connect(), timeout=30)
-                logger.info(f"✅ Client connected for user {user_id}")
-            except asyncio.TimeoutError:
-                logger.error(f"❌ Connection timeout for user {user_id}, retrying...")
+                await client.connect()
+                await client.start()
+                logger.info(f"✅ Client connected and started for user {user_id}")
+
+                if not await client.is_user_authorized():
+                    logger.error(f"❌ Client not authorized for user {user_id}")
+                    await client.disconnect()
+                    return None
+
+                me = await client.get_me()
+                logger.info(f"✅ Client running as: {me.first_name} (ID: {me.id})")
+                return client
+
+            except Exception as e:
+                logger.error(f"❌ Client connection error: {str(e)}")
                 if client:
                     await client.disconnect()
-                time.sleep(retry_delay)
+                await asyncio.sleep(retry_delay)
                 continue
 
-            # Verify authorization
-            if not await client.is_user_authorized():
-                logger.error(f"❌ Bot not authorized for user {user_id}")
-                await client.disconnect()
-                return None
-
-            me = await client.get_me()
-            logger.info(f"✅ Bot running for user {user_id} as: {me.first_name} (ID: {me.id})")
-            return client
-
         except Exception as e:
-            logger.error(f"❌ Client setup error for user {user_id} (attempt {attempt + 1}/{max_retries}): {str(e)}")
-            time.sleep(retry_delay)
+            logger.error(f"❌ Client setup error (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            await asyncio.sleep(retry_delay)
 
-    logger.error(f"❌ All connection attempts failed for user {user_id}")
+    logger.error(f"❌ All client setup attempts failed for user {user_id}")
     return None
 
 def load_user_config(user_id):
@@ -195,7 +196,6 @@ async def setup_user_handlers(user_id, client):
         logger.info(f"Source channel: {source}")
         logger.info(f"Destination channel: {destination}")
 
-        @client.on(events.NewMessage())
         async def handle_new_message(event):
             try:
                 # Log every message receipt
@@ -225,20 +225,19 @@ async def setup_user_handlers(user_id, client):
                     message_text = apply_text_replacements(message_text, user_id)
                     logger.info(f"📝 Processed text: {message_text}")
 
-                # Get destination channel ID
-                dest_id = str(destination)
-                if not dest_id.startswith('-100'):
-                    dest_id = f"-100{dest_id.lstrip('-')}"
-
                 try:
-                    # Get destination channel
+                    # Get destination channel ID
+                    dest_id = str(destination)
+                    if not dest_id.startswith('-100'):
+                        dest_id = f"-100{dest_id.lstrip('-')}"
+
+                    # Forward message
                     dest_channel = await client.get_entity(int(dest_id))
                     logger.info(f"📤 Forwarding to channel: {dest_channel.title}")
 
                     # Store time before forwarding
                     forward_start = int(time.time())
 
-                    # Forward message
                     sent_message = await client.send_message(
                         dest_channel,
                         message_text,
@@ -282,6 +281,8 @@ async def setup_user_handlers(user_id, client):
             except Exception as e:
                 logger.error(f"❌ Message handler error: {str(e)}")
 
+        # Add event handler
+        client.add_event_handler(handle_new_message, events.NewMessage())
         logger.info(f"✅ Event handlers set up for user {user_id}")
         return True
 
@@ -366,24 +367,33 @@ def add_user_session(user_id, session_string, source_channel=None, destination_c
                 logger.info(f"Destination channel: {destination_channel}")
 
                 # Setup handlers
-                if await setup_user_handlers(user_id, client):
+                success = await setup_user_handlers(user_id, client)
+                if success:
                     # Start session management loop
                     asyncio.create_task(manage_user_session(user_id))
                     logger.info(f"✅ Session started for user {user_id}")
                     return True
                 else:
                     logger.error(f"❌ Failed to setup handlers for user {user_id}")
+                    return False
             return False
         except Exception as e:
             logger.error(f"❌ Session setup error for user {user_id}: {str(e)}")
             return False
 
-    # Run setup in event loop
     try:
+        # Run setup in event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         success = loop.run_until_complete(setup_session())
-        loop.close()
+
+        # Keep the loop running in the background
+        if success:
+            asyncio.run_coroutine_threadsafe(
+                client.run_until_disconnected(), 
+                loop
+            )
+
         return success
     except Exception as e:
         logger.error(f"❌ Error in add_user_session: {str(e)}")
