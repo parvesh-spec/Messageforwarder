@@ -469,7 +469,12 @@ async def send_otp():
             return jsonify({'error': 'Phone number must start with +91'}), 400
 
         client = await telegram_manager.get_auth_client()
+
+        # Store current user_id before clearing session
+        current_user_id = session.get('user_id')
         session.clear()
+        # Restore user_id
+        session['user_id'] = current_user_id
 
         try:
             # Send OTP

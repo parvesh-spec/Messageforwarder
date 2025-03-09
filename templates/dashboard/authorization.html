@@ -75,14 +75,14 @@ async function handleAuth(event) {
             });
 
             if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
+                const data = await response.json();
+                throw new Error(data.error || `HTTP error! status: ${response.status}`);
             }
 
             const data = await response.json();
 
             if (data.error) {
-                showMessage(data.error, true);
-                return;
+                throw new Error(data.error);
             }
 
             document.getElementById('otp-group').style.display = 'block';
@@ -116,7 +116,7 @@ async function handleAuth(event) {
             }
         }
     } catch (error) {
-        showMessage('An error occurred: ' + error.message, true);
+        showMessage(error.message, true);
     } finally {
         button.disabled = false;
         button.classList.remove('btn-loading');
