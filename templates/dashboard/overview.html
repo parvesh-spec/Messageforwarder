@@ -1,0 +1,39 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<div class="dashboard-card">
+    <h3>Forwarding Status</h3>
+    <div class="status-badge {% if bot_status %}active{% else %}inactive{% endif %}">
+        {{ "Active" if bot_status else "Inactive" }}
+    </div>
+</div>
+
+<div class="dashboard-card">
+    <h3>Telegram Account</h3>
+    {% if telegram_authorized %}
+    <div class="status-badge active">
+        Authorized as {{ telegram_username }}
+    </div>
+    <p>Connected since: {{ telegram_auth_date }}</p>
+    {% else %}
+    <div class="status-badge inactive">
+        Not Authorized
+        <a href="{{ url_for('dashboard.authorization') }}" class="btn btn-primary">Connect Telegram</a>
+    </div>
+    {% endif %}
+</div>
+
+<div class="dashboard-card">
+    <h3>Channel Configuration</h3>
+    {% if source_channel and dest_channel %}
+    <div class="channel-info">
+        <p><strong>Source Channel:</strong> {{ source_channel }}</p>
+        <p><strong>Destination Channel:</strong> {{ dest_channel }}</p>
+        <p><strong>Active Replacements:</strong> {{ replacements_count }}</p>
+    </div>
+    {% else %}
+    <p>No channels configured</p>
+    <a href="{{ url_for('dashboard.forwarding') }}" class="btn btn-primary">Configure Channels</a>
+    {% endif %}
+</div>
+{% endblock %}

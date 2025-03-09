@@ -3,7 +3,7 @@ import logging
 import threading
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError, PhoneCodeExpiredError, PhoneCodeInvalidError
+from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
 from telethon.sessions import StringSession
 import asyncio
 from functools import wraps
@@ -13,6 +13,8 @@ from psycopg2 import pool
 from flask_session import Session
 from datetime import timedelta
 from contextlib import contextmanager
+from werkzeug.security import generate_password_hash, check_password_hash
+from forms import LoginForm, RegisterForm
 
 # Set up logging
 logging.basicConfig(
@@ -20,6 +22,296 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Configure Flask application
+app = Flask(__name__)
+app.config.update(
+    SECRET_KEY=os.urandom(24),
+    SESSION_TYPE='filesystem',
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
+    SESSION_PERMANENT=True,
+    DEBUG=True  # Enable debug mode for detailed errors
+)
+
+# Initialize session
+Session(app)
+
+# Database pool for connections
+db_pool = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dsn=os.getenv('DATABASE_URL')
+)
+
+# Async route decorator
+def async_route(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(f(*args, **kwargs))
+        except Exception as e:
+            logger.error(f"❌ Async route error: {str(e)}")
+            raise
+    return wrapped
+
+# Database connection context manager
+@contextmanager
+def get_db():
+    conn = db_pool.getconn()
+    try:
+        conn.autocommit = True
+        yield conn
+    finally:
+        db_pool.putconn(conn)
+
+# Authentication decorator
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('user_id'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/')
+def login():
+    if session.get('user_id'):
+        return redirect(url_for('dashboard'))
+    form = LoginForm()
+    return render_template('auth/login.html', form=form)
+
+@app.route('/login', methods=['POST'])
+def login_post():
+    form = LoginForm()
+    if not form.validate_on_submit():
+        return render_template('auth/login.html', form=form)
+
+    email = form.email.data
+    password = form.password.data
+
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+            user = cur.fetchone()
+
+            if not user or not check_password_hash(user['password_hash'], password):
+                form.email.errors.append('Please check your email and password')
+                return render_template('auth/login.html', form=form)
+
+            # Update login status
+            cur.execute("""
+                UPDATE users 
+                SET is_logged_in = true,
+                    last_login_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (user['id'],))
+
+            session['user_id'] = user['id']
+            session['telegram_id'] = user['telegram_id']
+            return redirect(url_for('dashboard'))
+
+@app.route('/register')
+def register():
+    form = RegisterForm()
+    return render_template('auth/register.html', form=form)
+
+@app.route('/register', methods=['POST'])
+def register_post():
+    form = RegisterForm()
+    if not form.validate_on_submit():
+        return render_template('auth/register.html', form=form)
+
+    email = form.email.data
+    password = form.password.data
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+            if cur.fetchone():
+                form.email.errors.append('Email already registered')
+                return render_template('auth/register.html', form=form)
+
+            cur.execute("""
+                INSERT INTO users (email, password_hash)
+                VALUES (%s, %s)
+                RETURNING id
+            """, (email, generate_password_hash(password)))
+
+            user_id = cur.fetchone()[0]
+            session['user_id'] = user_id
+            return redirect(url_for('dashboard'))
+
+@app.route('/logout')
+def logout():
+    user_id = session.get('user_id')
+    if user_id:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE users 
+                    SET is_logged_in = false 
+                    WHERE id = %s
+                """, (user_id,))
+
+                # Stop forwarding if active
+                cur.execute("""
+                    UPDATE forwarding_configs 
+                    SET is_active = false 
+                    WHERE user_id = %s
+                """, (user_id,))
+
+        # Remove user session from main.py if telegram was authorized
+        if session.get('telegram_id'):
+            import main
+            main.remove_user_session(session['telegram_id'])
+
+    session.clear()
+    return redirect(url_for('login'))
+
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    user_id = session.get('user_id')
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            # Get user data
+            cur.execute("""
+                SELECT *
+                FROM users
+                WHERE id = %s
+            """, (user_id,))
+            user = cur.fetchone()
+
+            # Get forwarding config
+            cur.execute("""
+                SELECT *
+                FROM forwarding_configs
+                WHERE user_id = %s
+            """, (user_id,))
+            config = cur.fetchone()
+
+            # Get replacement count
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM text_replacements
+                WHERE user_id = %s
+            """, (user_id,))
+            replacements_count = cur.fetchone()[0]
+
+    return render_template('dashboard/overview.html',
+                         telegram_authorized=bool(user['telegram_id']),
+                         telegram_username=user['telegram_username'],
+                         telegram_auth_date=user['telegram_auth_date'],
+                         source_channel=config['source_channel'] if config else None,
+                         dest_channel=config['destination_channel'] if config else None,
+                         is_active=config['is_active'] if config else False,
+                         replacements_count=replacements_count)
+
+
+@app.route('/authorization')
+@login_required
+def authorization():
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT telegram_id, username as telegram_username, 
+                       auth_date as telegram_auth_date
+                FROM users 
+                WHERE id = %s
+            """, (session.get('user_id'),))
+            user = cur.fetchone()
+
+    return render_template('dashboard/authorization.html',
+                         telegram_authorized=bool(user['telegram_id']),
+                         telegram_username=user['telegram_username'],
+                         telegram_auth_date=user['telegram_auth_date'])
+
+@app.route('/replacements')
+@login_required
+def replacements():
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT original_text, replacement_text
+                FROM text_replacements
+                WHERE user_id = %s
+                ORDER BY id DESC
+            """, (session.get('user_id'),))
+            replacements = {row['original_text']: row['replacement_text'] 
+                          for row in cur.fetchall()}
+
+    return render_template('dashboard/replacements.html',
+                         replacements=replacements)
+
+@app.route('/forwarding')
+@login_required
+@async_route
+async def forwarding():
+    try:
+        user_id = session.get('user_id')
+        telegram_id = session.get('telegram_id')
+
+        # Get user data
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                # Check telegram authorization
+                cur.execute("""
+                    SELECT telegram_id
+                    FROM users
+                    WHERE id = %s
+                """, (user_id,))
+                user = cur.fetchone()
+
+                if not user['telegram_id']:
+                    return render_template('dashboard/forwarding.html',
+                                        telegram_authorized=False)
+
+                # Get channel config
+                cur.execute("""
+                    SELECT source_channel, destination_channel, is_active
+                    FROM forwarding_configs
+                    WHERE user_id = %s
+                """, (user_id,))
+                config = cur.fetchone()
+
+                # Get replacements
+                cur.execute("""
+                    SELECT original_text, replacement_text
+                    FROM text_replacements
+                    WHERE user_id = %s
+                """, (user_id,))
+                replacements = {row['original_text']: row['replacement_text'] 
+                              for row in cur.fetchall()}
+
+        # Get channel list from Telegram
+        channels = []
+        if telegram_id:
+            try:
+                client = await telegram_manager.get_auth_client()
+                async for dialog in client.iter_dialogs():
+                    if dialog.is_channel:
+                        channels.append({
+                            'id': dialog.id,
+                            'name': dialog.name
+                        })
+            except Exception as e:
+                logger.error(f"❌ Channel list error: {str(e)}")
+
+        return render_template('dashboard/forwarding.html',
+                            telegram_authorized=True,
+                            channels=channels,
+                            source_channel=config['source_channel'] if config else None,
+                            dest_channel=config['destination_channel'] if config else None,
+                            bot_status=config['is_active'] if config else False,
+                            replacements=replacements)
+
+    except Exception as e:
+        logger.error(f"❌ Forwarding page error: {str(e)}")
+        return render_template('dashboard/forwarding.html',
+                            telegram_authorized=False,
+                            error="An error occurred loading the forwarding page")
 
 class EventLoopManager:
     _instance = None
@@ -137,39 +429,6 @@ class TelegramManager:
             self._client = None
 
 
-app = Flask(__name__)
-
-# Configure Flask application
-app.config.update(
-    SECRET_KEY=os.urandom(24),
-    SESSION_TYPE='filesystem',
-    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
-    SESSION_PERMANENT=True
-)
-
-# Initialize session
-Session(app)
-
-# Database pool for connections
-db_pool = psycopg2.pool.ThreadedConnectionPool(
-    minconn=1,
-    maxconn=10,
-    dsn=os.getenv('DATABASE_URL')
-)
-
-# Database lock for thread safety
-db_lock = threading.Lock()
-
-# Database connection context manager
-@contextmanager
-def get_db():
-    conn = db_pool.getconn()
-    try:
-        conn.autocommit = True
-        yield conn
-    finally:
-        db_pool.putconn(conn)
-
 def handle_db_error(e, operation):
     """Handle database errors and return appropriate messages"""
     error_msg = str(e)
@@ -188,45 +447,11 @@ def handle_db_error(e, operation):
         return "An unexpected error occurred"
 
 
-# Authentication decorator
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('logged_in') or not session.get('telegram_id'):
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-# Async route decorator
-def async_route(f):
-    @wraps(f)
-    def wrapped(*args, **kwargs):
-        try:
-            loop = EventLoopManager.get_loop()
-            return loop.run_until_complete(f(*args, **kwargs))
-        except Exception as e:
-            logger.error(f"❌ Async route error: {str(e)}")
-            raise
-    return wrapped
-
 # Create global Telegram manager
 telegram_manager = TelegramManager(
     int(os.getenv('API_ID', '27202142')),
     os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 )
-
-@app.route('/')
-def login():
-    try:
-        if session.get('logged_in') and session.get('telegram_id'):
-            logger.info("✅ User already logged in, redirecting to dashboard")
-            return redirect(url_for('dashboard'))
-
-        session.clear()
-        return render_template('login.html')
-    except Exception as e:
-        logger.error(f"❌ Login route error: {str(e)}")
-        return render_template('login.html')
 
 @app.route('/send-otp', methods=['POST'])
 @async_route
@@ -296,15 +521,16 @@ async def verify_otp():
                 with get_db() as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
-                            INSERT INTO users (telegram_id, first_name, username, is_logged_in, last_login_at)
-                            VALUES (%s, %s, %s, true, CURRENT_TIMESTAMP)
+                            INSERT INTO users (telegram_id, first_name, username, is_logged_in, last_login_at, email)
+                            VALUES (%s, %s, %s, true, CURRENT_TIMESTAMP, %s)
                             ON CONFLICT (telegram_id) DO UPDATE
                             SET first_name = EXCLUDED.first_name,
                                 username = EXCLUDED.username,
                                 is_logged_in = true,
-                                last_login_at = CURRENT_TIMESTAMP
+                                last_login_at = CURRENT_TIMESTAMP,
+                                email = EXCLUDED.email
                             RETURNING id;
-                        """, (me.id, me.first_name, me.username))
+                        """, (me.id, me.first_name, me.username, session.get('email', None))) # added email to the insert statement
 
                 # Set session data
                 session['logged_in'] = True
@@ -326,44 +552,11 @@ async def verify_otp():
         session.clear()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/logout')
-def logout():
-    try:
-        user_id = session.get('telegram_id')
-        if user_id:
-            # Update login status in database
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        UPDATE users 
-                        SET is_logged_in = false 
-                        WHERE telegram_id = %s
-                    """, (user_id,))
-
-                    # Stop bot if running
-                    cur.execute("""
-                        UPDATE bot_status 
-                        SET is_running = false,
-                            session_string = NULL
-                        WHERE user_id = %s
-                    """, (user_id,))
-
-            # Remove user session from main.py
-            import main
-            main.remove_user_session(user_id)
-
-        session.clear()
-        return redirect(url_for('login'))
-    except Exception as e:
-        logger.error(f"❌ Logout error: {str(e)}")
-        session.clear()
-        return redirect(url_for('login'))
-
 @app.before_request
 def check_session_expiry():
-    if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout']:
-        telegram_id = session.get('telegram_id')
-        if not telegram_id:
+    if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout', 'register', 'register_post', 'login_post']:
+        user_id = session.get('user_id')
+        if not user_id:
             session.clear()
             return redirect(url_for('login'))
 
@@ -373,8 +566,8 @@ def check_session_expiry():
                 cur.execute("""
                     SELECT is_logged_in 
                     FROM users 
-                    WHERE telegram_id = %s
-                """, (telegram_id,))
+                    WHERE id = %s
+                """, (user_id,))
                 result = cur.fetchone()
                 if not result or not result[0]:
                     session.clear()
@@ -383,8 +576,8 @@ def check_session_expiry():
 @app.route('/check-auth')
 def check_auth():
     try:
-        telegram_id = session.get('telegram_id')
-        if not telegram_id:
+        user_id = session.get('user_id')
+        if not user_id:
             return jsonify({'authenticated': False}), 401
 
         # Verify user is logged in in database
@@ -393,8 +586,8 @@ def check_auth():
                 cur.execute("""
                     SELECT is_logged_in 
                     FROM users 
-                    WHERE telegram_id = %s
-                """, (telegram_id,))
+                    WHERE id = %s
+                """, (user_id,))
                 result = cur.fetchone()
                 if not result or not result[0]:
                     session.clear()
@@ -405,111 +598,15 @@ def check_auth():
         logger.error(f"❌ Auth check error: {str(e)}")
         return jsonify({'authenticated': False}), 401
 
-@app.route('/dashboard')
-@login_required
-@async_route
-async def dashboard():
-    try:
-        telegram_id = session.get('telegram_id')
-        if not telegram_id:
-            logger.error("❌ No telegram_id in session")
-            session.clear()
-            return redirect(url_for('login'))
-
-        # Get client
-        try:
-            client = await telegram_manager.get_auth_client()
-            if not await client.is_user_authorized():
-                logger.error("❌ Client not authorized")
-                session.clear()
-                return redirect(url_for('login'))
-        except Exception as e:
-            logger.error(f"❌ Client error: {str(e)}")
-            session.clear()
-            return redirect(url_for('login'))
-
-        # Get channels list
-        channels = []
-        try:
-            async for dialog in client.iter_dialogs():
-                if dialog.is_channel:
-                    channels.append({
-                        'id': dialog.id,
-                        'name': dialog.name
-                    })
-        except Exception as e:
-            logger.error(f"❌ Channel list error: {str(e)}")
-            channels = []
-
-        # Get user configuration
-        last_config = None
-        initial_bot_status = False
-        try:
-            with get_db() as conn:
-                with conn.cursor(cursor_factory=DictCursor) as cur:
-                    # Get channel config
-                    cur.execute("""
-                        SELECT source_channel, destination_channel 
-                        FROM channel_config 
-                        WHERE user_id = %s
-                        ORDER BY updated_at DESC
-                        LIMIT 1
-                    """, (telegram_id,))
-                    last_config = cur.fetchone()
-
-                    # Get bot status
-                    cur.execute("""
-                        SELECT is_running, session_string 
-                        FROM bot_status 
-                        WHERE user_id = %s
-                    """, (telegram_id,))
-                    status_row = cur.fetchone()
-
-                    if status_row and status_row['is_running']:
-                        initial_bot_status = True
-                        if last_config and status_row['session_string']:
-                            import main
-                            logger.info(f"✅ Initializing bot session for user {telegram_id}")
-                            success = main.add_user_session(
-                                user_id=telegram_id,
-                                session_string=session.get('session_string'),
-                                source_channel=last_config['source_channel'],
-                                destination_channel=last_config['destination_channel']
-                            )
-                            if not success:
-                                logger.error(f"❌ Failed to initialize bot session for user {telegram_id}")
-                                # Update database to reflect actual status
-                                cur.execute("""
-                                    UPDATE bot_status 
-                                    SET is_running = false,
-                                        session_string = NULL
-                                    WHERE user_id = %s
-                                """, (telegram_id,))
-                                initial_bot_status = False
-
-        except Exception as e:
-            logger.error(f"❌ Database error: {str(e)}")
-
-        return render_template('dashboard.html',
-                            channels=channels,
-                            last_source=last_config['source_channel'] if last_config else None,
-                            last_dest=last_config['destination_channel'] if last_config else None,
-                            initial_bot_status=initial_bot_status)
-
-    except Exception as e:
-        logger.error(f"❌ Dashboard error: {str(e)}")
-        session.clear()
-        return redirect(url_for('login'))
-
 @app.route('/update-channels', methods=['POST'])
 @login_required
 def update_channels():
     try:
         source = request.form.get('source')
         destination = request.form.get('destination')
-        telegram_id = session.get('telegram_id')
+        user_id = session.get('user_id')
 
-        if not all([source, destination, telegram_id]):
+        if not all([source, destination, user_id]):
             return jsonify({'error': 'Missing required data'}), 400
 
         if source == destination:
@@ -525,21 +622,21 @@ def update_channels():
             with conn.cursor() as cur:
                 try:
                     cur.execute("""
-                        INSERT INTO channel_config (user_id, source_channel, destination_channel)
+                        INSERT INTO forwarding_configs (user_id, source_channel, destination_channel)
                         VALUES (%s, %s, %s)
                         ON CONFLICT (user_id) 
                         DO UPDATE SET 
                             source_channel = EXCLUDED.source_channel,
                             destination_channel = EXCLUDED.destination_channel,
                             updated_at = CURRENT_TIMESTAMP
-                    """, (telegram_id, source, destination))
+                    """, (user_id, source, destination))
                 except psycopg2.Error as e:
                     error_msg = handle_db_error(e, "update_channels")
                     return jsonify({'error': error_msg}), 400
 
         # Update running bot if exists
         import main
-        main.update_user_channels(telegram_id, source, destination)
+        main.update_user_channels(session.get('telegram_id'), source, destination)
 
         return jsonify({'message': 'Channels updated successfully'})
 
@@ -566,9 +663,9 @@ def toggle_bot():
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute("""
                     SELECT source_channel, destination_channel
-                    FROM channel_config
+                    FROM forwarding_configs
                     WHERE user_id = %s
-                """, (telegram_id,))
+                """, (session.get('user_id'),)) # changed to user_id from telegram_id
                 channels = cur.fetchone()
 
         if not channels:
@@ -590,7 +687,7 @@ def toggle_bot():
                             SET is_running = true,
                                 session_string = EXCLUDED.session_string,
                                 updated_at = CURRENT_TIMESTAMP
-                        """, (telegram_id, session_string))
+                        """, (session.get('user_id'), session_string)) # changed to user_id
 
                 # Start bot
                 success = main.add_user_session(
@@ -623,7 +720,7 @@ def toggle_bot():
                             SET is_running = false,
                                 session_string = NULL,
                                 updated_at = CURRENT_TIMESTAMP
-                        """, (telegram_id,))
+                        """, (session.get('user_id'),)) # changed to user_id
 
                 # Stop bot
                 main.remove_user_session(telegram_id)
@@ -645,7 +742,7 @@ def toggle_bot():
 @login_required
 def get_replacements():
     try:
-        telegram_id = session.get('telegram_id')
+        user_id = session.get('user_id')
 
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
@@ -654,7 +751,7 @@ def get_replacements():
                     FROM text_replacements
                     WHERE user_id = %s
                     ORDER BY id DESC
-                """, (telegram_id,))
+                """, (user_id,))
                 replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
                 return jsonify(replacements)
     except Exception as e:
@@ -667,9 +764,9 @@ def add_replacement():
     try:
         original = request.form.get('original')
         replacement = request.form.get('replacement')
-        telegram_id = session.get('telegram_id')
+        user_id = session.get('user_id')
 
-        if not all([original, replacement, telegram_id]):
+        if not all([original, replacement, user_id]):
             return jsonify({'error': 'Missing required data'}), 400
 
         with get_db() as conn:
@@ -678,14 +775,14 @@ def add_replacement():
                     cur.execute("""
                         INSERT INTO text_replacements (user_id, original_text, replacement_text)
                         VALUES (%s, %s, %s)
-                    """, (telegram_id, original, replacement))
+                    """, (user_id, original, replacement))
                 except psycopg2.Error as e:
                     error_msg = handle_db_error(e, "add_replacement")
                     return jsonify({'error': error_msg}), 400
 
         # Update bot
         import main
-        main.update_user_replacements(telegram_id)
+        main.update_user_replacements(session.get('telegram_id'))
 
         return jsonify({'message': 'Replacement added successfully'})
     except Exception as e:
@@ -697,9 +794,9 @@ def add_replacement():
 def remove_replacement():
     try:
         original = request.form.get('original')
-        telegram_id = session.get('telegram_id')
+        user_id = session.get('user_id')
 
-        if not all([original, telegram_id]):
+        if not all([original, user_id]):
             return jsonify({'error': 'Missing required data'}), 400
 
         with get_db() as conn:
@@ -707,11 +804,11 @@ def remove_replacement():
                 cur.execute("""
                     DELETE FROM text_replacements 
                     WHERE user_id = %s AND original_text = %s
-                """, (telegram_id, original))
+                """, (user_id, original))
 
         # Update bot
         import main
-        main.update_user_replacements(telegram_id)
+        main.update_user_replacements(session.get('telegram_id'))
 
         return jsonify({'message': 'Replacement removed successfully'})
     except Exception as e:
@@ -722,18 +819,18 @@ def remove_replacement():
 @login_required
 def clear_replacements():
     try:
-        telegram_id = session.get('telegram_id')
+        user_id = session.get('user_id')
 
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     DELETE FROM text_replacements
                     WHERE user_id = %s
-                """, (telegram_id,))
+                """, (user_id,))
 
         # Update bot
         import main
-        main.update_user_replacements(telegram_id)
+        main.update_user_replacements(session.get('telegram_id'))
 
         return jsonify({'message': 'All replacements cleared'})
     except Exception as e:

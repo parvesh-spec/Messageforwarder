@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{% block title %}Message Forwarder{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    {% if session.get('user_id') %}
+    <div class="dashboard-layout">
+        <div class="sidebar">
+            <div class="brand">
+                <h2>Message Forwarder</h2>
+            </div>
+            <nav>
+                <ul class="nav-menu">
+                    <li class="nav-item">
+                        <a href="{{ url_for('dashboard') }}" class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}">
+                            <i class="fas fa-home"></i> Overview
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="{{ url_for('authorization') }}" class="nav-link {% if request.endpoint == 'authorization' %}active{% endif %}">
+                            <i class="fas fa-key"></i> Authorization
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="{{ url_for('replacements') }}" class="nav-link {% if request.endpoint == 'replacements' %}active{% endif %}">
+                            <i class="fas fa-exchange-alt"></i> Replacements
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="{{ url_for('forwarding') }}" class="nav-link {% if request.endpoint == 'forwarding' %}active{% endif %}">
+                            <i class="fas fa-forward"></i> Forwarding
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="{{ url_for('logout') }}" class="nav-link">
+                            <i class="fas fa-sign-out-alt"></i> Logout
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+        </div>
+        <div class="main-content">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="alert alert-{{ category }}">{{ message }}</div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+            {% block content %}{% endblock %}
+        </div>
+    </div>
+    {% else %}
+    <div class="auth-container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        {% block auth_content %}{% endblock %}
+    </div>
+    {% endif %}
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

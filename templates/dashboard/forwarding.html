@@ -1,0 +1,166 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<div class="dashboard-card">
+    <h3>Channel Configuration</h3>
+    
+    {% if not telegram_authorized %}
+    <div class="alert alert-error">
+        Please authorize your Telegram account first.
+        <a href="{{ url_for('dashboard.authorization') }}" class="btn btn-primary">Authorize Telegram</a>
+    </div>
+    {% else %}
+    <form id="channel-form" class="dashboard-form">
+        <div class="form-group">
+            <label>Source Channel</label>
+            <select id="source-channel" class="form-control" required>
+                <option value="">Select Source Channel</option>
+                {% for channel in channels %}
+                <option value="{{ channel.id }}" {% if channel.id == source_channel %}selected{% endif %}>
+                    {{ channel.name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div class="form-group">
+            <label>Destination Channel</label>
+            <select id="dest-channel" class="form-control" required>
+                <option value="">Select Destination Channel</option>
+                {% for channel in channels %}
+                <option value="{{ channel.id }}" {% if channel.id == dest_channel %}selected{% endif %}>
+                    {{ channel.name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div class="form-group">
+            <h4>Active Replacements</h4>
+            {% if replacements %}
+            <div class="replacements-preview">
+                {% for original, replacement in replacements.items() %}
+                <div class="replacement-badge">
+                    {{ original }} → {{ replacement }}
+                </div>
+                {% endfor %}
+            </div>
+            <a href="{{ url_for('dashboard.replacements') }}" class="btn btn-secondary">Manage Replacements</a>
+            {% else %}
+            <p>No replacements configured</p>
+            <a href="{{ url_for('dashboard.replacements') }}" class="btn btn-primary">Add Replacements</a>
+            {% endif %}
+        </div>
+        
+        <div class="form-group">
+            <div class="control-group">
+                <label class="switch">
+                    <input type="checkbox" id="bot-toggle" {% if bot_status %}checked{% endif %}>
+                    <span class="slider round"></span>
+                </label>
+                <span>{{ "Stop" if bot_status else "Start" }} Forwarding</span>
+            </div>
+        </div>
+    </form>
+    {% endif %}
+</div>
+
+<script>
+let channelsUpdated = false;
+
+async function updateChannels() {
+    const source = document.getElementById('source-channel').value;
+    const dest = document.getElementById('dest-channel').value;
+    
+    if (!source || !dest) {
+        return;
+    }
+    
+    if (source === dest) {
+        showMessage('Source and destination channels cannot be the same', true);
+        return;
+    }
+    
+    try {
+        const response = await fetch('/update-channels', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `source=${encodeURIComponent(source)}&destination=${encodeURIComponent(dest)}`
+        });
+        const data = await response.json();
+        
+        if (data.error) {
+            showMessage(data.error, true);
+        } else {
+            channelsUpdated = true;
+            showMessage('Channel configuration updated successfully');
+        }
+    } catch (error) {
+        showMessage('An error occurred while updating channels', true);
+    }
+}
+
+async function toggleBot(element) {
+    if (!channelsUpdated && !element.checked) {
+        const source = document.getElementById('source-channel').value;
+        const dest = document.getElementById('dest-channel').value;
+        
+        if (!source || !dest) {
+            showMessage('Please select both source and destination channels first', true);
+            element.checked = false;
+            return;
+        }
+        
+        await updateChannels();
+    }
+    
+    try {
+        const response = await fetch('/bot/toggle', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `status=${element.checked}`
+        });
+        const data = await response.json();
+        
+        if (data.error) {
+            showMessage(data.error, true);
+            element.checked = !element.checked;
+        } else {
+            showMessage(`Bot is now ${data.status ? 'running' : 'stopped'}`);
+        }
+    } catch (error) {
+        showMessage('An error occurred while toggling bot status', true);
+        element.checked = !element.checked;
+    }
+}
+
+function showMessage(message, isError = false) {
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `alert alert-${isError ? 'error' : 'success'}`;
+    messageDiv.textContent = message;
+    
+    const form = document.getElementById('channel-form');
+    form.insertBefore(messageDiv, form.firstChild);
+    
+    setTimeout(() => messageDiv.remove(), 5000);
+}
+
+document.getElementById('source-channel').addEventListener('change', () => {
+    channelsUpdated = false;
+    updateChannels();
+});
+
+document.getElementById('dest-channel').addEventListener('change', () => {
+    channelsUpdated = false;
+    updateChannels();
+});
+
+document.getElementById('bot-toggle').addEventListener('change', function() {
+    toggleBot(this);
+});
+</script>
+{% endblock %}
