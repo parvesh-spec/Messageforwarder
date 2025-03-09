@@ -1,25 +1,31 @@
 import os
 import logging
 import threading
-import psycopg2
-from psycopg2.extras import DictCursor
-from psycopg2 import pool
-import asyncio
+import time
+from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from flask import Flask, jsonify
-import time
+import asyncio
+import psycopg2
+from psycopg2.extras import DictCursor
+from psycopg2 import pool
+
+# Configure logging to only show important messages
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Disable debug logs from telethon
+logging.getLogger('telethon').setLevel(logging.WARNING)
+logging.getLogger('asyncio').setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 # Global variables for multi-user support
 USER_SESSIONS = {}  # user_id: {client, source, destination, replacements}
-MESSAGE_IDS = {}  # user_id: {source_msg_id: destination_msg_id}
-
-# Set up logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+MESSAGE_IDS = {}    # user_id: {source_msg_id: destination_msg_id}
 
 # API credentials
 API_ID = int(os.getenv('API_ID', '27202142'))
@@ -61,10 +67,6 @@ async def setup_client(user_id, session_string, max_retries=3, retry_delay=5):
     """Initialize Telegram client for a specific user"""
     for attempt in range(max_retries):
         try:
-            if not session_string:
-                logger.warning(f"⚠️ No session string for user {user_id}")
-                return None
-
             # Create new client instance
             client = TelegramClient(
                 StringSession(session_string),
@@ -72,37 +74,31 @@ async def setup_client(user_id, session_string, max_retries=3, retry_delay=5):
                 API_HASH,
                 device_model="Replit Bot",
                 system_version="Linux",
-                app_version="1.0",
-                retry_delay=retry_delay
+                app_version="1.0"
             )
 
-            # Connect and start
+            # Connect and verify
             try:
-                logger.info(f"🔄 Attempting to connect client for user {user_id}")
                 await client.connect()
-                logger.info(f"✅ Client connected for user {user_id}")
 
                 if not await client.is_user_authorized():
                     logger.error(f"❌ Client not authorized for user {user_id}")
                     await client.disconnect()
                     return None
 
-                me = await client.get_me()
-                logger.info(f"✅ Client running as: {me.first_name} (ID: {me.id})")
                 return client
 
             except Exception as e:
-                logger.error(f"❌ Client connection error: {str(e)}")
+                logger.error(f"❌ Connection error: {str(e)}")
                 if client:
                     await client.disconnect()
                 await asyncio.sleep(retry_delay)
                 continue
 
         except Exception as e:
-            logger.error(f"❌ Client setup error (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            logger.error(f"❌ Setup error (attempt {attempt + 1}/{max_retries}): {str(e)}")
             await asyncio.sleep(retry_delay)
 
-    logger.error(f"❌ All client setup attempts failed for user {user_id}")
     return None
 
 def load_user_config(user_id):
@@ -183,7 +179,6 @@ def apply_text_replacements(text, user_id):
 async def setup_user_handlers(user_id, client):
     """Set up message handlers for a specific user"""
     if not client:
-        logger.error(f"❌ No client available for user {user_id}")
         return False
 
     try:
@@ -191,50 +186,39 @@ async def setup_user_handlers(user_id, client):
         source = session.get('source')
         destination = session.get('destination')
 
-        logger.info(f"🔄 Setting up handlers for user {user_id}")
-        logger.info(f"Source channel: {source}")
-        logger.info(f"Destination channel: {destination}")
-
         async def handle_new_message(event):
             try:
-                # Log every message receipt
+                # Format channel IDs for comparison
                 chat_id = str(event.chat_id)
                 if not chat_id.startswith('-100'):
                     chat_id = f"-100{chat_id.lstrip('-')}"
-                logger.info(f"📥 Received message in chat {chat_id}")
 
-                # Get source channel ID
                 source_id = str(source)
                 if not source_id.startswith('-100'):
                     source_id = f"-100{source_id.lstrip('-')}"
 
-                logger.info(f"Comparing chat_id {chat_id} with source_id {source_id}")
-
                 # Compare exact channel IDs
                 if chat_id != source_id:
-                    logger.info(f"❌ Message not from source channel. Got {chat_id}, expected {source_id}")
                     return
 
-                logger.info("✅ Message is from source channel, processing...")
+                logger.info(f"📥 Message received from source channel")
 
                 # Process message
                 message = event.message
                 message_text = message.text if message.text else ""
                 if message_text:
                     message_text = apply_text_replacements(message_text, user_id)
-                    logger.info(f"📝 Processed text: {message_text}")
 
                 try:
-                    # Get destination channel ID
+                    # Format destination ID
                     dest_id = str(destination)
                     if not dest_id.startswith('-100'):
                         dest_id = f"-100{dest_id.lstrip('-')}"
 
                     # Forward message
                     dest_channel = await client.get_entity(int(dest_id))
-                    logger.info(f"📤 Forwarding to channel: {dest_channel.title}")
+                    logger.info(f"📤 Forwarding message")
 
-                    # Store time before forwarding
                     forward_start = int(time.time())
 
                     sent_message = await client.send_message(
@@ -244,7 +228,6 @@ async def setup_user_handlers(user_id, client):
                         formatting_entities=message.entities
                     )
 
-                    # Log forwarding time
                     forward_end = int(time.time())
 
                     # Store message mapping
@@ -252,7 +235,7 @@ async def setup_user_handlers(user_id, client):
                         MESSAGE_IDS[user_id] = {}
                     MESSAGE_IDS[user_id][message.id] = sent_message.id
 
-                    # Store forwarding logs in database
+                    # Log to database
                     conn = get_db()
                     if conn:
                         try:
@@ -268,21 +251,20 @@ async def setup_user_handlers(user_id, client):
                                     forward_start, forward_end
                                 ))
                         except Exception as db_error:
-                            logger.error(f"❌ Database error in message logging: {str(db_error)}")
+                            logger.error(f"❌ Database error: {str(db_error)}")
                         finally:
                             release_db(conn)
 
-                    logger.info(f"✅ Message forwarded successfully in {forward_end - forward_start}s")
+                    logger.info(f"✅ Message forwarded")
 
                 except Exception as e:
-                    logger.error(f"❌ Message forward error: {str(e)}")
+                    logger.error(f"❌ Forward error: {str(e)}")
 
             except Exception as e:
-                logger.error(f"❌ Message handler error: {str(e)}")
+                logger.error(f"❌ Handler error: {str(e)}")
 
         # Add event handler
         client.add_event_handler(handle_new_message, events.NewMessage())
-        logger.info(f"✅ Event handlers set up for user {user_id}")
         return True
 
     except Exception as e:
@@ -350,7 +332,6 @@ def add_user_session(user_id, session_string, source_channel=None, destination_c
     """Add or update a user's session"""
     async def setup_session():
         try:
-            logger.info(f"🔄 Setting up session for user {user_id}")
             client = await setup_client(user_id, session_string)
             if client:
                 # Initialize or update user session
@@ -361,36 +342,26 @@ def add_user_session(user_id, session_string, source_channel=None, destination_c
                     'replacements': load_user_replacements(user_id)
                 }
 
-                logger.info(f"Session data for user {user_id}:")
-                logger.info(f"Source channel: {source_channel}")
-                logger.info(f"Destination channel: {destination_channel}")
-
-                # Setup handlers and keep client running
+                # Setup handlers and start client
                 success = await setup_user_handlers(user_id, client)
                 if success:
                     try:
-                        # Start client event loop
                         await client.run_until_disconnected()
-                        logger.info(f"✅ Client running for user {user_id}")
                         return True
                     except Exception as e:
                         logger.error(f"❌ Client run error: {str(e)}")
                         return False
-                else:
-                    logger.error(f"❌ Failed to setup handlers for user {user_id}")
-                    return False
             return False
         except Exception as e:
-            logger.error(f"❌ Session setup error for user {user_id}: {str(e)}")
+            logger.error(f"❌ Session setup error: {str(e)}")
             return False
 
     try:
-        # Run setup in event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         return loop.run_until_complete(setup_session())
     except Exception as e:
-        logger.error(f"❌ Error in add_user_session: {str(e)}")
+        logger.error(f"❌ Add session error: {str(e)}")
         return False
 
 def remove_user_session(user_id):
