@@ -54,14 +54,36 @@ def get_db():
     finally:
         db_pool.putconn(conn)
 
-# Create tables on startup
+# Add session_string column to bot_status table
 def create_tables():
+    """Create tables on startup"""
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Create bot_status table with session_string column
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS bot_status (
                     id SERIAL PRIMARY KEY,
                     is_running BOOLEAN NOT NULL DEFAULT false,
+                    session_string TEXT,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Other table creation statements remain unchanged...
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS text_replacements (
+                    id SERIAL PRIMARY KEY,
+                    original_text TEXT NOT NULL,
+                    replacement_text TEXT NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS channel_config (
+                    id SERIAL PRIMARY KEY,
+                    source_channel TEXT NOT NULL,
+                    destination_channel TEXT NOT NULL,
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -414,7 +436,15 @@ async def dashboard():
                     """)
                     last_config = cur.fetchone()
 
-                    # Get current bot status
+                    # Get current bot status, insert default if none exists
+                    cur.execute("""
+                        INSERT INTO bot_status (is_running) 
+                        VALUES (false) 
+                        ON CONFLICT (id) DO NOTHING 
+                        RETURNING is_running
+                    """)
+                    conn.commit()
+
                     cur.execute("""
                         SELECT is_running 
                         FROM bot_status 
@@ -496,6 +526,7 @@ def update_channels():
         logger.error(f"❌ Channel update error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+# Update toggle_bot route to store session_string
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
 def toggle_bot():
@@ -516,41 +547,36 @@ def toggle_bot():
         import main
         if status:
             try:
-                # Share session with main.py
+                # Update database status first with session string
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO bot_status (is_running, session_string)
+                            VALUES (true, %s)
+                            ON CONFLICT (id) DO UPDATE 
+                            SET is_running = true,
+                                session_string = EXCLUDED.session_string,
+                                updated_at = CURRENT_TIMESTAMP
+                        """, (session_string,))
+
+                # Share configuration with main.py
                 main.SESSION_STRING = session_string
                 main.SOURCE_CHANNEL = source
                 main.DESTINATION_CHANNEL = destination
 
-                # Update database status
-                with get_db() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            INSERT INTO bot_status (is_running)
-                            VALUES (true)
-                            ON CONFLICT (id) DO UPDATE 
-                            SET is_running = true,
-                                updated_at = CURRENT_TIMESTAMP
-                        """)
-
                 # Start bot in a daemon thread
                 def start_bot():
                     try:
-                        # Create new event loop for bot thread
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
-
                         try:
                             loop.run_until_complete(main.main())
                         except Exception as e:
                             logger.error(f"❌ Bot startup error: {str(e)}")
                         finally:
-                            try:
-                                # Cleanup loop
-                                if loop.is_running():
-                                    loop.stop()
-                                loop.close()
-                            except:
-                                pass
+                            if loop.is_running():
+                                loop.stop()
+                            loop.close()
                     except Exception as e:
                         logger.error(f"❌ Thread error: {str(e)}")
 
@@ -577,18 +603,19 @@ def toggle_bot():
                 return jsonify({'error': str(e)}), 500
         else:
             try:
-                # Update database status
+                # Update database status first
                 with get_db() as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
-                            INSERT INTO bot_status (is_running)
-                            VALUES (false)
+                            INSERT INTO bot_status (is_running, session_string)
+                            VALUES (false, NULL)
                             ON CONFLICT (id) DO UPDATE 
                             SET is_running = false,
+                                session_string = NULL,
                                 updated_at = CURRENT_TIMESTAMP
                         """)
 
-                # Stop bot by clearing its session
+                # Stop bot
                 main.SESSION_STRING = None
                 main.SOURCE_CHANNEL = None
                 main.DESTINATION_CHANNEL = None

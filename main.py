@@ -8,13 +8,7 @@ import asyncio
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from flask import Flask, jsonify
-
-# Create a small Flask app for health checks
-health_app = Flask(__name__)
-
-@health_app.route('/')
-def health_check():
-    return jsonify({"status": "ok"}), 200
+import time
 
 # Global variables
 MESSAGE_IDS = {}  # source_msg_id: destination_msg_id mapping
@@ -22,7 +16,7 @@ TEXT_REPLACEMENTS = {}
 SOURCE_CHANNEL = None
 DESTINATION_CHANNEL = None
 client = None
-PORT = 8084  # Health check server port
+SESSION_STRING = None
 
 # Set up logging
 logging.basicConfig(
@@ -35,8 +29,12 @@ logger = logging.getLogger(__name__)
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
-# Telegram session string (to be set by app.py)
-SESSION_STRING = None
+# Create a small Flask app for health checks
+health_app = Flask(__name__)
+
+@health_app.route('/')
+def health_check():
+    return jsonify({"status": "ok"}), 200
 
 # Database connection pool
 db_pool = psycopg2.pool.ThreadedConnectionPool(
@@ -62,6 +60,80 @@ def release_db(conn):
     """Release connection back to pool"""
     if conn:
         db_pool.putconn(conn)
+
+async def setup_client(max_retries=3, retry_delay=5):
+    """Initialize Telegram client with session string and retry logic"""
+    global client, SESSION_STRING
+
+    for attempt in range(max_retries):
+        try:
+            # Get latest session string from database if not set
+            if not SESSION_STRING:
+                conn = get_db()
+                if conn:
+                    try:
+                        with conn.cursor(cursor_factory=DictCursor) as cur:
+                            cur.execute("""
+                                SELECT session_string 
+                                FROM bot_status 
+                                WHERE is_running = true 
+                                ORDER BY updated_at DESC 
+                                LIMIT 1
+                            """)
+                            result = cur.fetchone()
+                            if result and result['session_string']:
+                                SESSION_STRING = result['session_string']
+                    finally:
+                        release_db(conn)
+
+            if not SESSION_STRING:
+                logger.warning("⚠️ No session string available")
+                return False
+
+            # Create new client instance
+            client = TelegramClient(
+                StringSession(SESSION_STRING),
+                API_ID,
+                API_HASH,
+                device_model="Replit Bot",
+                system_version="Linux",
+                app_version="1.0",
+                retry_delay=retry_delay
+            )
+
+            # Connect with timeout
+            try:
+                await asyncio.wait_for(client.connect(), timeout=30)
+            except asyncio.TimeoutError:
+                logger.error("❌ Connection timeout, retrying...")
+                if client:
+                    await client.disconnect()
+                time.sleep(retry_delay)
+                continue
+
+            # Verify authorization
+            if not await client.is_user_authorized():
+                logger.error("❌ Bot not authorized")
+                await client.disconnect()
+                client = None
+                return False
+
+            me = await client.get_me()
+            logger.info(f"✅ Bot running as: {me.first_name} (ID: {me.id})")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Client setup error (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            if client:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+            client = None
+            time.sleep(retry_delay)
+
+    logger.error("❌ All connection attempts failed")
+    return False
 
 def load_channel_config():
     """Load channel configuration from database"""
@@ -145,52 +217,6 @@ def apply_text_replacements(text):
             logger.info(f"✅ Replaced: {original} → {replacement}")
 
     return result
-
-async def setup_client():
-    """Initialize Telegram client with session string"""
-    global client, SESSION_STRING
-    try:
-        # Try to get SESSION_STRING from environment if not already set
-        if not SESSION_STRING:
-            SESSION_STRING = os.getenv('SESSION_STRING')
-
-        if not SESSION_STRING:
-            logger.warning("⚠️ No session string provided, serving health checks only")
-            # Start health check server when no session is available
-            health_app.run(host='0.0.0.0', port=PORT)
-            return False
-
-        # Create new client instance with session
-        client = TelegramClient(
-            StringSession(SESSION_STRING),
-            API_ID,
-            API_HASH,
-            device_model="Replit Bot",
-            system_version="Linux",
-            app_version="1.0"
-        )
-
-        # Connect and verify authorization
-        await client.connect()
-        if not await client.is_user_authorized():
-            logger.error("❌ Bot not authorized")
-            await client.disconnect()
-            client = None
-            return False
-
-        me = await client.get_me()
-        logger.info(f"✅ Bot running as: {me.first_name} (ID: {me.id})")
-        return True
-
-    except Exception as e:
-        logger.error(f"❌ Client setup error: {str(e)}")
-        if client:
-            try:
-                await client.disconnect()
-            except:
-                pass
-            client = None
-        return False
 
 async def setup_handlers():
     """Set up message handlers"""
@@ -313,7 +339,7 @@ async def main():
 
         # Keep the bot running
         try:
-            while True:  # Remove SESSION_STRING check to keep running
+            while True:
                 # Check if bot should still be running from database
                 conn = get_db()
                 if conn:
@@ -369,34 +395,34 @@ async def main():
 
 def start_health_server():
     """Start health check server in a separate thread"""
-    global PORT  # Declare global at start of function
     try:
-        health_app.run(host='0.0.0.0', port=PORT, debug=False)
+        # Try ports in sequence until one works
+        ports = [8084, 9001, 9002]
+        for port in ports:
+            try:
+                health_app.run(host='0.0.0.0', port=port, debug=False)
+                logger.info(f"✅ Health check server started on port {port}")
+                break
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to start health check server on port {port}: {str(e)}")
+                if port == ports[-1]:
+                    logger.error("❌ Could not start health check server on any port")
+                continue
+
     except Exception as e:
         logger.error(f"❌ Health check server error: {str(e)}")
-        # Try alternative port if main port is busy
-        try:
-            PORT = 9001  # Use a higher port range
-            health_app.run(host='0.0.0.0', port=PORT, debug=False)
-        except Exception as e:
-            logger.error(f"❌ Health check server retry error: {str(e)}")
-            try:
-                PORT = 9002  # Try one more time
-                health_app.run(host='0.0.0.0', port=PORT, debug=False)
-            except Exception as e:
-                logger.error(f"❌ All health check server attempts failed: {str(e)}")
-
-
 
 if __name__ == "__main__":
     try:
-        # Start health check server in a separate thread
-        health_thread = threading.Thread(
-            target=start_health_server,
-            daemon=True
-        )
-        health_thread.start()
-        logger.info(f"✅ Health check server started on port {PORT}")
+        # Only start health check server if bot is not running
+        if not SESSION_STRING:
+            # Start health check server in a separate thread
+            health_thread = threading.Thread(
+                target=start_health_server,
+                daemon=True
+            )
+            health_thread.start()
+            logger.info("✅ Started health check server thread")
 
         # Run bot
         loop = asyncio.new_event_loop()
