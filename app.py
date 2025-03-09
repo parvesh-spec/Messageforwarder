@@ -138,10 +138,15 @@ def async_route(f):
     @wraps(f)
     def wrapped(*args, **kwargs):
         try:
+            # Create new event loop for this request
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             return loop.run_until_complete(f(*args, **kwargs))
         except Exception as e:
             logger.error(f"❌ Async route error: {str(e)}")
-            raise
+            return render_template('error.html', error="An error occurred. Please try again.")
+        finally:
+            loop.close()
     return wrapped
 
 # Database connection context manager
@@ -379,6 +384,7 @@ async def forwarding():
         # Get channel list from Telegram
         channels = []
         try:
+            # Create a new client instance for this request
             client = await telegram_manager.get_client(user['session_string'])
             logger.info("✅ Got Telegram client")
 
@@ -395,6 +401,10 @@ async def forwarding():
                     })
 
             logger.info(f"✅ Found {len(channels)} channels")
+
+            # Clean up client after use
+            await telegram_manager._cleanup_client()
+
         except Exception as e:
             logger.error(f"❌ Channel list error: {str(e)}")
             return render_template('dashboard/forwarding.html',
