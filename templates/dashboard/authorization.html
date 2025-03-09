@@ -17,7 +17,7 @@
         <p>Connect your Telegram account to start forwarding messages.</p>
 
         <form id="telegram-auth-form" class="auth-form">
-            {{ csrf_token() }}
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="form-group">
                 <label>Phone Number (with country code)</label>
                 <input type="tel" id="phone" class="form-control" placeholder="+91XXXXXXXXXX" required>
@@ -40,10 +40,9 @@
 </div>
 
 <script>
-let phoneCodeHash = '';
-
 async function handleAuth(event) {
-    event.preventDefault();
+    event.preventDefault(); // Prevent form submission
+
     const phone = document.getElementById('phone').value;
     const otp = document.getElementById('otp').value;
     const password = document.getElementById('password').value;
@@ -62,6 +61,11 @@ async function handleAuth(event) {
                 },
                 body: `phone=${encodeURIComponent(phone)}`
             });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
             const data = await response.json();
 
             if (data.error) {
@@ -83,6 +87,11 @@ async function handleAuth(event) {
                 },
                 body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
             });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
             const data = await response.json();
 
             if (data.error === 'two_factor_needed') {
@@ -96,7 +105,7 @@ async function handleAuth(event) {
             }
         }
     } catch (error) {
-        showMessage('An error occurred. Please try again.', true);
+        showMessage('An error occurred: ' + error.message, true);
     } finally {
         button.disabled = false;
     }

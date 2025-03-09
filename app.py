@@ -471,16 +471,22 @@ async def send_otp():
         client = await telegram_manager.get_auth_client()
         session.clear()
 
-        # Send OTP
-        sent = await client.send_code_request(phone)
-        session['user_phone'] = phone
-        session['phone_code_hash'] = sent.phone_code_hash
-        return jsonify({'message': 'OTP sent successfully'})
+        try:
+            # Send OTP
+            sent = await client.send_code_request(phone)
+            session['user_phone'] = phone
+            session['phone_code_hash'] = sent.phone_code_hash
+            logger.info(f"✅ OTP sent successfully to {phone}")
+            return jsonify({'message': 'OTP sent successfully'})
+        except PhoneNumberInvalidError:
+            logger.error(f"❌ Invalid phone number: {phone}")
+            return jsonify({'error': 'Invalid phone number'}), 400
+        except Exception as e:
+            logger.error(f"❌ Send OTP error: {str(e)}")
+            return jsonify({'error': str(e)}), 500
 
-    except PhoneNumberInvalidError:
-        return jsonify({'error': 'Invalid phone number'}), 400
     except Exception as e:
-        logger.error(f"❌ Send OTP error: {str(e)}")
+        logger.error(f"❌ Critical error in send_otp: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/verify-otp', methods=['POST'])
