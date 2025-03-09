@@ -76,18 +76,20 @@ class TelegramManager:
         with self._lock:
             try:
                 if self._client and self._client.is_connected():
-                    if await self._client.is_user_authorized():
+                    if session_string and self._client.session.save() != session_string:
+                        await self._cleanup_client()
+                    elif await self._client.is_user_authorized():
                         return self._client
                     else:
                         await self._cleanup_client()
 
                 # Initialize new client with session string
                 await self._initialize_client(session_string)
-
                 if not await self._client.is_user_authorized():
-                    raise Exception("User not authorized. Please log in again.")
-
+                    await self._cleanup_client()
+                    raise Exception("User not authorized")
                 return self._client
+
             except Exception as e:
                 logger.error(f"❌ Client connection error: {str(e)}")
                 await self._cleanup_client()
@@ -398,6 +400,35 @@ async def forwarding():
 @async_route
 async def send_otp():
     try:
+        # Check if user already has a valid session
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT session_string, telegram_id
+                    FROM users
+                    WHERE id = %s AND session_string IS NOT NULL
+                """, (session.get('user_id'),))
+                existing_session = cur.fetchone()
+
+                if existing_session and existing_session['session_string']:
+                    try:
+                        # Try to use existing session
+                        client = await telegram_manager.get_client(existing_session['session_string'])
+                        if await client.is_user_authorized():
+                            # Update session data
+                            session['telegram_id'] = existing_session['telegram_id']
+                            session['session_string'] = existing_session['session_string']
+                            logger.info("✅ Reused existing Telegram session")
+                            return jsonify({'message': 'Already authorized'}), 200
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to reuse session: {str(e)}")
+                        # If session is invalid, continue with new auth
+                        cur.execute("""
+                            UPDATE users 
+                            SET session_string = NULL 
+                            WHERE id = %s
+                        """, (session.get('user_id'),))
+
         phone = request.form.get('phone')
         if not phone:
             return jsonify({'error': 'Phone number is required'}), 400
