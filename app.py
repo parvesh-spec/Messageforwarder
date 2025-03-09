@@ -352,16 +352,8 @@ def register():
                     session.permanent = True
 
                     return redirect(url_for('dashboard'))
-        else:
-            # Handle CSRF errors
-            if 'csrf_token' in form.errors:
-                return render_template('auth/register.html', 
-                                    form=form,
-                                    error="Security token expired. Please try again.")
 
     # GET request or form validation failed
-    # Generate a fresh CSRF token
-    form.csrf_token.data = csrf._get_token()
     return render_template('auth/register.html', form=form)
 
 @app.route('/logout')

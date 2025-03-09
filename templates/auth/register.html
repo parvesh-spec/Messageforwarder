@@ -19,12 +19,6 @@
     <form method="POST" action="{{ url_for('register') }}">
         {{ form.csrf_token }}
 
-        {% if form.csrf_token.errors %}
-            <div class="alert alert-danger">
-                Security token has expired. Please try submitting the form again.
-            </div>
-        {% endif %}
-
         <div class="form-group">
             <label>Email Address</label>
             {{ form.email(class="form-control") }}
