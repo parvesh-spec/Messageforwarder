@@ -141,6 +141,10 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def check_telegram_auth(user_data):
+    """Helper to check Telegram authorization status"""
+    return bool(user_data and user_data['telegram_id'] and user_data['session_string'])
+
 @app.route('/')
 def login():
     if session.get('user_id'):
@@ -244,7 +248,7 @@ def dashboard():
         with conn.cursor(cursor_factory=DictCursor) as cur:
             # Get user data
             cur.execute("""
-                SELECT *
+                SELECT telegram_id, telegram_username, auth_date, session_string
                 FROM users
                 WHERE id = %s
             """, (user_id,))
@@ -267,9 +271,9 @@ def dashboard():
             replacements_count = cur.fetchone()[0]
 
     return render_template('dashboard/overview.html',
-                         telegram_authorized=bool(user['telegram_id']),
-                         telegram_username=user['telegram_username'],
-                         telegram_auth_date=user['telegram_auth_date'],
+                         telegram_authorized=check_telegram_auth(user),
+                         telegram_username=user['telegram_username'] if user else None,
+                         telegram_auth_date=user['auth_date'] if user else None,
                          source_channel=config['source_channel'] if config else None,
                          dest_channel=config['destination_channel'] if config else None,
                          is_active=config['is_active'] if config else False,
@@ -289,12 +293,10 @@ def authorization():
             """, (session.get('user_id'),))
             user = cur.fetchone()
 
-    is_authorized = bool(user['telegram_id'] and user['session_string'])
-
     return render_template('dashboard/authorization.html',
-                         telegram_authorized=is_authorized,
-                         telegram_username=user['telegram_username'],
-                         telegram_auth_date=user['telegram_auth_date'])
+                         telegram_authorized=check_telegram_auth(user),
+                         telegram_username=user['telegram_username'] if user else None,
+                         telegram_auth_date=user['auth_date'] if user else None)
 
 @app.route('/replacements')
 @login_required
@@ -325,14 +327,13 @@ async def forwarding():
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 # Check telegram authorization
                 cur.execute("""
-                    SELECT telegram_id, telegram_username, auth_date,
-                           session_string
+                    SELECT telegram_id, telegram_username, auth_date, session_string
                     FROM users
                     WHERE id = %s
                 """, (user_id,))
                 user = cur.fetchone()
 
-                is_authorized = bool(user['telegram_id'] and user['session_string'])
+                is_authorized = check_telegram_auth(user)
                 if not is_authorized:
                     return render_template('dashboard/forwarding.html',
                                       telegram_authorized=False)
