@@ -15,6 +15,7 @@ from datetime import timedelta
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
+from flask_wtf.csrf import CSRFProtect
 
 # Set up logging
 logging.basicConfig(
@@ -26,12 +27,15 @@ logger = logging.getLogger(__name__)
 # Configure Flask application
 app = Flask(__name__)
 app.config.update(
-    SECRET_KEY=os.urandom(24),
+    SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
     DEBUG=True  # Enable debug mode for detailed errors
 )
+
+# Initialize CSRF protection
+csrf = CSRFProtect(app)
 
 # Initialize session
 Session(app)
