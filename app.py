@@ -63,7 +63,7 @@ def create_tables():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS bot_status (
                     id SERIAL PRIMARY KEY,
-                    user_id INTEGER,
+                    user_id BIGINT,
                     is_running BOOLEAN NOT NULL DEFAULT false,
                     session_string TEXT,
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -73,7 +73,7 @@ def create_tables():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
-                    telegram_id INTEGER UNIQUE NOT NULL,
+                    telegram_id BIGINT UNIQUE NOT NULL,
                     first_name TEXT,
                     username TEXT
                 )
@@ -82,7 +82,7 @@ def create_tables():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS text_replacements (
                     id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
+                    user_id BIGINT NOT NULL,
                     original_text TEXT NOT NULL,
                     replacement_text TEXT NOT NULL,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -92,13 +92,12 @@ def create_tables():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS channel_config (
                     id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
+                    user_id BIGINT NOT NULL,
                     source_channel TEXT NOT NULL,
                     destination_channel TEXT NOT NULL,
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-
 
 # Call create_tables on startup (after get_db is defined)
 create_tables()
