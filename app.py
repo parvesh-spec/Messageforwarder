@@ -30,7 +30,7 @@ app.config.update(
     DEBUG=True,
     WTF_CSRF_ENABLED=True,
     WTF_CSRF_SECRET_KEY=os.urandom(24),  # Separate key for CSRF
-    WTF_CSRF_TIME_LIMIT=3600  # 1 hour
+    WTF_CSRF_TIME_LIMIT=None  # Disable CSRF token expiration
 )
 
 # Initialize extensions
@@ -40,7 +40,8 @@ csrf = CSRFProtect(app)
 # Error handler for CSRF errors
 @app.errorhandler(400)
 def handle_csrf_error(e):
-    return render_template('auth/register.html', form=RegisterForm(), csrf_error=True)
+    flash('Session expired. Please try again.', 'error')
+    return render_template('auth/register.html', form=RegisterForm())
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -203,7 +204,7 @@ def login_post():
             session['telegram_id'] = user['telegram_id']
             return redirect(url_for('dashboard'))
 
-@app.route('/register')
+@app.route('/register', methods=['GET'])
 def register():
     form = RegisterForm()
     return render_template('auth/register.html', form=form)
@@ -232,9 +233,9 @@ def register_post():
                     """, (email, generate_password_hash(password)))
 
                     user_id = cur.fetchone()[0]
-                    session.clear()  # Clear old session
+                    # Store user_id in session
                     session['user_id'] = user_id
-                    session.modified = True  # Mark session as modified
+                    session.modified = True
                     flash('Registration successful!', 'success')
                     return redirect(url_for('dashboard'))
         else:

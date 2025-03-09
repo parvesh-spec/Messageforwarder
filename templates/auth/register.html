@@ -4,10 +4,6 @@
 <div class="auth-box">
     <h2>Create Account</h2>
 
-    {% if csrf_error %}
-        <div class="alert alert-error">Session expired. Please try again.</div>
-    {% endif %}
-
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
             {% for category, message in messages %}
@@ -63,4 +59,31 @@
         <p>Already have an account? <a href="{{ url_for('login') }}">Login here</a></p>
     </div>
 </div>
+
+<style>
+.alert {
+    padding: 10px;
+    margin-bottom: 15px;
+    border-radius: 4px;
+}
+
+.alert-error {
+    background-color: #ffebee;
+    color: #c62828;
+    border: 1px solid #ef9a9a;
+}
+
+.alert-success {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+    border: 1px solid #a5d6a7;
+}
+
+.error-text {
+    color: #dc3545;
+    font-size: 0.875rem;
+    display: block;
+    margin-top: 0.25rem;
+}
+</style>
 {% endblock %}
