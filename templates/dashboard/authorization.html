@@ -74,12 +74,11 @@ async function handleAuth(event) {
                 body: `phone=${encodeURIComponent(phone)}`
             });
 
-            if (!response.ok) {
-                const data = await response.json();
-                throw new Error(data.error || `HTTP error! status: ${response.status}`);
-            }
-
             const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || `Request failed with status ${response.status}`);
+            }
 
             if (data.error) {
                 throw new Error(data.error);
@@ -99,28 +98,29 @@ async function handleAuth(event) {
                 body: `otp=${encodeURIComponent(otp)}&password=${encodeURIComponent(password)}`
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
             const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || `Request failed with status ${response.status}`);
+            }
 
             if (data.error === 'two_factor_needed') {
                 document.getElementById('password-group').style.display = 'block';
                 button.textContent = 'Verify 2FA';
                 showMessage('Please enter your Two-Factor Authentication password');
             } else if (data.error) {
-                showMessage(data.error, true);
+                throw new Error(data.error);
             } else {
                 window.location.reload();
             }
         }
     } catch (error) {
         showMessage(error.message, true);
+        // Reset button state on error
+        button.textContent = originalText;
     } finally {
         button.disabled = false;
         button.classList.remove('btn-loading');
-        button.textContent = originalText;
     }
 }
 

@@ -468,21 +468,23 @@ async def send_otp():
         if not phone.startswith('+91'):
             return jsonify({'error': 'Phone number must start with +91'}), 400
 
-        client = await telegram_manager.get_auth_client()
-
         # Store current user_id before clearing session
         current_user_id = session.get('user_id')
-        session.clear()
-        # Restore user_id
-        session['user_id'] = current_user_id
 
         try:
+            client = await telegram_manager.get_auth_client()
+
+            # Clear session but keep important data
+            session.clear()
+            session['user_id'] = current_user_id
+
             # Send OTP
             sent = await client.send_code_request(phone)
             session['user_phone'] = phone
             session['phone_code_hash'] = sent.phone_code_hash
             logger.info(f"✅ OTP sent successfully to {phone}")
             return jsonify({'message': 'OTP sent successfully'})
+
         except PhoneNumberInvalidError:
             logger.error(f"❌ Invalid phone number: {phone}")
             return jsonify({'error': 'Invalid phone number'}), 400
