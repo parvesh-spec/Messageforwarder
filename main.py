@@ -327,39 +327,43 @@ async def manage_user_session(user_id):
                         cur.execute("""
                             SELECT is_running, session_string 
                             FROM bot_status 
-                            WHERE user_id = %s AND is_running = true
-                            ORDER BY updated_at DESC 
-                            LIMIT 1
+                            WHERE user_id = %s
                         """, (user_id,))
                         result = cur.fetchone()
+
                         if not result or not result['is_running']:
                             logger.info(f"👋 Bot stopped for user {user_id}")
                             break
 
-                        # Update session if changed
+                        # Update session if client is not connected
                         if user_id in USER_SESSIONS:
                             client = USER_SESSIONS[user_id].get('client')
-                            if client and not client.is_connected():
-                                logger.error(f"❌ Client disconnected for user {user_id}, attempting to reconnect")
+                            if not client or not client.is_connected():
+                                logger.error(f"❌ Client disconnected for user {user_id}, reconnecting...")
                                 client = await setup_client(user_id, result['session_string'])
                                 if client:
-                                    USER_SESSIONS[user_id]['client'] = client
-                                    await setup_user_handlers(user_id, client)
+                                    # Get latest channel config
+                                    cur.execute("""
+                                        SELECT source_channel, destination_channel
+                                        FROM channel_config
+                                        WHERE user_id = %s
+                                    """, (user_id,))
+                                    channels = cur.fetchone()
+
+                                    if channels:
+                                        USER_SESSIONS[user_id] = {
+                                            'client': client,
+                                            'source': channels['source_channel'],
+                                            'destination': channels['destination_channel'],
+                                            'replacements': load_user_replacements(user_id)
+                                        }
+                                        success = await setup_user_handlers(user_id, client)
+                                        if success:
+                                            logger.info(f"✅ Successfully reconnected bot for user {user_id}")
+                                        else:
+                                            logger.error(f"❌ Failed to setup handlers for user {user_id}")
                 finally:
                     release_db(conn)
-
-            # Reload user configuration
-            source, destination = load_user_config(user_id)
-            if source and destination and user_id in USER_SESSIONS:
-                USER_SESSIONS[user_id].update({
-                    'source': source,
-                    'destination': destination
-                })
-
-            # Reload user replacements
-            replacements = load_user_replacements(user_id)
-            if user_id in USER_SESSIONS:
-                USER_SESSIONS[user_id]['replacements'] = replacements
 
             # Wait before next check
             await asyncio.sleep(30)

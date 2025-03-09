@@ -385,23 +385,34 @@ async def dashboard():
 
                     # Get bot status
                     cur.execute("""
-                        SELECT is_running 
+                        SELECT is_running, session_string 
                         FROM bot_status 
                         WHERE user_id = %s
                     """, (telegram_id,))
                     status_row = cur.fetchone()
-                    if status_row:
-                        initial_bot_status = status_row['is_running']
 
-                    # Ensure bot is running if status is true
-                    if initial_bot_status:
-                        import main
-                        main.add_user_session(
-                            user_id=telegram_id,
-                            session_string=session.get('session_string'),
-                            source_channel=last_config['source_channel'] if last_config else None,
-                            destination_channel=last_config['destination_channel'] if last_config else None
-                        )
+                    if status_row and status_row['is_running']:
+                        initial_bot_status = True
+                        # If bot should be running and we have all required data
+                        if last_config and status_row['session_string']:
+                            import main
+                            logger.info(f"✅ Initializing bot session for user {telegram_id}")
+                            success = main.add_user_session(
+                                user_id=telegram_id,
+                                session_string=status_row['session_string'],
+                                source_channel=last_config['source_channel'],
+                                destination_channel=last_config['destination_channel']
+                            )
+                            if not success:
+                                logger.error(f"❌ Failed to initialize bot session for user {telegram_id}")
+                                # Update database to reflect actual status
+                                cur.execute("""
+                                    UPDATE bot_status 
+                                    SET is_running = false,
+                                        session_string = NULL
+                                    WHERE user_id = %s
+                                """, (telegram_id,))
+                                initial_bot_status = False
 
         except Exception as e:
             logger.error(f"❌ Database error: {str(e)}")
