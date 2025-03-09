@@ -141,6 +141,10 @@ def load_user_replacements(user_id):
             return {}
 
         with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT COUNT(*) FROM text_replacements WHERE user_id = %s", (user_id,))
+            count = cur.fetchone()[0]
+            logger.info(f"Found {count} replacements in database for user {user_id}")
+
             cur.execute("""
                 SELECT original_text, replacement_text 
                 FROM text_replacements 
@@ -151,18 +155,12 @@ def load_user_replacements(user_id):
             replacements = {}
             for row in cur.fetchall():
                 replacements[row['original_text']] = row['replacement_text']
-
-            if replacements:
-                logger.info(f"✅ Loaded {len(replacements)} replacements for user {user_id}")
-                for orig, repl in replacements.items():
-                    logger.info(f"   '{orig}' → '{repl}'")
-            else:
-                logger.info(f"ℹ️ No replacements found for user {user_id}")
+                logger.info(f"Loaded replacement: '{row['original_text']}' → '{row['replacement_text']}'")
 
             return replacements
 
     except Exception as e:
-        logger.error(f"❌ Replacements error for user {user_id}: {str(e)}")
+        logger.error(f"❌ Failed to load replacements for user {user_id}: {str(e)}")
         return {}
     finally:
         if conn:
@@ -175,6 +173,7 @@ def apply_text_replacements(text, user_id):
 
     result = text
     replacements = USER_SESSIONS[user_id].get('replacements', {})
+    logger.info(f"Processing text: '{text}' with {len(replacements)} replacements")
 
     # Sort replacements by length (longest first) to avoid partial replacements
     sorted_replacements = sorted(
@@ -187,7 +186,10 @@ def apply_text_replacements(text, user_id):
     for original, replacement in sorted_replacements:
         if original in result:
             result = result.replace(original, replacement)
-            logger.info(f"✅ Replaced: '{original}' → '{replacement}'")
+            logger.info(f"✅ Applied replacement: '{original}' → '{replacement}'")
+
+    if result != text:
+        logger.info(f"Text after replacements: '{result}'")
 
     return result
 
@@ -408,8 +410,10 @@ def update_user_channels(user_id, source, destination):
 def update_user_replacements(user_id):
     """Update a user's text replacements"""
     if user_id in USER_SESSIONS:
-        USER_SESSIONS[user_id]['replacements'] = load_user_replacements(user_id)
-        logger.info(f"✅ Replacements updated for user {user_id}")
+        logger.info(f"Updating replacements for user {user_id}")
+        replacements = load_user_replacements(user_id)
+        USER_SESSIONS[user_id]['replacements'] = replacements
+        logger.info(f"✅ Updated {len(replacements)} replacements for user {user_id}")
 
 if __name__ == "__main__":
     try:

@@ -830,19 +830,28 @@ def add_replacement():
                     cur.execute("""
                         INSERT INTO text_replacements (user_id, original_text, replacement_text)
                         VALUES (%s, %s, %s)
+                        RETURNING id
                     """, (user_id, original, replacement))
 
-                    # Update bot if needed
+                    replacement_id = cur.fetchone()[0]
+                    logger.info(f"Added replacement {replacement_id} for user {user_id}: '{original}' → '{replacement}'")
+
+                    # Update bot replacements if running
                     import main
                     main.update_user_replacements(session.get('telegram_id'))
 
-                    return jsonify({'message': 'Replacement added successfully'})
+                    return jsonify({
+                        'message': 'Replacement added successfully',
+                        'original': original,
+                        'replacement': replacement
+                    })
+
                 except psycopg2.Error as e:
-                    error_msg = handle_db_error(e, "add_replacement")
-                    return jsonify({'error': error_msg}), 400
+                    logger.error(f"Database error in add_replacement: {str(e)}")
+                    return jsonify({'error': 'Failed to add replacement'}), 400
 
     except Exception as e:
-        logger.error(f"❌ Add replacement error: {str(e)}")
+        logger.error(f"Error in add_replacement: {str(e)}")
         return jsonify({'error': 'An error occurred while adding the replacement'}), 500
 
 @app.route('/remove-replacement', methods=['POST'])
@@ -860,16 +869,24 @@ def remove_replacement():
                 cur.execute("""
                     DELETE FROM text_replacements 
                     WHERE user_id = %s AND original_text = %s
+                    RETURNING id
                 """, (user_id, original))
 
-        # Update bot
-        import main
-        main.update_user_replacements(session.get('telegram_id'))
+                result = cur.fetchone()
+                if result:
+                    logger.info(f"Removed replacement {result[0]} for user {user_id}")
 
-        return jsonify({'message': 'Replacement removed successfully'})
+                    # Update bot replacements if running
+                    import main
+                    main.update_user_replacements(session.get('telegram_id'))
+
+                    return jsonify({'message': 'Replacement removed successfully'})
+                else:
+                    return jsonify({'error': 'Replacement not found'}), 404
+
     except Exception as e:
-        logger.error(f"❌ Remove replacement error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error in remove_replacement: {str(e)}")
+        return jsonify({'error': 'Failed to remove replacement'}), 500
 
 @app.route('/clear-replacements', methods=['POST'])
 @login_required
