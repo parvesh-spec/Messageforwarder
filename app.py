@@ -31,7 +31,7 @@ app.config.update(
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    DEBUG=True  # Enable debug mode for detailed errors
+    DEBUG=True
 )
 
 # Initialize CSRF protection
@@ -39,6 +39,50 @@ csrf = CSRFProtect(app)
 
 # Initialize session
 Session(app)
+
+# Create event loop for the application
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+class TelegramManager:
+    def __init__(self, api_id, api_hash):
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self._lock = threading.Lock()
+        self._client = None
+
+        # Initialize client during startup
+        loop.run_until_complete(self._initialize_client())
+
+    async def _initialize_client(self):
+        """Initialize the Telegram client"""
+        if not self._client:
+            self._client = TelegramClient(
+                StringSession(),
+                self.api_id,
+                self.api_hash,
+                device_model="Replit Web",
+                system_version="Linux",
+                app_version="1.0",
+                loop=loop
+            )
+            await self._client.connect()
+            logger.info("✅ Telegram client initialized")
+
+    async def get_client(self):
+        """Get the Telegram client instance"""
+        with self._lock:
+            if not self._client:
+                await self._initialize_client()
+            elif not self._client.is_connected():
+                await self._client.connect()
+            return self._client
+
+    async def cleanup(self):
+        """Cleanup the client connection"""
+        if self._client and self._client.is_connected():
+            await self._client.disconnect()
+            self._client = None
 
 # Database pool for connections
 db_pool = psycopg2.pool.ThreadedConnectionPool(
@@ -52,8 +96,6 @@ def async_route(f):
     @wraps(f)
     def wrapped(*args, **kwargs):
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             return loop.run_until_complete(f(*args, **kwargs))
         except Exception as e:
             logger.error(f"❌ Async route error: {str(e)}")
@@ -293,7 +335,7 @@ async def forwarding():
         channels = []
         if telegram_id:
             try:
-                client = await telegram_manager.get_auth_client()
+                client = await telegram_manager.get_client()
                 async for dialog in client.iter_dialogs():
                     if dialog.is_channel:
                         channels.append({
@@ -317,80 +359,12 @@ async def forwarding():
                             telegram_authorized=False,
                             error="An error occurred loading the forwarding page")
 
-class TelegramManager:
-    def __init__(self, api_id, api_hash):
-        self.api_id = api_id
-        self.api_hash = api_hash
-        self._lock = threading.Lock()
-        self._client = None
-        self._loop = None
-
-    async def _init_client(self):
-        """Initialize a new client with proper error handling"""
-        try:
-            if not self._client:
-                self._client = TelegramClient(
-                    StringSession(),
-                    self.api_id,
-                    self.api_hash,
-                    device_model="Replit Web",
-                    system_version="Linux",
-                    app_version="1.0"
-                )
-
-            if not self._client.is_connected():
-                await self._client.connect()
-
-            return self._client
-        except Exception as e:
-            logger.error(f"❌ Client initialization error: {str(e)}")
-            raise
-
-    async def get_auth_client(self):
-        """Get a client for authentication or dashboard operations"""
-        with self._lock:
-            try:
-                client = await self._init_client()
-                return client
-            except Exception as e:
-                logger.error(f"❌ Client creation error: {str(e)}")
-                await self._cleanup_client()
-                raise
-
-    async def _cleanup_client(self):
-        """Internal method to cleanup client"""
-        if self._client:
-            try:
-                if self._client.is_connected():
-                    await self._client.disconnect()
-            except:
-                pass
-            finally:
-                self._client = None
-
-def handle_db_error(e, operation):
-    """Handle database errors and return appropriate messages"""
-    error_msg = str(e)
-    if "violates foreign key constraint" in error_msg:
-        logger.error(f"❌ Foreign key error in {operation}: {error_msg}")
-        return "Session expired, please login again"
-    elif "violates unique constraint" in error_msg:
-        logger.error(f"❌ Unique constraint error in {operation}: {error_msg}")
-        if "text_replacements" in error_msg:
-            return "This text replacement already exists"
-        elif "channel_config" in error_msg:
-            return "Channel configuration already exists"
-        return "Operation failed due to duplicate entry"
-    else:
-        logger.error(f"❌ Database error in {operation}: {error_msg}")
-        return "An unexpected error occurred"
-
-
-# Create global Telegram manager
+# Initialize the Telegram manager
 telegram_manager = TelegramManager(
-    int(os.getenv('API_ID', '27202142')),
-    os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
+    int(os.getenv('API_ID')),
+    os.getenv('API_HASH')
 )
+
 
 @app.route('/send-otp', methods=['POST'])
 @async_route
@@ -410,7 +384,8 @@ async def send_otp():
         }
 
         try:
-            client = await telegram_manager.get_auth_client()
+            # Get client and send OTP
+            client = await telegram_manager.get_client()
             sent = await client.send_code_request(phone)
 
             # Clear session but preserve important data
@@ -453,7 +428,7 @@ async def verify_otp():
             return jsonify({'error': 'OTP is required'}), 400
 
         try:
-            client = await telegram_manager.get_auth_client()
+            client = await telegram_manager.get_client()
 
             try:
                 await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
@@ -793,6 +768,24 @@ def clear_replacements():
     except Exception as e:
         logger.error(f"❌ Clear replacements error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+def handle_db_error(e, operation):
+    """Handle database errors and return appropriate messages"""
+    error_msg = str(e)
+    if "violates foreign key constraint" in error_msg:
+        logger.error(f"❌ Foreign key error in {operation}: {error_msg}")
+        return "Session expired, please login again"
+    elif "violates unique constraint" in error_msg:
+        logger.error(f"❌ Unique constraint error in {operation}: {error_msg}")
+        if "text_replacements" in error_msg:
+            return "This text replacement already exists"
+        elif "channel_config" in error_msg:
+            return "Channel configuration already exists"
+        return "Operation failed due to duplicate entry"
+    else:
+        logger.error(f"❌ Database error in {operation}: {error_msg}")
+        return "An unexpected error occurred"
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
