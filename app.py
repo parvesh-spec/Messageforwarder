@@ -498,7 +498,7 @@ async def verify_otp():
         phone_code_hash = session.get('phone_code_hash')
         otp_sent_at = session.get('otp_sent_at', 0)
         otp = request.form.get('otp')
-        password = request.form.get('password')
+        password = request.form.get('password')  # For 2FA if needed
 
         # Validate data presence
         if not all([phone, phone_code_hash, otp]):
@@ -509,12 +509,16 @@ async def verify_otp():
             return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
 
         try:
+            # Initialize client
             client = await telegram_manager.get_client()
+            if not client:
+                raise Exception("Failed to initialize Telegram client")
+            logger.info("✅ Got Telegram client")
 
             # Sign in with retries
             for attempt in range(3):
                 try:
-                    await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
+                    await client.sign_in(phone=phone, code=otp, phone_code_hash=phone_code_hash)
                     break
                 except SessionPasswordNeededError:
                     if not password:
@@ -540,12 +544,11 @@ async def verify_otp():
                         cur.execute("""
                             UPDATE users 
                             SET telegram_id = %s,
-                                first_name = %s,
                                 telegram_username = %s,
                                 auth_date = CURRENT_TIMESTAMP,
                                 session_string = %s
                             WHERE id = %s
-                        """, (me.id, me.first_name, me.username, session_string, session.get('user_id')))
+                        """, (me.id, me.username, session_string, session.get('user_id')))
 
                 # Update session
                 session['telegram_id'] = me.id
@@ -554,6 +557,7 @@ async def verify_otp():
 
                 return jsonify({'message': 'Authorization successful'})
             else:
+                logger.error("❌ Authorization failed after sign in")
                 return jsonify({'error': 'Authorization failed'}), 400
 
         except Exception as e:
@@ -561,11 +565,13 @@ async def verify_otp():
             logger.error(f"❌ Verification error: {error_msg}")
             if "phone code expired" in error_msg.lower():
                 return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
-            return jsonify({'error': error_msg}), 400
+            elif "phone code invalid" in error_msg.lower():
+                return jsonify({'error': 'Invalid OTP. Please check and try again.'}), 400
+            return jsonify({'error': 'Failed to verify OTP. Please try again.'}), 400
 
     except Exception as e:
         logger.error(f"❌ Critical error in verify_otp: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An unexpected error occurred. Please try again.'}), 500
 
 @app.before_request
 def check_session_expiry():
