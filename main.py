@@ -200,12 +200,17 @@ async def setup_user_handlers(user_id, client):
                 # Format channel IDs
                 chat_id = str(event.chat_id)
                 source_id = str(source)
-                if not chat_id.startswith('-100'):
-                    chat_id = f"-100{chat_id.lstrip('-')}"
-                if not source_id.startswith('-100'):
-                    source_id = f"-100{source_id.lstrip('-')}"
 
-                # Verify source channel
+                # Add debug logging
+                logger.info(f"Received message in chat: {chat_id}, source channel: {source_id}")
+
+                # Strip -100 prefix if present for comparison
+                if chat_id.startswith('-100'):
+                    chat_id = chat_id[4:]
+                if source_id.startswith('-100'):
+                    source_id = source_id[4:]
+
+                # Compare stripped IDs
                 if chat_id != source_id:
                     return
 
@@ -213,25 +218,33 @@ async def setup_user_handlers(user_id, client):
                 message_text = event.message.text if event.message.text else ""
                 if message_text:
                     message_text = apply_text_replacements(message_text, user_id)
+                    logger.info(f"Processed message text: {message_text}")
 
                 # Format destination channel ID
                 dest_id = str(destination)
                 if not dest_id.startswith('-100'):
-                    dest_id = f"-100{dest_id.lstrip('-')}"
+                    dest_id = f"-100{dest_id}"
 
-                # Send to destination
-                dest_channel = await client.get_entity(int(dest_id))
-                sent_message = await client.send_message(
-                    dest_channel,
-                    message_text,
-                    formatting_entities=event.message.entities
-                )
+                try:
+                    # Get destination channel
+                    dest_channel = await client.get_entity(int(dest_id))
+                    logger.info(f"Found destination channel: {dest_channel.title}")
 
-                # Store message mapping for this user
-                if user_id not in MESSAGE_IDS:
-                    MESSAGE_IDS[user_id] = {}
-                MESSAGE_IDS[user_id][event.message.id] = sent_message.id
-                logger.info(f"✅ Message forwarded for user {user_id}")
+                    # Send message
+                    sent_message = await client.send_message(
+                        dest_channel,
+                        message_text,
+                        formatting_entities=event.message.entities
+                    )
+                    logger.info(f"Message sent successfully to {dest_channel.title}")
+
+                    # Store message mapping for this user
+                    if user_id not in MESSAGE_IDS:
+                        MESSAGE_IDS[user_id] = {}
+                    MESSAGE_IDS[user_id][event.message.id] = sent_message.id
+
+                except Exception as e:
+                    logger.error(f"Failed to forward message: {str(e)}")
 
             except Exception as e:
                 logger.error(f"❌ Message handler error for user {user_id}: {str(e)}")
@@ -252,11 +265,14 @@ async def setup_user_handlers(user_id, client):
                 # Format channel IDs
                 chat_id = str(event.chat_id)
                 source_id = str(source)
-                if not chat_id.startswith('-100'):
-                    chat_id = f"-100{chat_id.lstrip('-')}"
-                if not source_id.startswith('-100'):
-                    source_id = f"-100{source_id.lstrip('-')}"
 
+                # Strip -100 prefix if present for comparison
+                if chat_id.startswith('-100'):
+                    chat_id = chat_id[4:]
+                if source_id.startswith('-100'):
+                    source_id = source_id[4:]
+
+                # Compare stripped IDs
                 if chat_id != source_id:
                     return
 
@@ -274,17 +290,20 @@ async def setup_user_handlers(user_id, client):
                 # Format destination channel ID
                 dest_id = str(destination)
                 if not dest_id.startswith('-100'):
-                    dest_id = f"-100{dest_id.lstrip('-')}"
+                    dest_id = f"-100{dest_id}"
 
-                # Edit destination message
-                dest_channel = await client.get_entity(int(dest_id))
-                await client.edit_message(
-                    dest_channel,
-                    dest_msg_id,
-                    message_text,
-                    formatting_entities=event.message.entities
-                )
-                logger.info(f"✅ Edit synced for user {user_id}")
+                try:
+                    # Edit destination message
+                    dest_channel = await client.get_entity(int(dest_id))
+                    await client.edit_message(
+                        dest_channel,
+                        dest_msg_id,
+                        message_text,
+                        formatting_entities=event.message.entities
+                    )
+                    logger.info(f"Message edit synced in {dest_channel.title}")
+                except Exception as e:
+                    logger.error(f"Failed to edit message: {str(e)}")
 
             except Exception as e:
                 logger.error(f"❌ Edit handler error for user {user_id}: {str(e)}")
