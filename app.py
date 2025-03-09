@@ -279,18 +279,20 @@ def dashboard():
 @app.route('/authorization')
 @login_required
 def authorization():
+    """Authorization page route handler"""
     with get_db() as conn:
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
-                SELECT telegram_id, username as telegram_username, 
-                       auth_date as telegram_auth_date
+                SELECT telegram_id, telegram_username, auth_date, session_string
                 FROM users 
                 WHERE id = %s
             """, (session.get('user_id'),))
             user = cur.fetchone()
 
+    is_authorized = bool(user['telegram_id'] and user['session_string'])
+
     return render_template('dashboard/authorization.html',
-                         telegram_authorized=bool(user['telegram_id']),
+                         telegram_authorized=is_authorized,
                          telegram_username=user['telegram_username'],
                          telegram_auth_date=user['telegram_auth_date'])
 
@@ -315,10 +317,9 @@ def replacements():
 @login_required
 @async_route
 async def forwarding():
+    """Forwarding page route handler"""
     try:
         user_id = session.get('user_id')
-        telegram_id = session.get('telegram_id')
-        session_string = session.get('session_string')
 
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
@@ -331,7 +332,8 @@ async def forwarding():
                 """, (user_id,))
                 user = cur.fetchone()
 
-                if not user['telegram_id']:
+                is_authorized = bool(user['telegram_id'] and user['session_string'])
+                if not is_authorized:
                     return render_template('dashboard/forwarding.html',
                                       telegram_authorized=False)
 
@@ -354,29 +356,28 @@ async def forwarding():
 
         # Get channel list from Telegram
         channels = []
-        if telegram_id and session_string:
-            try:
-                client = await telegram_manager.get_client(session_string)
-                logger.info("✅ Got Telegram client")
+        try:
+            client = await telegram_manager.get_client(user['session_string'])
+            logger.info("✅ Got Telegram client")
 
-                # Get all dialogs (channels)
-                async for dialog in client.iter_dialogs():
-                    if dialog.is_channel:
-                        channel_id = str(dialog.id)
-                        if not channel_id.startswith('-100'):
-                            channel_id = f'-100{channel_id.lstrip("-")}'
+            # Get all dialogs (channels)
+            async for dialog in client.iter_dialogs():
+                if dialog.is_channel:
+                    channel_id = str(dialog.id)
+                    if not channel_id.startswith('-100'):
+                        channel_id = f'-100{channel_id.lstrip("-")}'
 
-                        channels.append({
-                            'id': channel_id,
-                            'name': dialog.name
-                        })
+                    channels.append({
+                        'id': channel_id,
+                        'name': dialog.name
+                    })
 
-                logger.info(f"✅ Found {len(channels)} channels")
-            except Exception as e:
-                logger.error(f"❌ Channel list error: {str(e)}")
-                return render_template('dashboard/forwarding.html',
-                                  telegram_authorized=True,
-                                  error="Failed to fetch channels. Please try logging out and authorizing your Telegram account again.")
+            logger.info(f"✅ Found {len(channels)} channels")
+        except Exception as e:
+            logger.error(f"❌ Channel list error: {str(e)}")
+            return render_template('dashboard/forwarding.html',
+                              telegram_authorized=True,
+                              error="Failed to fetch channels. Please try logging out and authorizing your Telegram account again.")
 
         return render_template('dashboard/forwarding.html',
                           telegram_authorized=True,
