@@ -242,6 +242,7 @@
         document.addEventListener('DOMContentLoaded', function() {
             const lastSource = '{{ last_source|safe if last_source else "" }}';
             const lastDest = '{{ last_dest|safe if last_dest else "" }}';
+            const initialBotStatus = {{ initial_bot_status|tojson|safe }};
 
             if (lastSource) {
                 document.getElementById('source-channel').value = lastSource;
@@ -249,6 +250,9 @@
             if (lastDest) {
                 document.getElementById('dest-channel').value = lastDest;
             }
+
+            // Set initial bot status
+            document.getElementById('bot-toggle').checked = initialBotStatus;
 
             // Load replacements when page loads
             loadReplacements();

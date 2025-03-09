@@ -313,8 +313,8 @@ async def main():
 
         # Keep the bot running
         try:
-            while SESSION_STRING:  # Only run while we have a valid session
-                # Check if bot should still be running
+            while True:  # Remove SESSION_STRING check to keep running
+                # Check if bot should still be running from database
                 conn = get_db()
                 if conn:
                     try:
@@ -327,11 +327,12 @@ async def main():
                     finally:
                         release_db(conn)
 
-                # Check client connection
+                # Check client connection and reconnect if needed
                 if not client or not client.is_connected():
                     logger.error("❌ Client disconnected, attempting to reconnect")
                     if not await setup_client():
-                        break
+                        # If reconnection fails, check if we should still be running
+                        continue
 
                 # Reload configuration and replacements
                 if load_channel_config():
@@ -340,7 +341,7 @@ async def main():
                     logger.info("✅ Replacements refreshed")
 
                 # Wait before next check
-                await asyncio.sleep(30)  # Check every 30 seconds
+                await asyncio.sleep(30)
 
         except KeyboardInterrupt:
             logger.info("👋 Bot stopped by user")
@@ -384,6 +385,7 @@ def start_health_server():
                 health_app.run(host='0.0.0.0', port=PORT, debug=False)
             except Exception as e:
                 logger.error(f"❌ All health check server attempts failed: {str(e)}")
+
 
 
 if __name__ == "__main__":

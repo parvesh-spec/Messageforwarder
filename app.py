@@ -397,13 +397,15 @@ async def dashboard():
                     })
         except Exception as e:
             logger.error(f"❌ Channel list error: {str(e)}")
-            channels = []  # Continue with empty list rather than redirect
+            channels = []
 
-        # Get last selected channels
+        # Get last selected channels and bot status
         last_config = None
+        initial_bot_status = False
         try:
             with get_db() as conn:
                 with conn.cursor(cursor_factory=DictCursor) as cur:
+                    # Get last channel config
                     cur.execute("""
                         SELECT source_channel, destination_channel 
                         FROM channel_config 
@@ -411,14 +413,34 @@ async def dashboard():
                         LIMIT 1
                     """)
                     last_config = cur.fetchone()
+
+                    # Get current bot status
+                    cur.execute("""
+                        SELECT is_running 
+                        FROM bot_status 
+                        ORDER BY updated_at DESC 
+                        LIMIT 1
+                    """)
+                    status_row = cur.fetchone()
+                    if status_row:
+                        initial_bot_status = status_row['is_running']
+
+                    # If bot should be running, ensure session is shared
+                    if initial_bot_status:
+                        import main
+                        main.SESSION_STRING = session.get('session_string')
+                        if last_config:
+                            main.SOURCE_CHANNEL = last_config['source_channel']
+                            main.DESTINATION_CHANNEL = last_config['destination_channel']
+
         except Exception as e:
             logger.error(f"❌ Database error: {str(e)}")
-            # Continue without last config
 
         return render_template('dashboard.html', 
                             channels=channels,
                             last_source=last_config['source_channel'] if last_config else None,
-                            last_dest=last_config['destination_channel'] if last_config else None)
+                            last_dest=last_config['destination_channel'] if last_config else None,
+                            initial_bot_status=initial_bot_status)
 
     except Exception as e:
         logger.error(f"❌ Dashboard error: {str(e)}")
