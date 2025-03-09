@@ -1,8 +1,12 @@
-from wtforms import StringField, PasswordField, Form
+from flask_wtf import FlaskForm
+from wtforms import StringField, PasswordField
 from wtforms.validators import DataRequired, Email, Length, EqualTo
 from email_validator import validate_email, EmailNotValidError
 
-class LoginForm(Form):
+class LoginForm(FlaskForm):
+    class Meta:
+        csrf = False  # Disable CSRF at form level
+
     email = StringField('Email', validators=[
         DataRequired(),
         Email(message='Invalid email address')
@@ -11,7 +15,10 @@ class LoginForm(Form):
         DataRequired()
     ])
 
-class RegisterForm(Form):
+class RegisterForm(FlaskForm):
+    class Meta:
+        csrf = False  # Disable CSRF at form level
+
     email = StringField('Email', validators=[
         DataRequired(),
         Email(message='Invalid email address')

@@ -201,13 +201,13 @@ def login_post():
 
 @app.route('/register')
 def register():
-    form = RegisterForm()
+    form = RegisterForm(request.form)
     return render_template('auth/register.html', form=form)
 
 @app.route('/register', methods=['POST'])
 def register_post():
-    form = RegisterForm()
-    if not form.validate_on_submit():
+    form = RegisterForm(request.form)
+    if not form.validate():
         return render_template('auth/register.html', form=form)
 
     email = form.email.data
@@ -295,6 +295,7 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
+
 
 
 @app.route('/authorization')
