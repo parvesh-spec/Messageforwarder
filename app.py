@@ -625,6 +625,52 @@ def check_auth():
         logger.error(f"❌ Auth check error: {str(e)}")
         return jsonify({'authenticated': False}), 401
 
+@app.route('/disconnect', methods=['POST'])
+@login_required
+@async_route
+async def disconnect():
+    """Disconnect Telegram account"""
+    try:
+        user_id = session.get('user_id')
+        telegram_id = session.get('telegram_id')
+
+        if not telegram_id:
+            return jsonify({'error': 'No Telegram account connected'}), 400
+
+        # Clean up any running sessions
+        import main
+        main.remove_user_session(telegram_id)
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Reset Telegram credentials
+                cur.execute("""
+                    UPDATE users 
+                    SET telegram_id = NULL,
+                        telegram_username = NULL,
+                        auth_date = NULL,
+                        session_string = NULL
+                    WHERE id = %s
+                """, (user_id,))
+
+                # Deactivate any forwarding configs
+                cur.execute("""
+                    UPDATE forwarding_configs
+                    SET is_active = false
+                    WHERE user_id = %s
+                """, (user_id,))
+
+        # Clear session data
+        session.pop('telegram_id', None)
+        session.pop('session_string', None)
+
+        logger.info(f"✅ Successfully disconnected Telegram for user {user_id}")
+        return jsonify({'message': 'Successfully disconnected'})
+
+    except Exception as e:
+        logger.error(f"❌ Disconnect error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/update-channels', methods=['POST'])
 @login_required
 def update_channels():
@@ -894,8 +940,8 @@ def remove_replacement():
                     return jsonify({'error': 'Replacement not found'}), 404
 
     except Exception as e:
-        logger.error(f"Error in remove_replacement: {str(e)}")
-        return jsonify({'error': 'Failed to remove replacement'}), 500
+        logger.error(f"❌ Remove replacement error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/clear-replacements', methods=['POST'])
 @login_required

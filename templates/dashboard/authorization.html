@@ -10,6 +10,7 @@
             Connected as {{ telegram_username }}
         </div>
         <p>Your Telegram account is connected and ready to use.</p>
+        <button onclick="disconnectTelegram()" class="btn btn-danger">Disconnect Telegram</button>
     </div>
     {% else %}
     <div class="auth-status">
@@ -126,6 +127,31 @@ async function handleAuth(event) {
     }
 }
 
+async function disconnectTelegram() {
+    if (!confirm('Are you sure you want to disconnect your Telegram account?')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/disconnect', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRFToken': '{{ csrf_token() }}'
+            }
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.error || `Request failed with status ${response.status}`);
+        }
+
+        window.location.reload();
+    } catch (error) {
+        alert('Failed to disconnect: ' + error.message);
+    }
+}
+
 function showMessage(message, isError = false) {
     // Remove any existing message
     const existingMessage = document.querySelector('.alert');
@@ -144,7 +170,7 @@ function showMessage(message, isError = false) {
     setTimeout(() => messageDiv.remove(), 5000);
 }
 
-document.getElementById('telegram-auth-form').addEventListener('submit', handleAuth);
+document.getElementById('telegram-auth-form')?.addEventListener('submit', handleAuth);
 </script>
 
 <style>
@@ -198,18 +224,32 @@ document.getElementById('telegram-auth-form').addEventListener('submit', handleA
     outline: none;
 }
 
-.btn-primary {
-    background-color: #2196f3;
-    color: white;
-    border: none;
+.btn {
     padding: 10px 20px;
     border-radius: 4px;
     cursor: pointer;
+    border: none;
+    font-weight: 500;
+}
+
+.btn-primary {
+    background-color: #2196f3;
+    color: white;
     width: 100%;
+}
+
+.btn-danger {
+    background-color: #dc3545;
+    color: white;
+    margin-top: 15px;
 }
 
 .btn-primary:hover {
     background-color: #1976d2;
+}
+
+.btn-danger:hover {
+    background-color: #c82333;
 }
 
 .btn-primary:disabled {
