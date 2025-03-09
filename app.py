@@ -440,12 +440,33 @@ async def send_otp():
         if not phone:
             return jsonify({'error': 'Phone number is required'}), 400
 
-        # Remove the phone number validation check for +91
-        # Allow any valid phone number format
+        # Clean phone number format
+        phone = phone.strip()
+        if not phone.startswith('+'):
+            phone = '+' + phone
+
         try:
-            # Get client and send OTP
-            client = await telegram_manager.get_client()
-            sent = await client.send_code_request(phone)
+            # Initialize client with proper error handling
+            client = None
+            try:
+                client = await telegram_manager.get_client()
+                if not client:
+                    raise Exception("Failed to initialize Telegram client")
+                logger.info("✅ Successfully initialized Telegram client")
+            except Exception as e:
+                logger.error(f"❌ Client initialization error: {str(e)}")
+                return jsonify({'error': 'Failed to connect to Telegram. Please try again.'}), 500
+
+            # Send OTP with proper error handling
+            try:
+                sent = await client.send_code_request(phone)
+                logger.info(f"✅ Successfully sent OTP to {phone}")
+            except PhoneNumberInvalidError:
+                logger.error(f"❌ Invalid phone number format: {phone}")
+                return jsonify({'error': 'Please enter a valid phone number with country code (e.g. +1234567890)'}), 400
+            except Exception as e:
+                logger.error(f"❌ Failed to send OTP: {str(e)}")
+                return jsonify({'error': 'Failed to send OTP. Please try again.'}), 500
 
             # Clear session but preserve important data
             session.clear()
@@ -457,19 +478,15 @@ async def send_otp():
             session['otp_sent_at'] = int(time.time())
             session.permanent = True
 
-            logger.info(f"✅ OTP sent successfully to {phone}")
             return jsonify({'message': 'OTP sent successfully'})
 
-        except PhoneNumberInvalidError:
-            logger.error(f"❌ Invalid phone number: {phone}")
-            return jsonify({'error': 'Please enter a valid phone number with country code (e.g. +1234567890)'}), 400
         except Exception as e:
             logger.error(f"❌ Send OTP error: {str(e)}")
             return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         logger.error(f"❌ Critical error in send_otp: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An unexpected error occurred. Please try again.'}), 500
 
 @app.route('/verify-otp', methods=['POST'])
 @async_route
