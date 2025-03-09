@@ -3,11 +3,11 @@
 {% block content %}
 <div class="dashboard-card">
     <h3>Channel Configuration</h3>
-    
+
     {% if not telegram_authorized %}
     <div class="alert alert-error">
         Please authorize your Telegram account first.
-        <a href="{{ url_for('dashboard.authorization') }}" class="btn btn-primary">Authorize Telegram</a>
+        <a href="{{ url_for('authorization') }}" class="btn btn-primary">Authorize Telegram</a>
     </div>
     {% else %}
     <form id="channel-form" class="dashboard-form">
@@ -22,7 +22,7 @@
                 {% endfor %}
             </select>
         </div>
-        
+
         <div class="form-group">
             <label>Destination Channel</label>
             <select id="dest-channel" class="form-control" required>
@@ -34,7 +34,7 @@
                 {% endfor %}
             </select>
         </div>
-        
+
         <div class="form-group">
             <h4>Active Replacements</h4>
             {% if replacements %}
@@ -45,13 +45,13 @@
                 </div>
                 {% endfor %}
             </div>
-            <a href="{{ url_for('dashboard.replacements') }}" class="btn btn-secondary">Manage Replacements</a>
+            <a href="{{ url_for('replacements') }}" class="btn btn-secondary">Manage Replacements</a>
             {% else %}
             <p>No replacements configured</p>
-            <a href="{{ url_for('dashboard.replacements') }}" class="btn btn-primary">Add Replacements</a>
+            <a href="{{ url_for('replacements') }}" class="btn btn-primary">Add Replacements</a>
             {% endif %}
         </div>
-        
+
         <div class="form-group">
             <div class="control-group">
                 <label class="switch">
@@ -71,16 +71,16 @@ let channelsUpdated = false;
 async function updateChannels() {
     const source = document.getElementById('source-channel').value;
     const dest = document.getElementById('dest-channel').value;
-    
+
     if (!source || !dest) {
         return;
     }
-    
+
     if (source === dest) {
         showMessage('Source and destination channels cannot be the same', true);
         return;
     }
-    
+
     try {
         const response = await fetch('/update-channels', {
             method: 'POST',
@@ -90,7 +90,7 @@ async function updateChannels() {
             body: `source=${encodeURIComponent(source)}&destination=${encodeURIComponent(dest)}`
         });
         const data = await response.json();
-        
+
         if (data.error) {
             showMessage(data.error, true);
         } else {
@@ -106,16 +106,16 @@ async function toggleBot(element) {
     if (!channelsUpdated && !element.checked) {
         const source = document.getElementById('source-channel').value;
         const dest = document.getElementById('dest-channel').value;
-        
+
         if (!source || !dest) {
             showMessage('Please select both source and destination channels first', true);
             element.checked = false;
             return;
         }
-        
+
         await updateChannels();
     }
-    
+
     try {
         const response = await fetch('/bot/toggle', {
             method: 'POST',
@@ -125,7 +125,7 @@ async function toggleBot(element) {
             body: `status=${element.checked}`
         });
         const data = await response.json();
-        
+
         if (data.error) {
             showMessage(data.error, true);
             element.checked = !element.checked;
@@ -142,10 +142,10 @@ function showMessage(message, isError = false) {
     const messageDiv = document.createElement('div');
     messageDiv.className = `alert alert-${isError ? 'error' : 'success'}`;
     messageDiv.textContent = message;
-    
+
     const form = document.getElementById('channel-form');
     form.insertBefore(messageDiv, form.firstChild);
-    
+
     setTimeout(() => messageDiv.remove(), 5000);
 }
 
