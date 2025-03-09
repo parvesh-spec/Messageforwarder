@@ -184,7 +184,7 @@ async def setup_user_handlers(user_id, client):
         return False
 
     try:
-        @client.on(events.NewMessage())
+        @client.on(events.NewMessage(pattern=""))
         async def handle_new_message(event):
             try:
                 if user_id not in USER_SESSIONS:
@@ -199,22 +199,21 @@ async def setup_user_handlers(user_id, client):
                     logger.info(f"No source or destination channel configured for user {user_id}")
                     return
 
-                # Format channel IDs
+                # Format channel IDs for comparison
                 chat_id = str(event.chat_id)
                 source_id = str(source)
 
                 # Add detailed logging
-                logger.info(f"Message received from chat: {chat_id}")
-                logger.info(f"Source channel configured: {source_id}")
-                logger.info(f"Message content: {event.message.text if event.message.text else 'No text'}")
+                logger.info(f"Received message - Chat ID: {chat_id}, Source ID: {source_id}")
+                logger.info(f"Raw message content: {event.message.text if event.message.text else 'No text'}")
 
-                # Strip -100 prefix if present for comparison
-                chat_id = chat_id.lstrip('-100')
-                source_id = source_id.lstrip('-100')
+                # Normalize channel IDs for comparison
+                chat_id = chat_id.replace('-100', '') if chat_id.startswith('-100') else chat_id
+                source_id = source_id.replace('-100', '') if source_id.startswith('-100') else source_id
 
-                # Compare stripped IDs
+                # Compare normalized IDs
                 if chat_id != source_id:
-                    logger.info(f"Message not from source channel. Chat: {chat_id}, Source: {source_id}")
+                    logger.info(f"Message ignored - Not from source channel. Chat: {chat_id}, Source: {source_id}")
                     return
 
                 # Process message
@@ -252,7 +251,7 @@ async def setup_user_handlers(user_id, client):
             except Exception as e:
                 logger.error(f"❌ Message handler error for user {user_id}: {str(e)}")
 
-        @client.on(events.MessageEdited())
+        @client.on(events.MessageEdited(pattern=""))
         async def handle_edit(event):
             try:
                 if user_id not in USER_SESSIONS:
@@ -269,11 +268,11 @@ async def setup_user_handlers(user_id, client):
                 chat_id = str(event.chat_id)
                 source_id = str(source)
 
-                # Strip -100 prefix if present for comparison
-                chat_id = chat_id.lstrip('-100')
-                source_id = source_id.lstrip('-100')
+                # Normalize channel IDs for comparison
+                chat_id = chat_id.replace('-100', '') if chat_id.startswith('-100') else chat_id
+                source_id = source_id.replace('-100', '') if source_id.startswith('-100') else source_id
 
-                # Compare stripped IDs
+                # Compare normalized IDs
                 if chat_id != source_id:
                     return
 
@@ -309,6 +308,7 @@ async def setup_user_handlers(user_id, client):
             except Exception as e:
                 logger.error(f"❌ Edit handler error for user {user_id}: {str(e)}")
 
+        logger.info(f"✅ Event handlers set up successfully for user {user_id}")
         return True
 
     except Exception as e:
