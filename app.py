@@ -26,24 +26,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configure Flask application
+# Flask app configuration with enhanced session and CSRF settings
 app = Flask(__name__)
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    WTF_CSRF_TIME_LIMIT=3600,  # Increase CSRF token timeout to 1 hour
+    WTF_CSRF_TIME_LIMIT=None,  # Make CSRF tokens never expire
     WTF_CSRF_SSL_STRICT=False,  # Disable SSL-only for CSRF tokens
+    WTF_CSRF_ENABLED=True,
     DEBUG=True
 )
 
-# Initialize CSRF protection
-csrf = CSRFProtect(app)
-csrf.init_app(app)
-
 # Initialize session
 Session(app)
+
+# Initialize CSRF protection
+csrf = CSRFProtect()
+csrf.init_app(app)
 
 # Global variable for database pool
 db_pool = None
@@ -323,47 +324,44 @@ def register():
     form = RegisterForm()
 
     if request.method == 'POST':
-        if not form.validate_on_submit():
-            # Handle CSRF errors specifically
+        if form.validate_on_submit():
+            email = form.email.data
+            password = form.password.data
+
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    # Check if email exists
+                    cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+                    if cur.fetchone():
+                        form.email.errors.append('Email already registered')
+                        return render_template('auth/register.html', form=form)
+
+                    # Create new user
+                    cur.execute("""
+                        INSERT INTO users (email, password_hash)
+                        VALUES (%s, %s)
+                        RETURNING id
+                    """, (email, generate_password_hash(password)))
+
+                    user_id = cur.fetchone()[0]
+
+                    # Clear session and create new fresh session
+                    session.clear()
+                    session['user_id'] = user_id
+                    session['_fresh'] = True
+                    session.permanent = True
+
+                    return redirect(url_for('dashboard'))
+        else:
+            # Handle CSRF errors
             if 'csrf_token' in form.errors:
-                # Generate a new CSRF token
-                form.csrf_token.data = form.csrf_token._value()
                 return render_template('auth/register.html', 
                                     form=form,
-                                    error="Security token expired. Please try submitting the form again.")
+                                    error="Security token expired. Please try again.")
 
-            # Handle other validation errors
-            return render_template('auth/register.html', form=form)
-
-        email = form.email.data
-        password = form.password.data
-
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                # Check if email exists
-                cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-                if cur.fetchone():
-                    form.email.errors.append('Email already registered')
-                    return render_template('auth/register.html', form=form)
-
-                # Create new user
-                cur.execute("""
-                    INSERT INTO users (email, password_hash)
-                    VALUES (%s, %s)
-                    RETURNING id
-                """, (email, generate_password_hash(password)))
-
-                user_id = cur.fetchone()[0]
-
-                # Clear and update session
-                session.clear()
-                session['user_id'] = user_id
-                session['_fresh'] = True
-                session.permanent = True
-
-                return redirect(url_for('dashboard'))
-
-    # GET request - just show the form
+    # GET request or form validation failed
+    # Generate a fresh CSRF token
+    form.csrf_token.data = csrf._get_token()
     return render_template('auth/register.html', form=form)
 
 @app.route('/logout')
@@ -941,12 +939,12 @@ def add_replacement():
                     })
 
                 except psycopg2.Error as e:
-                    logger.error(f"Database error in add_replacement:{str(e)}")
+                    logger.error(f"Database error in add_replacement: {str(e)}")
                     return jsonify({'error': 'Failed to add replacement'}), 400
 
     except Exception as e:
-        logger.error(f"Error in add_replacement: {str(e)}")
-        return jsonify({'error': 'An error occurred while adding the replacement'}), 500
+        logger.error(f"❌ Add replacement error: {str(e)}")
+        return jsonify({'error': 'Failed to add replacement'}), 400
 
 @app.route('/remove-replacement', methods=['POST'])
 @login_required
