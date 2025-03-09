@@ -19,13 +19,6 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
 from flask_wtf.csrf import CSRFProtect
 
-# Set up logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
 # Configure Flask application
 app = Flask(__name__)
 app.config.update(
@@ -33,7 +26,9 @@ app.config.update(
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    DEBUG=True
+    DEBUG=True,
+    WTF_CSRF_TIME_LIMIT=3600,  # 1 hour CSRF token validity
+    WTF_CSRF_SSL_STRICT=False  # Disable SSL-only for CSRF cookies
 )
 
 # Initialize CSRF protection
@@ -921,6 +916,13 @@ def handle_db_error(e, operation):
 @app.template_filter('datetime')
 def format_datetime(timestamp):
     return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+
+# Set up logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
