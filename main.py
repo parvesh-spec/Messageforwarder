@@ -141,22 +141,23 @@ def load_user_replacements(user_id):
             return {}
 
         with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("SELECT COUNT(*) FROM text_replacements WHERE user_id = %s", (user_id,))
-            count = cur.fetchone()[0]
-            logger.info(f"Found {count} replacements in database for user {user_id}")
+            # Convert telegram_id to integer for query
+            telegram_id = int(user_id) if isinstance(user_id, str) else user_id
 
             cur.execute("""
-                SELECT original_text, replacement_text 
-                FROM text_replacements 
-                WHERE user_id = %s
+                SELECT t.original_text, t.replacement_text
+                FROM text_replacements t
+                JOIN users u ON u.id = t.user_id
+                WHERE u.telegram_id = %s
                 ORDER BY LENGTH(original_text) DESC
-            """, (user_id,))
+            """, (telegram_id,))
 
             replacements = {}
             for row in cur.fetchall():
                 replacements[row['original_text']] = row['replacement_text']
                 logger.info(f"Loaded replacement: '{row['original_text']}' → '{row['replacement_text']}'")
 
+            logger.info(f"✅ Loaded {len(replacements)} replacements for telegram_id {telegram_id}")
             return replacements
 
     except Exception as e:
@@ -177,8 +178,8 @@ def apply_text_replacements(text, user_id):
 
     # Sort replacements by length (longest first) to avoid partial replacements
     sorted_replacements = sorted(
-        replacements.items(), 
-        key=lambda x: len(x[0]), 
+        replacements.items(),
+        key=lambda x: len(x[0]),
         reverse=True
     )
 
@@ -385,10 +386,15 @@ def remove_user_session(user_id):
             session = USER_SESSIONS[user_id]
             client = session.get('client')
             if client:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(client.disconnect())
-                loop.close()
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(client.disconnect())
+                    loop.close()
+                    logger.info(f"✅ Client disconnected for user {user_id}")
+                except Exception as e:
+                    logger.error(f"❌ Client disconnect error: {str(e)}")
+
             USER_SESSIONS.pop(user_id)
             if user_id in MESSAGE_IDS:
                 MESSAGE_IDS.pop(user_id)
