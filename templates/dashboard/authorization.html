@@ -27,11 +27,13 @@
             <div class="form-group" id="otp-group" style="display: none;">
                 <label>Enter OTP</label>
                 <input type="text" id="otp" class="form-control" pattern="[0-9]{5}" placeholder="Enter OTP">
+                <small class="form-text">Check your Telegram app for the OTP</small>
             </div>
 
             <div class="form-group" id="password-group" style="display: none;">
                 <label>Two-Factor Password (if enabled)</label>
                 <input type="password" id="password" class="form-control" placeholder="Enter 2FA password">
+                <small class="form-text">Enter your Telegram 2FA password if enabled</small>
             </div>
 
             <button type="submit" class="btn btn-primary" id="auth-button">Send OTP</button>
