@@ -12,20 +12,42 @@
         {% endif %}
     {% endwith %}
 
-    <form method="POST">
+    <form method="POST" action="{{ url_for('register_post') }}">
+        {{ form.csrf_token }}
         <div class="form-group">
             <label>Email Address</label>
-            <input type="email" name="email" class="form-control" placeholder="Enter your email" required>
+            {{ form.email(class="form-control") }}
+            {% if form.email.errors %}
+                <div class="errors">
+                    {% for error in form.email.errors %}
+                        <span>{{ error }}</span>
+                    {% endfor %}
+                </div>
+            {% endif %}
         </div>
 
         <div class="form-group">
             <label>Password</label>
-            <input type="password" name="password" class="form-control" placeholder="Enter your password" required>
+            {{ form.password(class="form-control") }}
+            {% if form.password.errors %}
+                <div class="errors">
+                    {% for error in form.password.errors %}
+                        <span>{{ error }}</span>
+                    {% endfor %}
+                </div>
+            {% endif %}
         </div>
 
         <div class="form-group">
             <label>Confirm Password</label>
-            <input type="password" name="confirm_password" class="form-control" placeholder="Confirm your password" required>
+            {{ form.confirm_password(class="form-control") }}
+            {% if form.confirm_password.errors %}
+                <div class="errors">
+                    {% for error in form.confirm_password.errors %}
+                        <span>{{ error }}</span>
+                    {% endfor %}
+                </div>
+            {% endif %}
         </div>
 
         <div class="form-group">
@@ -37,31 +59,4 @@
         <p>Already have an account? <a href="{{ url_for('login') }}">Login here</a></p>
     </div>
 </div>
-
-<style>
-.alert {
-    padding: 10px;
-    margin-bottom: 15px;
-    border-radius: 4px;
-}
-
-.alert-error {
-    background-color: #ffebee;
-    color: #c62828;
-    border: 1px solid #ef9a9a;
-}
-
-.alert-success {
-    background-color: #e8f5e9;
-    color: #2e7d32;
-    border: 1px solid #a5d6a7;
-}
-
-.error-text {
-    color: #dc3545;
-    font-size: 0.875rem;
-    display: block;
-    margin-top: 0.25rem;
-}
-</style>
 {% endblock %}

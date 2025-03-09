@@ -1,39 +1,27 @@
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField
-from wtforms.validators import DataRequired, Email, Length, EqualTo, ValidationError
+from wtforms.validators import DataRequired, Email, Length, EqualTo
 from email_validator import validate_email, EmailNotValidError
 
 class LoginForm(FlaskForm):
-    class Meta:
-        csrf = True  # Enable CSRF protection for this form
-
     email = StringField('Email', validators=[
-        DataRequired(message="Email is required"),
-        Email(message='Please enter a valid email address')
+        DataRequired(),
+        Email(message='Invalid email address')
     ])
     password = PasswordField('Password', validators=[
-        DataRequired(message="Password is required")
+        DataRequired()
     ])
 
 class RegisterForm(FlaskForm):
-    class Meta:
-        csrf = True  # Enable CSRF protection for this form
-
     email = StringField('Email', validators=[
-        DataRequired(message="Email is required"),
-        Email(message='Please enter a valid email address')
+        DataRequired(),
+        Email(message='Invalid email address')
     ])
     password = PasswordField('Password', validators=[
-        DataRequired(message="Password is required"),
+        DataRequired(),
         Length(min=8, message='Password must be at least 8 characters long')
     ])
     confirm_password = PasswordField('Confirm Password', validators=[
-        DataRequired(message="Please confirm your password"),
+        DataRequired(),
         EqualTo('password', message='Passwords must match')
     ])
-
-    def validate_email(self, field):
-        try:
-            validate_email(field.data)
-        except EmailNotValidError as e:
-            raise ValidationError(str(e))
