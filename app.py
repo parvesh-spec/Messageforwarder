@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import time  # Add this import
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
@@ -468,14 +469,16 @@ async def send_otp():
             client = await telegram_manager.get_client()
             sent = await client.send_code_request(phone)
 
-            # Clear session but preserve important data
+            # Keep important session data
             session.clear()
             for key, value in important_data.items():
                 session[key] = value
 
-            # Store phone data
+            # Store phone data separately
             session['user_phone'] = phone
             session['phone_code_hash'] = sent.phone_code_hash
+            session['otp_sent_at'] = int(time.time())  # Store OTP sent timestamp
+            session.permanent = True  # Make session permanent
 
             logger.info(f"✅ OTP sent successfully to {phone}")
             return jsonify({'message': 'OTP sent successfully'})
@@ -497,8 +500,13 @@ async def verify_otp():
     try:
         phone = session.get('user_phone')
         phone_code_hash = session.get('phone_code_hash')
+        otp_sent_at = session.get('otp_sent_at')
         otp = request.form.get('otp')
         password = request.form.get('password')
+
+        # Validate OTP expiry (5 minutes)
+        if not otp_sent_at or (int(time.time()) - otp_sent_at) > 300:
+            return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
 
         if not phone or not phone_code_hash:
             return jsonify({'error': 'Session expired. Please request a new OTP.'}), 400
@@ -508,20 +516,32 @@ async def verify_otp():
 
         try:
             client = await telegram_manager.get_client()
+            max_retries = 3
+            retry_count = 0
 
-            try:
-                await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
-            except SessionPasswordNeededError:
-                if not password:
-                    return jsonify({
-                        'error': 'two_factor_needed',
-                        'message': 'Two-factor authentication required'
-                    })
+            while retry_count < max_retries:
                 try:
-                    await client.sign_in(password=password)
+                    await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
+                    break
+                except SessionPasswordNeededError:
+                    if not password:
+                        return jsonify({
+                            'error': 'two_factor_needed',
+                            'message': 'Two-factor authentication required'
+                        })
+                    try:
+                        await client.sign_in(password=password)
+                        break
+                    except Exception as e:
+                        logger.error(f"❌ 2FA error: {str(e)}")
+                        return jsonify({'error': 'Invalid 2FA password'}), 400
                 except Exception as e:
-                    logger.error(f"❌ 2FA error: {str(e)}")
-                    return jsonify({'error': 'Invalid 2FA password'}), 400
+                    if "The phone code expired" in str(e):
+                        return jsonify({'error': 'OTP has expired. Please request a new one.'}), 400
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        raise
+                    await asyncio.sleep(1)  # Wait before retry
 
             if await client.is_user_authorized():
                 # Get user info
@@ -891,4 +911,4 @@ def handle_db_error(e, operation):
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+        app.run(host='0.0.0.0', port=5000)
