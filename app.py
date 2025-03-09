@@ -16,12 +16,10 @@ from telethon.sessions import StringSession
 import asyncio
 from functools import wraps
 import threading
-import time
 
 # Configure Flask application
 app = Flask(__name__)
 
-# Configuration
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
@@ -42,6 +40,47 @@ csrf = CSRFProtect(app)
 def handle_csrf_error(e):
     flash('Session expired. Please try again.', 'error')
     return render_template('auth/register.html', form=RegisterForm())
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    """Handle both GET and POST requests for registration"""
+    form = RegisterForm()
+    if request.method == 'POST':
+        try:
+            if form.validate_on_submit():
+                email = form.email.data
+                password = form.password.data
+
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        # Check if email exists
+                        cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+                        if cur.fetchone():
+                            flash('Email already registered', 'error')
+                            return render_template('auth/register.html', form=form)
+
+                        # Create new user
+                        cur.execute("""
+                            INSERT INTO users (email, password_hash)
+                            VALUES (%s, %s)
+                            RETURNING id
+                        """, (email, generate_password_hash(password)))
+
+                        user_id = cur.fetchone()[0]
+                        session.clear()  # Clear any existing session data
+                        session['user_id'] = user_id
+                        session.modified = True
+                        flash('Registration successful!', 'success')
+                        return redirect(url_for('dashboard'))
+            else:
+                for field, errors in form.errors.items():
+                    for error in errors:
+                        flash(f"{field}: {error}", 'error')
+        except Exception as e:
+            app.logger.error(f"Registration error: {str(e)}")
+            flash('An error occurred during registration. Please try again.', 'error')
+
+    return render_template('auth/register.html', form=form)
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -204,53 +243,6 @@ def login_post():
             session['telegram_id'] = user['telegram_id']
             return redirect(url_for('dashboard'))
 
-@app.route('/register', methods=['GET'])
-def register():
-    form = RegisterForm()
-    return render_template('auth/register.html', form=form)
-
-@app.route('/register', methods=['POST'])
-def register_post():
-    form = RegisterForm()
-    try:
-        if form.validate_on_submit():
-            email = form.email.data
-            password = form.password.data
-
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    # Check if email exists
-                    cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-                    if cur.fetchone():
-                        flash('Email already registered', 'error')
-                        return render_template('auth/register.html', form=form)
-
-                    # Create new user
-                    cur.execute("""
-                        INSERT INTO users (email, password_hash)
-                        VALUES (%s, %s)
-                        RETURNING id
-                    """, (email, generate_password_hash(password)))
-
-                    user_id = cur.fetchone()[0]
-                    # Store user_id in session
-                    session['user_id'] = user_id
-                    session.modified = True
-                    flash('Registration successful!', 'success')
-                    return redirect(url_for('dashboard'))
-        else:
-            for field, errors in form.errors.items():
-                for error in errors:
-                    flash(f"{field}: {error}", 'error')
-            return render_template('auth/register.html', form=form)
-
-    except Exception as e:
-        app.logger.error(f"Registration error: {str(e)}")
-        flash('An error occurred during registration. Please try again.', 'error')
-        return render_template('auth/register.html', form=form)
-
-
-
 @app.route('/logout')
 def logout():
     user_id = session.get('user_id')
@@ -316,6 +308,7 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
+
 
 
 @app.route('/authorization')
