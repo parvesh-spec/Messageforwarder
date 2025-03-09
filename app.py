@@ -605,6 +605,7 @@ def check_auth():
 @app.route('/update-channels', methods=['POST'])
 @login_required
 def update_channels():
+    """Save channel configuration without starting the bot"""
     try:
         source = request.form.get('source')
         destination = request.form.get('destination')
@@ -625,24 +626,26 @@ def update_channels():
         with get_db() as conn:
             with conn.cursor() as cur:
                 try:
+                    # Save configuration with is_active=false
                     cur.execute("""
-                        INSERT INTO forwarding_configs (user_id, source_channel, destination_channel)
-                        VALUES (%s, %s, %s)
+                        INSERT INTO forwarding_configs (user_id, source_channel, destination_channel, is_active)
+                        VALUES (%s, %s, %s, false)
                         ON CONFLICT (user_id) 
                         DO UPDATE SET 
                             source_channel = EXCLUDED.source_channel,
                             destination_channel = EXCLUDED.destination_channel,
+                            is_active = false,
                             updated_at = CURRENT_TIMESTAMP
                     """, (user_id, source, destination))
+
+                    # Stop any running forwarding
+                    import main
+                    main.remove_user_session(session.get('telegram_id'))
+
+                    return jsonify({'message': 'Channels updated successfully'})
                 except psycopg2.Error as e:
                     error_msg = handle_db_error(e, "update_channels")
                     return jsonify({'error': error_msg}), 400
-
-        # Update running bot if exists
-        import main
-        main.update_user_channels(session.get('telegram_id'), source, destination)
-
-        return jsonify({'message': 'Channels updated successfully'})
 
     except Exception as e:
         logger.error(f"❌ Channel update error: {str(e)}")
@@ -651,7 +654,7 @@ def update_channels():
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
 def toggle_bot():
-    """Toggle bot status and manage forwarding configuration"""
+    """Toggle bot status based on saved configuration"""
     try:
         status = request.form.get('status') == 'true'
         user_id = session.get('user_id')
@@ -661,12 +664,11 @@ def toggle_bot():
         if not telegram_id or not session_string:
             return jsonify({'error': 'Please authorize Telegram first'}), 401
 
-        # Get channels and validate configuration
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 # Get forwarding config
                 cur.execute("""
-                    SELECT source_channel, destination_channel
+                    SELECT source_channel, destination_channel, is_active
                     FROM forwarding_configs
                     WHERE user_id = %s
                 """, (user_id,))
@@ -675,21 +677,16 @@ def toggle_bot():
                 if not config:
                     return jsonify({'error': 'Please configure channels first'}), 400
 
-                if config['source_channel'] == config['destination_channel']:
-                    return jsonify({'error': 'Source and destination channels cannot be the same'}), 400
-
                 if status:
                     try:
                         # Update database first
                         cur.execute("""
-                            INSERT INTO forwarding_configs (user_id, source_channel, destination_channel, is_active)
-                            VALUES (%s, %s, %s, true)
-                            ON CONFLICT (user_id) 
-                            DO UPDATE SET 
-                                is_active = true,
+                            UPDATE forwarding_configs
+                            SET is_active = true,
                                 updated_at = CURRENT_TIMESTAMP
+                            WHERE user_id = %s
                             RETURNING id
-                        """, (user_id, config['source_channel'], config['destination_channel']))
+                        """, (user_id,))
 
                         if not cur.fetchone():
                             return jsonify({'error': 'Failed to update forwarding status'}), 500
@@ -704,7 +701,7 @@ def toggle_bot():
                         )
 
                         if not success:
-                            # Rollback database changes if bot fails to start
+                            # Rollback on failure
                             cur.execute("""
                                 UPDATE forwarding_configs 
                                 SET is_active = false 
@@ -719,7 +716,7 @@ def toggle_bot():
 
                     except Exception as e:
                         logger.error(f"❌ Bot start error: {str(e)}")
-                        # Ensure config is marked as inactive on error
+                        # Ensure inactive on error
                         cur.execute("""
                             UPDATE forwarding_configs 
                             SET is_active = false 
