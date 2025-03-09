@@ -3,8 +3,8 @@
 {% block content %}
 <div class="dashboard-card">
     <h3>Forwarding Status</h3>
-    <div class="status-badge {% if bot_status %}active{% else %}inactive{% endif %}">
-        {{ "Active" if bot_status else "Inactive" }}
+    <div class="status-badge {% if is_active %}active{% else %}inactive{% endif %}">
+        {{ "Active" if is_active else "Inactive" }}
     </div>
 </div>
 
@@ -18,7 +18,7 @@
     {% else %}
     <div class="status-badge inactive">
         Not Authorized
-        <a href="{{ url_for('dashboard.authorization') }}" class="btn btn-primary">Connect Telegram</a>
+        <a href="{{ url_for('authorization') }}" class="btn btn-primary">Connect Telegram</a>
     </div>
     {% endif %}
 </div>
@@ -33,7 +33,7 @@
     </div>
     {% else %}
     <p>No channels configured</p>
-    <a href="{{ url_for('dashboard.forwarding') }}" class="btn btn-primary">Configure Channels</a>
+    <a href="{{ url_for('forwarding') }}" class="btn btn-primary">Configure Channels</a>
     {% endif %}
 </div>
 {% endblock %}
