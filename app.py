@@ -371,17 +371,21 @@ class TelegramManager:
         self._client = None
         self.loop = None
 
-    async def _init_client(self, session_string=None):
+    async def _init_client(self):
         """Initialize a new client with proper error handling"""
         try:
+            if not self.loop:
+                self.loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self.loop)
+
             client = TelegramClient(
-                StringSession(session_string) if session_string else StringSession(),
+                StringSession(),
                 self.api_id,
                 self.api_hash,
                 device_model="Replit Web",
                 system_version="Linux",
                 app_version="1.0",
-                loop=self.loop or asyncio.get_event_loop()
+                loop=self.loop
             )
 
             if not client.is_connected():
@@ -396,27 +400,12 @@ class TelegramManager:
         """Get a client for authentication or dashboard operations"""
         with self._lock:
             try:
-                if self._client and self._client.is_connected():
+                if self._client:
+                    if not self._client.is_connected():
+                        await self._client.connect()
                     return self._client
 
-                # Initialize event loop if needed
-                if not self.loop:
-                    self.loop = asyncio.get_event_loop()
-
-                # Get current session string if exists
-                session_string = session.get('session_string')
-
-                # Initialize new client
-                self._client = await self._init_client(session_string)
-
-                # Verify authorization if we have a session
-                if session_string and not await self._client.is_user_authorized():
-                    # Session expired, clear it
-                    session.pop('session_string', None)
-                    await self._cleanup_client()
-                    # Create fresh client
-                    self._client = await self._init_client()
-
+                self._client = await self._init_client()
                 return self._client
 
             except Exception as e:
@@ -434,7 +423,6 @@ class TelegramManager:
                 pass
             finally:
                 self._client = None
-
 
 def handle_db_error(e, operation):
     """Handle database errors and return appropriate messages"""
