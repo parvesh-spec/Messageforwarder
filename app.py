@@ -1,6 +1,12 @@
 import os
 import logging
+import threading
+import asyncio
+import time
 from datetime import datetime, timedelta
+from functools import wraps
+from contextlib import contextmanager
+
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_session import Session
@@ -9,17 +15,21 @@ from forms import LoginForm, RegisterForm
 import psycopg2
 from psycopg2.extras import DictCursor
 from psycopg2 import pool
-from contextlib import contextmanager
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
 from telethon.sessions import StringSession
-import asyncio
-from functools import wraps
-import threading
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Configure Flask application
 app = Flask(__name__)
 
+# Configuration settings
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
@@ -35,19 +45,49 @@ app.config.update(
 Session(app)
 csrf = CSRFProtect(app)
 
-# Error handler for CSRF errors
-@app.errorhandler(400)
-def handle_csrf_error(e):
-    flash('Session expired. Please try again.', 'error')
-    return render_template('auth/register.html', form=RegisterForm())
+# Database pool
+db_pool = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dsn=os.getenv('DATABASE_URL')
+)
+
+@contextmanager
+def get_db():
+    """Database connection context manager"""
+    conn = db_pool.getconn()
+    try:
+        conn.autocommit = True
+        yield conn
+    finally:
+        db_pool.putconn(conn)
+
+def handle_database_error(error_msg, operation):
+    """Handle database error messages"""
+    if "foreign key constraint" in error_msg:
+        logger.error(f"❌ Foreign key error in {operation}: {error_msg}")
+        return "Session expired, please login again"
+    elif "violates unique constraint" in error_msg:
+        logger.error(f"❌ Unique constraint error in {operation}: {error_msg}")
+        if "text_replacements" in error_msg:
+            return "This text replacement already exists"
+        elif "channel_config" in error_msg:
+            return "Channel configuration already exists"
+        return "This record already exists"
+    return "An unexpected error occurred"
+
+def format_datetime(timestamp):
+    """Format datetime for display"""
+    return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    """Handle both GET and POST requests for registration"""
+    """Handle user registration"""
     form = RegisterForm()
+
     if request.method == 'POST':
-        try:
-            if form.validate_on_submit():
+        if form.validate_on_submit():
+            try:
                 email = form.email.data
                 password = form.password.data
 
@@ -67,20 +107,27 @@ def register():
                         """, (email, generate_password_hash(password)))
 
                         user_id = cur.fetchone()[0]
-                        session.clear()  # Clear any existing session data
+
+                        # Set up session
+                        session.clear()
                         session['user_id'] = user_id
-                        session.modified = True
+                        session.permanent = True
+
+                        logger.info(f"Successfully registered user with email: {email}")
                         flash('Registration successful!', 'success')
                         return redirect(url_for('dashboard'))
-            else:
-                for field, errors in form.errors.items():
-                    for error in errors:
-                        flash(f"{field}: {error}", 'error')
-        except Exception as e:
-            app.logger.error(f"Registration error: {str(e)}")
-            flash('An error occurred during registration. Please try again.', 'error')
+
+            except Exception as e:
+                logger.error(f"Registration error: {str(e)}")
+                flash('An error occurred during registration. Please try again.', 'error')
+        else:
+            logger.info(f"Form validation failed: {form.errors}")
+            for field, errors in form.errors.items():
+                for error in errors:
+                    flash(f"{field}: {error}", 'error')
 
     return render_template('auth/register.html', form=form)
+
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -175,23 +222,6 @@ def async_route(f):
             logger.error(f"❌ Async route error: {str(e)}")
             return jsonify({'error': str(e)}), 500
     return wrapped
-
-# Database pool for connections
-db_pool = psycopg2.pool.ThreadedConnectionPool(
-    minconn=1,
-    maxconn=10,
-    dsn=os.getenv('DATABASE_URL')
-)
-
-# Database connection context manager
-@contextmanager
-def get_db():
-    conn = db_pool.getconn()
-    try:
-        conn.autocommit = True
-        yield conn
-    finally:
-        db_pool.putconn(conn)
 
 # Authentication decorator
 def login_required(f):
@@ -307,9 +337,8 @@ def dashboard():
                        dest_channel=config['destination_channel'] if config else None,
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
-                       forwarding_logs=forwarding_logs)
-
-
+                       forwarding_logs=forwarding_logs,
+                       format_datetime=format_datetime)
 
 @app.route('/authorization')
 @login_required
@@ -327,7 +356,8 @@ def authorization():
     return render_template('dashboard/authorization.html',
                          telegram_authorized=check_telegram_auth(user),
                          telegram_username=user['telegram_username'] if user else None,
-                         telegram_auth_date=user['auth_date'] if user else None)
+                         telegram_auth_date=user['auth_date'] if user else None,
+                         format_datetime=format_datetime)
 
 @app.route('/replacements')
 @login_required
@@ -421,7 +451,8 @@ async def forwarding():
                           source_channel=config['source_channel'] if config else None,
                           dest_channel=config['destination_channel'] if config else None,
                           bot_status=config['is_active'] if config else False,
-                          replacements=replacements)
+                          replacements=replacements,
+                          format_datetime=format_datetime)
 
     except Exception as e:
         logger.error(f"❌ Forwarding page error: {str(e)}")
@@ -564,7 +595,7 @@ async def verify_otp():
 
 @app.before_request
 def check_session_expiry():
-    if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout', 'register', 'register_post', 'login_post']:
+    if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout', 'register', 'login_post']:
         # Get current user data
         user_id = session.get('user_id')
         if not user_id:
@@ -909,35 +940,10 @@ def clear_replacements():
         logger.error(f"❌ Clear replacements error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-def handle_db_error(e, operation):
-    """Handle database errors and return appropriate messages"""
-    error_msg = str(e)
-    if "violates foreign key constraint" in error_msg:
-        logger.error(f"❌ Foreign key error in {operation}: {error_msg}")
-        return "Session expired, please login again"
-    elif "violates unique constraint" in error_msg:
-        logger.error(f"❌ Unique constraint error in {operation}: {error_msg}")
-        if "text_replacements" in error_msg:
-            return "This text replacement already exists"
-        elif "channel_config" in error_msg:
-            return "Channel configuration already exists"
-        return "Operation failed due to duplicate entry"
-    else:
-        logger.error(f"❌ Database error in {operation}: {error_msg}")
-        return "An unexpected error occurred"
-
-
-# Add datetime filter
 @app.template_filter('datetime')
 def format_datetime(timestamp):
-    return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %HM:%S')
-
-# Set up logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+    """Format datetime for display"""
+    return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, debug=True)
