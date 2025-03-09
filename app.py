@@ -327,7 +327,7 @@ async def forwarding():
 
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
-                # Check telegram authorization
+                # Get user data with telegram auth info
                 cur.execute("""
                     SELECT telegram_id, telegram_username, auth_date, session_string
                     FROM users
@@ -335,12 +335,11 @@ async def forwarding():
                 """, (user_id,))
                 user = cur.fetchone()
 
-                is_authorized = check_telegram_auth(user)
-                if not is_authorized:
+                if not check_telegram_auth(user):
                     return render_template('dashboard/forwarding.html',
                                       telegram_authorized=False)
 
-                # Get channel config
+                # Get forwarding config
                 cur.execute("""
                     SELECT source_channel, destination_channel, is_active
                     FROM forwarding_configs
@@ -404,7 +403,7 @@ async def send_otp():
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute("""
-                    SELECT session_string, telegram_id
+                    SELECT telegram_id, telegram_username, auth_date, session_string
                     FROM users
                     WHERE id = %s AND session_string IS NOT NULL
                 """, (session.get('user_id'),))
@@ -429,18 +428,19 @@ async def send_otp():
                             WHERE id = %s
                         """, (session.get('user_id'),))
 
+        # Store important session data
+        important_data = {
+            'user_id': session.get('user_id'),
+            'csrf_token': session.get('csrf_token')
+        }
+
+        # Initialize new client for OTP
         phone = request.form.get('phone')
         if not phone:
             return jsonify({'error': 'Phone number is required'}), 400
 
         if not phone.startswith('+91'):
             return jsonify({'error': 'Phone number must start with +91'}), 400
-
-        # Store important session data
-        important_data = {
-            'user_id': session.get('user_id'),
-            'csrf_token': session.get('csrf_token')
-        }
 
         try:
             # Get client and send OTP
@@ -480,7 +480,6 @@ async def verify_otp():
         password = request.form.get('password')
 
         if not phone or not phone_code_hash:
-            session.clear()
             return jsonify({'error': 'Session expired. Please request a new OTP.'}), 400
 
         if not otp:
@@ -501,12 +500,12 @@ async def verify_otp():
                     await client.sign_in(password=password)
                 except Exception as e:
                     logger.error(f"❌ 2FA error: {str(e)}")
-                    session.clear()
                     return jsonify({'error': 'Invalid 2FA password'}), 400
 
             if await client.is_user_authorized():
                 # Get user info
                 me = await client.get_me()
+                session_string = client.session.save()
 
                 # Store or update user in database with telegram info
                 with get_db() as conn:
@@ -520,50 +519,54 @@ async def verify_otp():
                                 session_string = %s
                             WHERE id = %s
                             RETURNING id
-                        """, (me.id, me.first_name, me.username, client.session.save(), session.get('user_id')))
+                        """, (me.id, me.first_name, me.username, session_string, session.get('user_id')))
 
                         if not cur.fetchone():
                             return jsonify({'error': 'User not found'}), 404
 
                 # Set session data
                 session['telegram_id'] = me.id
-                session['session_string'] = client.session.save()
+                session['session_string'] = session_string
                 logger.info(f"✅ Telegram authorization successful for user {me.id}")
                 return jsonify({'message': 'Authorization successful'})
             else:
-                session.clear()
                 return jsonify({'error': 'Authentication failed. Please try again.'}), 400
 
         except Exception as e:
             logger.error(f"❌ Sign in error: {str(e)}")
-            session.clear()
             return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         logger.error(f"❌ Critical error in verify_otp: {str(e)}")
-        session.clear()
         return jsonify({'error': str(e)}), 500
 
 @app.before_request
 def check_session_expiry():
     if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout', 'register', 'register_post', 'login_post']:
+        # Get current user data
         user_id = session.get('user_id')
         if not user_id:
             session.clear()
             return redirect(url_for('login'))
 
-        # Verify user is still logged in in database
         with get_db() as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                # Check user login status and telegram auth
                 cur.execute("""
-                    SELECT is_logged_in 
+                    SELECT is_logged_in, telegram_id, session_string 
                     FROM users 
                     WHERE id = %s
                 """, (user_id,))
-                result = cur.fetchone()
-                if not result or not result[0]:
+                user = cur.fetchone()
+
+                if not user or not user['is_logged_in']:
                     session.clear()
                     return redirect(url_for('login'))
+
+                # Update session with telegram data if available
+                if user['telegram_id'] and user['session_string']:
+                    session['telegram_id'] = user['telegram_id']
+                    session['session_string'] = user['session_string']
 
 @app.route('/check-auth')
 def check_auth():
