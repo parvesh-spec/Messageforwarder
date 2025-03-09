@@ -2,7 +2,7 @@ import os
 import logging
 import threading
 import time
-from datetime import datetime  # Add this import
+from datetime import datetime
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
@@ -42,19 +42,21 @@ csrf = CSRFProtect(app)
 # Initialize session
 Session(app)
 
-# Create event loop for the application
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-
 class TelegramManager:
     def __init__(self, api_id, api_hash):
         self.api_id = api_id
         self.api_hash = api_hash
         self._lock = threading.Lock()
         self._client = None
-        self._loop = None
+        self._loop = asyncio.new_event_loop()
+        threading.Thread(target=self._run_loop, daemon=True).start()
         self._current_phone = None
         self._current_hash = None
+
+    def _run_loop(self):
+        """Run event loop in background thread"""
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
 
     async def _initialize_client(self, session_string=None):
         """Initialize the Telegram client"""
@@ -66,7 +68,8 @@ class TelegramManager:
                     self.api_hash,
                     device_model="Replit Web",
                     system_version="Linux",
-                    app_version="1.0"
+                    app_version="1.0",
+                    loop=self._loop
                 )
                 await self._client.connect()
                 logger.info("✅ Telegram client initialized")
@@ -118,28 +121,27 @@ telegram_manager = TelegramManager(
     os.getenv('API_HASH')
 )
 
+# Async route decorator that uses the telegram manager's event loop
+def async_route(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                f(*args, **kwargs),
+                telegram_manager._loop
+            )
+            return future.result(timeout=30)  # Add timeout to prevent hanging
+        except Exception as e:
+            logger.error(f"❌ Async route error: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+    return wrapped
+
 # Database pool for connections
 db_pool = psycopg2.pool.ThreadedConnectionPool(
     minconn=1,
     maxconn=10,
     dsn=os.getenv('DATABASE_URL')
 )
-
-# Async route decorator
-def async_route(f):
-    @wraps(f)
-    def wrapped(*args, **kwargs):
-        try:
-            # Create new event loop for this request
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(f(*args, **kwargs))
-        except Exception as e:
-            logger.error(f"❌ Async route error: {str(e)}")
-            return render_template('error.html', error="An error occurred. Please try again.")
-        finally:
-            loop.close()
-    return wrapped
 
 # Database connection context manager
 @contextmanager
