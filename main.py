@@ -78,7 +78,9 @@ async def setup_client(user_id, session_string, max_retries=3, retry_delay=5):
 
             # Connect with timeout
             try:
+                logger.info(f"🔄 Attempting to connect client for user {user_id}")
                 await asyncio.wait_for(client.connect(), timeout=30)
+                logger.info(f"✅ Client connected for user {user_id}")
             except asyncio.TimeoutError:
                 logger.error(f"❌ Connection timeout for user {user_id}, retrying...")
                 if client:
@@ -185,37 +187,36 @@ async def setup_user_handlers(user_id, client):
         return False
 
     try:
+        session = USER_SESSIONS.get(user_id, {})
+        source = session.get('source')
+        destination = session.get('destination')
+
+        logger.info(f"🔄 Setting up handlers for user {user_id}")
+        logger.info(f"Source channel: {source}")
+        logger.info(f"Destination channel: {destination}")
+
         @client.on(events.NewMessage())
         async def handle_new_message(event):
             try:
                 # Log every message receipt
-                logger.info(f"📥 Received message in chat {event.chat_id}")
-
-                if user_id not in USER_SESSIONS:
-                    logger.error(f"❌ No session found for user {user_id}")
-                    return
-
-                session = USER_SESSIONS[user_id]
-                source = session.get('source')
-                destination = session.get('destination')
-
-                if not source or not destination:
-                    logger.error(f"❌ No source/destination configured for user {user_id}")
-                    return
-
-                # Format channel IDs for comparison
                 chat_id = str(event.chat_id)
                 if not chat_id.startswith('-100'):
                     chat_id = f"-100{chat_id.lstrip('-')}"
+                logger.info(f"📥 Received message in chat {chat_id}")
 
+                # Get source channel ID
                 source_id = str(source)
                 if not source_id.startswith('-100'):
                     source_id = f"-100{source_id.lstrip('-')}"
+
+                logger.info(f"Comparing chat_id {chat_id} with source_id {source_id}")
 
                 # Compare exact channel IDs
                 if chat_id != source_id:
                     logger.info(f"❌ Message not from source channel. Got {chat_id}, expected {source_id}")
                     return
+
+                logger.info("✅ Message is from source channel, processing...")
 
                 # Process message
                 message = event.message
@@ -349,6 +350,7 @@ def add_user_session(user_id, session_string, source_channel=None, destination_c
     """Add or update a user's session"""
     async def setup_session():
         try:
+            logger.info(f"🔄 Setting up session for user {user_id}")
             client = await setup_client(user_id, session_string)
             if client:
                 # Initialize or update user session
@@ -359,23 +361,33 @@ def add_user_session(user_id, session_string, source_channel=None, destination_c
                     'replacements': load_user_replacements(user_id)
                 }
 
+                logger.info(f"Session data for user {user_id}:")
+                logger.info(f"Source channel: {source_channel}")
+                logger.info(f"Destination channel: {destination_channel}")
+
                 # Setup handlers
                 if await setup_user_handlers(user_id, client):
                     # Start session management loop
                     asyncio.create_task(manage_user_session(user_id))
                     logger.info(f"✅ Session started for user {user_id}")
                     return True
+                else:
+                    logger.error(f"❌ Failed to setup handlers for user {user_id}")
             return False
         except Exception as e:
             logger.error(f"❌ Session setup error for user {user_id}: {str(e)}")
             return False
 
     # Run setup in event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    success = loop.run_until_complete(setup_session())
-    loop.close()
-    return success
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        success = loop.run_until_complete(setup_session())
+        loop.close()
+        return success
+    except Exception as e:
+        logger.error(f"❌ Error in add_user_session: {str(e)}")
+        return False
 
 def remove_user_session(user_id):
     """Remove a user's session"""
