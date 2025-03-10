@@ -34,24 +34,16 @@ app.config.update(
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    SESSION_FILE_DIR='flask_session',  # Directory for session files
-    SESSION_FILE_THRESHOLD=500,  # Maximum number of session files
-    SESSION_USE_SIGNER=True,  # Sign the session cookie
-    SESSION_KEY_PREFIX='session:',  # Session key prefix
-    SESSION_COOKIE_NAME='session_id',  # Session cookie name
+    SESSION_FILE_DIR='flask_session',
     SESSION_COOKIE_SECURE=False,  # Set to True in production
-    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
-    SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
-    WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
-    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
     DEBUG=True
 )
 
-# Initialize session after config
+# Initialize session and CSRF protection
 Session(app)
-
-# Initialize CSRF protection after session
-csrf = CSRFProtect(app)
+csrf = CSRFProtect()
 csrf.init_app(app)
 
 class TelegramManager:
@@ -187,33 +179,44 @@ def login():
 
 @app.route('/login', methods=['POST'])
 def login_post():
-    form = LoginForm()
-    if not form.validate_on_submit():
-        return render_template('auth/login.html', form=form)
+    try:
+        form = LoginForm()
+        if not form.validate_on_submit():
+            if 'csrf_token' in form.errors:
+                # Handle CSRF token errors separately
+                logger.error("❌ CSRF token validation failed")
+                return render_template('auth/login.html', form=form, 
+                    error="Session expired. Please refresh the page and try again.")
+            return render_template('auth/login.html', form=form)
 
-    email = form.email.data
-    password = form.password.data
+        email = form.email.data
+        password = form.password.data
 
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-            user = cur.fetchone()
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+                user = cur.fetchone()
 
-            if not user or not check_password_hash(user['password_hash'], password):
-                form.email.errors.append('Please check your email and password')
-                return render_template('auth/login.html', form=form)
+                if not user or not check_password_hash(user['password_hash'], password):
+                    form.email.errors.append('Please check your email and password')
+                    return render_template('auth/login.html', form=form)
 
-            # Update login status
-            cur.execute("""
-                UPDATE users 
-                SET is_logged_in = true,
-                    last_login_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-            """, (user['id'],))
+                # Update login status
+                cur.execute("""
+                    UPDATE users 
+                    SET is_logged_in = true,
+                        last_login_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (user['id'],))
 
-            session['user_id'] = user['id']
-            session['telegram_id'] = user['telegram_id']
-            return redirect(url_for('dashboard'))
+                session['user_id'] = user['id']
+                session['telegram_id'] = user['telegram_id']
+                return redirect(url_for('dashboard'))
+
+    except Exception as e:
+        logger.error(f"❌ Login error: {str(e)}")
+        return render_template('auth/login.html', form=form, 
+            error="An error occurred. Please try again.")
 
 @app.route('/register')
 def register():
