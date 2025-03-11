@@ -16,7 +16,7 @@ from flask_session import Session
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
-from flask_wtf.csrf import CSRFProtect
+from flask_wtf.csrf import CSRFProtect, generate_csrf
 
 # Set up logging
 logging.basicConfig(
@@ -27,6 +27,21 @@ logger = logging.getLogger(__name__)
 
 # Configure Flask application
 app = Flask(__name__)
+
+# Debug mode configuration based on environment
+if os.environ.get('FLASK_ENV') == 'development':
+    app.config.update(
+        SESSION_COOKIE_SECURE=False,  # Allow HTTP in development
+        WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS in development
+        DEBUG=True
+    )
+else:
+    app.config.update(
+        SESSION_COOKIE_SECURE=True,  # Require HTTPS in production
+        WTF_CSRF_SSL_STRICT=True,  # Require HTTPS in production
+        DEBUG=False
+    )
+
 
 # Session configuration
 app.config.update(
@@ -39,12 +54,10 @@ app.config.update(
     SESSION_USE_SIGNER=True,  # Sign the session cookie
     SESSION_KEY_PREFIX='session:',  # Session key prefix
     SESSION_COOKIE_NAME='session_id',  # Session cookie name
-    SESSION_COOKIE_SECURE=False,  # Set to True in production
-    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
-    SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
     WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
-    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
-    DEBUG=True
+    WTF_CSRF_ENABLED=True,  # Enable CSRF protection
+    PREFERRED_URL_SCHEME='https',  # Use HTTPS URLs
+
 )
 
 # Initialize session after config
@@ -574,7 +587,7 @@ async def verify_otp():
 
 @app.before_request
 def check_session_expiry():
-    if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout', 'register', 'register_post', 'login_post']:
+    if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout', 'register', 'register_post', 'login_post', 'get_csrf_token']:
         # Get current user data
         user_id = session.get('user_id')
         if not user_id:
@@ -913,7 +926,7 @@ def add_replacement():
 @login_required
 def remove_replacement():
     try:
-        original = request.form.get('original')
+        original =request.form.get('original')
         user_id = session.get('user_id')
 
         if not all([original, user_id]):
