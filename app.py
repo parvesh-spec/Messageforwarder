@@ -28,9 +28,13 @@ logger = logging.getLogger(__name__)
 # Configure Flask application
 app = Flask(__name__)
 
+# Generate a secure secret key if not set
+if not os.environ.get('FLASK_SECRET_KEY'):
+    os.environ['FLASK_SECRET_KEY'] = os.urandom(24).hex()
+
 # Session configuration
 app.config.update(
-    SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
+    SECRET_KEY=os.environ.get('FLASK_SECRET_KEY'),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
@@ -38,13 +42,39 @@ app.config.update(
     SESSION_COOKIE_SECURE=False,  # Set to True in production
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_NAME='session',
+    WTF_CSRF_SECRET_KEY=os.environ.get('FLASK_SECRET_KEY'),
+    WTF_CSRF_TIME_LIMIT=3600,  # 1 hour
+    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
     DEBUG=True
 )
 
-# Initialize session and CSRF protection
+# Initialize Flask Session first
 Session(app)
+
+# Initialize CSRF Protection after Session
 csrf = CSRFProtect()
 csrf.init_app(app)
+
+# Create session directory if it doesn't exist
+os.makedirs(app.config['SESSION_FILE_DIR'], exist_ok=True)
+
+@app.before_request
+def csrf_protect():
+    """Extra CSRF protection and logging"""
+    if request.method == "POST":
+        csrf_token = session.get('csrf_token')
+        form_token = request.form.get('csrf_token')
+
+        logger.debug(f"Session CSRF token: {csrf_token}")
+        logger.debug(f"Form CSRF token: {form_token}")
+
+        if not csrf_token or not form_token or csrf_token != form_token:
+            logger.error("CSRF token validation failed")
+            logger.error(f"Session token: {csrf_token}")
+            logger.error(f"Form token: {form_token}")
+            return jsonify({'error': 'CSRF token mismatch'}), 400
+
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -314,6 +344,7 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
+
 
 
 @app.route('/authorization')
