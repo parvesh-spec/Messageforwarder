@@ -152,22 +152,69 @@ def async_route(f):
             return jsonify({'error': str(e)}), 500
     return wrapped
 
-# Database pool for connections
-db_pool = psycopg2.pool.ThreadedConnectionPool(
-    minconn=1,
-    maxconn=10,
-    dsn=os.getenv('DATABASE_URL')
-)
+# Configure database connection pool with retries
+def get_db_pool():
+    """Create database connection pool with retries"""
+    max_retries = 3
+    retry_count = 0
 
-# Database connection context manager
+    while retry_count < max_retries:
+        try:
+            return psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=10,
+                dsn=os.getenv('DATABASE_URL'),
+                connect_timeout=3,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5
+            )
+        except psycopg2.Error as e:
+            logger.error(f"❌ Database connection attempt {retry_count + 1} failed: {str(e)}")
+            retry_count += 1
+            if retry_count == max_retries:
+                raise
+            time.sleep(1)  # Wait before retrying
+
+# Initialize database pool
+try:
+    db_pool = get_db_pool()
+    logger.info("✅ Database pool initialized successfully")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize database pool: {str(e)}")
+    db_pool = None
+
 @contextmanager
 def get_db():
-    conn = db_pool.getconn()
-    try:
-        conn.autocommit = True
-        yield conn
-    finally:
-        db_pool.putconn(conn)
+    """Get database connection with retry logic"""
+    max_retries = 3
+    retry_count = 0
+    conn = None
+
+    while retry_count < max_retries:
+        try:
+            conn = db_pool.getconn()
+            conn.autocommit = True
+            yield conn
+            return
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            logger.error(f"❌ Database operation attempt {retry_count + 1} failed: {str(e)}")
+            if conn:
+                try:
+                    db_pool.putconn(conn)
+                except:
+                    pass
+            retry_count += 1
+            if retry_count == max_retries:
+                raise
+            time.sleep(1)  # Wait before retrying
+        finally:
+            if conn:
+                try:
+                    db_pool.putconn(conn)
+                except:
+                    pass
 
 # Authentication decorator
 def login_required(f):
@@ -192,6 +239,7 @@ def login():
 
 @app.route('/login', methods=['POST'])
 def login_post():
+    """Handle login form submission with retry logic"""
     try:
         form = LoginForm()
         logger.debug(f"Processing login form with CSRF token: {form.csrf_token._value()}")
@@ -207,29 +255,35 @@ def login_post():
         email = form.email.data
         password = form.password.data
 
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-                user = cur.fetchone()
+        try:
+            with get_db() as conn:
+                with conn.cursor(cursor_factory=DictCursor) as cur:
+                    cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+                    user = cur.fetchone()
 
-                if not user or not check_password_hash(user['password_hash'], password):
-                    form.email.errors.append('Please check your email and password')
-                    return render_template('auth/login.html', form=form)
+                    if not user or not check_password_hash(user['password_hash'], password):
+                        form.email.errors.append('Please check your email and password')
+                        return render_template('auth/login.html', form=form)
 
-                # Update login status
-                cur.execute("""
-                    UPDATE users 
-                    SET is_logged_in = true,
-                        last_login_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                """, (user['id'],))
+                    # Update login status
+                    cur.execute("""
+                        UPDATE users 
+                        SET is_logged_in = true,
+                            last_login_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """, (user['id'],))
 
-                session.clear()  # Clear any existing session data
-                session['user_id'] = user['id']
-                session['telegram_id'] = user['telegram_id']
-                session.permanent = True
-                logger.info(f"✅ User {user['id']} logged in successfully")
-                return redirect(url_for('dashboard'))
+                    session.clear()  # Clear any existing session data
+                    session['user_id'] = user['id']
+                    session['telegram_id'] = user['telegram_id']
+                    session.permanent = True
+                    logger.info(f"✅ User {user['id']} logged in successfully")
+                    return redirect(url_for('dashboard'))
+
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            logger.error(f"❌ Database error during login: {str(e)}")
+            return render_template('auth/login.html', form=form,
+                error="Connection error. Please try again.")
 
     except Exception as e:
         logger.error(f"❌ Login error: {str(e)}")
@@ -332,6 +386,7 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
+
 
 
 @app.route('/authorization')
