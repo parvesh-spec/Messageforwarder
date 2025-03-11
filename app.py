@@ -75,6 +75,16 @@ def add_security_headers(response):
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     return response
 
+# Only add this if it's not already present
+@app.before_request
+def make_session_permanent():
+    session.permanent = True
+    # For production environment, set secure cookie
+    if is_production:
+        app.config['SESSION_COOKIE_SECURE'] = True
+        app.config['SESSION_COOKIE_DOMAIN'] = f'.{domain}'
+
+
 class TelegramManager:
     def __init__(self, api_id, api_hash):
         self.api_id = api_id
@@ -907,8 +917,7 @@ def get_replacements():
                     FROM text_replacements
                     WHERE user_id = %s
                 """, (user_id,))
-                replacements = {row['original_text']: row['replacement_text'] 
-                            for row in cur.fetchall()}
+                replacements = {row['original_text']: row['replacementtext'] for row in cur.fetchall()}
                 return jsonify(replacements)
     except Exception as e:
         logger.error(f"❌ Get replacements error: {str(e)}")
@@ -942,7 +951,7 @@ def add_replacement():
                         WHERE user_id = %s AND original_text = %s
                     """, (user_id, original))
 
-                    if cur.fetchone()[0]> 0:
+                    if cur.fetchone()[0] > 0:
                         return jsonify({'error': 'This replacement already exists'}), 400
 
                     # Add new replacement
@@ -950,7 +959,7 @@ def add_replacement():
                         INSERT INTO text_replacements (user_id, original_text, replacement_text)
                         VALUES (%s, %s, %s)
                         RETURNING id
-                    """, (user_id,original, replacement))
+                    """, (user_id, original, replacement))
 
                     replacement_id = cur.fetchone()[0]
                     logger.info(f"Added replacement {replacement_id} for user {user_id}: '{original}' → '{replacement}'")

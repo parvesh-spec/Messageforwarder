@@ -17,7 +17,7 @@
     {% endwith %}
 
     <form method="POST" action="{{ url_for('login_post') }}" id="login-form">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        {{ form.hidden_tag() }}
         {% if form.csrf_token.errors %}
             <div class="alert alert-error">
                 Session expired. Please refresh the page and try again.
@@ -60,8 +60,8 @@
 
 <script>
 document.getElementById('login-form').addEventListener('submit', function(e) {
-    // Refresh CSRF token if needed
-    if (document.querySelector('.alert-error')?.textContent.includes('Session expired')) {
+    const errorElement = document.querySelector('.alert-error');
+    if (errorElement && errorElement.textContent.includes('Session expired')) {
         e.preventDefault();
         window.location.reload();
     }
