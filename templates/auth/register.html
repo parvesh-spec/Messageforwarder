@@ -4,10 +4,6 @@
 <div class="auth-box">
     <h2>Create Account</h2>
 
-    {% if error %}
-        <div class="alert alert-error">{{ error }}</div>
-    {% endif %}
-
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
             {% for category, message in messages %}
@@ -18,11 +14,6 @@
 
     <form method="POST" action="{{ url_for('register_post') }}">
         {{ form.csrf_token }}
-        {% if form.csrf_token.errors %}
-            <div class="alert alert-error">
-                सेशन एक्सपायर हो गया है। कृपया पेज को रिफ्रेश करें।
-            </div>
-        {% endif %}
         <div class="form-group">
             <label>Email Address</label>
             {{ form.email(class="form-control") }}

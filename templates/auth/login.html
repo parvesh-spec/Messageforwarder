@@ -4,10 +4,6 @@
 <div class="auth-box">
     <h2>Login to Message Forwarder</h2>
 
-    {% if error %}
-        <div class="alert alert-error">{{ error }}</div>
-    {% endif %}
-
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
             {% for category, message in messages %}
@@ -16,14 +12,8 @@
         {% endif %}
     {% endwith %}
 
-    <form method="POST" action="{{ url_for('login_post') }}" id="login-form">
-        {{ form.hidden_tag() }}
-        {% if form.csrf_token.errors %}
-            <div class="alert alert-error">
-                Session expired. Please refresh the page and try again.
-            </div>
-        {% endif %}
-
+    <form method="POST" action="{{ url_for('login_post') }}">
+        {{ form.csrf_token }}
         <div class="form-group">
             <label>Email Address</label>
             {{ form.email(class="form-control") }}
@@ -57,14 +47,4 @@
         <p>Don't have an account? <a href="{{ url_for('register') }}">Register here</a></p>
     </div>
 </div>
-
-<script>
-document.getElementById('login-form').addEventListener('submit', function(e) {
-    const errorElement = document.querySelector('.alert-error');
-    if (errorElement && errorElement.textContent.includes('Session expired')) {
-        e.preventDefault();
-        window.location.reload();
-    }
-});
-</script>
 {% endblock %}

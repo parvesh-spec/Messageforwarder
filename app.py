@@ -16,7 +16,7 @@ from flask_session import Session
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
-from flask_wtf.csrf import CSRFProtect, CSRFError
+from flask_wtf.csrf import CSRFProtect
 
 # Set up logging
 logging.basicConfig(
@@ -28,62 +28,31 @@ logger = logging.getLogger(__name__)
 # Configure Flask application
 app = Flask(__name__)
 
-# Get environment
-is_production = os.environ.get('REPL_SLUG') is not None
-domain = os.environ.get('REPL_SLUG', 'localhost')
-
-# Session and security configuration
+# Session configuration
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    SESSION_FILE_DIR='flask_session',
-    SESSION_COOKIE_SECURE=is_production,  # Enable secure cookies in production
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax',
-    SESSION_COOKIE_DOMAIN=domain if is_production else None,
-    WTF_CSRF_ENABLED=True,
-    WTF_CSRF_SECRET_KEY=os.environ.get('CSRF_SECRET_KEY', os.urandom(24)),
-    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF in development
-    WTF_CSRF_TIME_LIMIT=3600,  # 1 hour CSRF token validity
-    DEBUG=not is_production
+    SESSION_FILE_DIR='flask_session',  # Directory for session files
+    SESSION_FILE_THRESHOLD=500,  # Maximum number of session files
+    SESSION_USE_SIGNER=True,  # Sign the session cookie
+    SESSION_KEY_PREFIX='session:',  # Session key prefix
+    SESSION_COOKIE_NAME='session_id',  # Session cookie name
+    SESSION_COOKIE_SECURE=False,  # Set to True in production
+    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
+    SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
+    WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
+    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
+    DEBUG=True
 )
 
-# Initialize session and CSRF protection
+# Initialize session after config
 Session(app)
-csrf = CSRFProtect()
+
+# Initialize CSRF protection after session
+csrf = CSRFProtect(app)
 csrf.init_app(app)
-
-# Add CORS headers for production
-@app.after_request
-def add_cors_headers(response):
-    if is_production:
-        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-        response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['X-Frame-Options'] = 'SAMEORIGIN'
-        response.headers['X-XSS-Protection'] = '1; mode=block'
-    return response
-
-# Add security headers
-@app.after_request
-def add_security_headers(response):
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    if is_production:
-        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-    return response
-
-# Only add this if it's not already present
-@app.before_request
-def make_session_permanent():
-    session.permanent = True
-    # For production environment, set secure cookie
-    if is_production:
-        app.config['SESSION_COOKIE_SECURE'] = True
-        app.config['SESSION_COOKIE_DOMAIN'] = f'.{domain}'
-
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -218,53 +187,33 @@ def login():
 
 @app.route('/login', methods=['POST'])
 def login_post():
-    try:
-        form = LoginForm()
-        if not form.validate_on_submit():
-            if form.errors:
-                # Handle specific form errors
-                error_messages = []
-                for field, errors in form.errors.items():
-                    if field == 'csrf_token':
-                        return render_template('auth/login.html', form=form,
-                            error="Session expired. Please refresh the page and try again.")
-                    error_messages.extend(errors)
-                return render_template('auth/login.html', form=form,
-                    error=", ".join(error_messages))
-            return render_template('auth/login.html', form=form)
+    form = LoginForm()
+    if not form.validate_on_submit():
+        return render_template('auth/login.html', form=form)
 
-        email = form.email.data
-        password = form.password.data
+    email = form.email.data
+    password = form.password.data
 
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-                user = cur.fetchone()
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+            user = cur.fetchone()
 
-                if not user or not check_password_hash(user['password_hash'], password):
-                    return render_template('auth/login.html', form=form,
-                        error="Invalid email or password. Please try again.")
+            if not user or not check_password_hash(user['password_hash'], password):
+                form.email.errors.append('Please check your email and password')
+                return render_template('auth/login.html', form=form)
 
-                # Update login status
-                cur.execute("""
-                    UPDATE users 
-                    SET is_logged_in = true,
-                        last_login_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                """, (user['id'],))
+            # Update login status
+            cur.execute("""
+                UPDATE users 
+                SET is_logged_in = true,
+                    last_login_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (user['id'],))
 
-                # Set session data
-                session.clear()  # Clear any existing session data
-                session['user_id'] = user['id']
-                session['telegram_id'] = user['telegram_id']
-                session.permanent = True
-
-                return redirect(url_for('dashboard'))
-
-    except Exception as e:
-        logger.error(f"❌ Login error: {str(e)}")
-        return render_template('auth/login.html', form=form,
-            error="An error occurred. Please try again.")
+            session['user_id'] = user['id']
+            session['telegram_id'] = user['telegram_id']
+            return redirect(url_for('dashboard'))
 
 @app.route('/register')
 def register():
@@ -273,52 +222,29 @@ def register():
 
 @app.route('/register', methods=['POST'])
 def register_post():
-    try:
-        form = RegisterForm()
-        if not form.validate_on_submit():
-            if form.errors:
-                # Handle specific form errors
-                error_messages = []
-                for field, errors in form.errors.items():
-                    if field == 'csrf_token':
-                        return render_template('auth/register.html', form=form,
-                            error="Session expired. Please refresh the page and try again.")
-                    error_messages.extend(errors)
-                return render_template('auth/register.html', form=form,
-                    error=", ".join(error_messages))
-            return render_template('auth/register.html', form=form)
+    form = RegisterForm()
+    if not form.validate_on_submit():
+        return render_template('auth/register.html', form=form)
 
-        email = form.email.data
-        password = form.password.data
+    email = form.email.data
+    password = form.password.data
 
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                # Check if email already exists
-                cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-                if cur.fetchone():
-                    return render_template('auth/register.html', form=form,
-                        error="This email is already registered")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+            if cur.fetchone():
+                form.email.errors.append('Email already registered')
+                return render_template('auth/register.html', form=form)
 
-                # Create new user
-                cur.execute("""
-                    INSERT INTO users (email, password_hash)
-                    VALUES (%s, %s)
-                    RETURNING id
-                """, (email, generate_password_hash(password)))
+            cur.execute("""
+                INSERT INTO users (email, password_hash)
+                VALUES (%s, %s)
+                RETURNING id
+            """, (email, generate_password_hash(password)))
 
-                user_id = cur.fetchone()[0]
-
-                # Set session data
-                session.clear()  # Clear any existing session data
-                session['user_id'] = user_id
-                session.permanent = True
-
-                return redirect(url_for('dashboard'))
-
-    except Exception as e:
-        logger.error(f"❌ Register error: {str(e)}")
-        return render_template('auth/register.html', form=form,
-            error="An error occurred. Please try again.")
+            user_id = cur.fetchone()[0]
+            session['user_id'] = user_id
+            return redirect(url_for('dashboard'))
 
 @app.route('/logout')
 def logout():
@@ -385,7 +311,6 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
-
 
 
 @app.route('/authorization')
@@ -910,14 +835,16 @@ def toggle_bot():
 def get_replacements():
     try:
         user_id = session.get('user_id')
+
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute("""
-                    SELECT original_text, replacement_text
+                    SELECT original_text, replacement_text 
                     FROM text_replacements
                     WHERE user_id = %s
+                    ORDER BY id DESC
                 """, (user_id,))
-                replacements = {row['original_text']: row['replacementtext'] for row in cur.fetchall()}
+                replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
                 return jsonify(replacements)
     except Exception as e:
         logger.error(f"❌ Get replacements error: {str(e)}")
@@ -1060,13 +987,6 @@ def handle_db_error(e, operation):
 @app.template_filter('datetime')
 def format_datetime(timestamp):
     return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
-
-# Error handler for CSRF errors
-@app.errorhandler(CSRFError)
-def handle_csrf_error(e):
-    logger.error(f"❌ CSRF error: {str(e)}")
-    return render_template('auth/error.html',
-        error="Your session has expired. Please refresh the page and try again."), 400
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
