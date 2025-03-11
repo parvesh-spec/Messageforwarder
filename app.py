@@ -156,6 +156,10 @@ def async_route(f):
             return jsonify({'error': str(e)}), 500
     return wrapped
 
+def check_telegram_auth(user_data):
+    """Helper to check Telegram authorization status"""
+    return bool(user_data and user_data.telegram_id and user_data.session_string)
+
 # Authentication decorator
 def login_required(f):
     @wraps(f)
@@ -164,10 +168,6 @@ def login_required(f):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
-
-def check_telegram_auth(user_data):
-    """Helper to check Telegram authorization status"""
-    return bool(user_data and user_data['telegram_id'] and user_data['session_string'])
 
 @app.route('/')
 def login():
