@@ -28,28 +28,52 @@ logger = logging.getLogger(__name__)
 # Configure Flask application
 app = Flask(__name__)
 
-# Session configuration
+# Get environment
+is_production = os.environ.get('REPL_SLUG') is not None
+domain = os.environ.get('REPL_SLUG', 'localhost')
+
+# Session and security configuration
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
     SESSION_FILE_DIR='flask_session',
-    SESSION_COOKIE_SECURE=False,  # Set to True in production
+    SESSION_COOKIE_SECURE=is_production,  # Enable secure cookies in production
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_DOMAIN=domain if is_production else None,
     WTF_CSRF_ENABLED=True,
     WTF_CSRF_SECRET_KEY=os.environ.get('CSRF_SECRET_KEY', os.urandom(24)),
-    WTF_CSRF_METHODS=['POST', 'PUT', 'PATCH', 'DELETE'],
-    WTF_CSRF_FIELD_NAME='csrf_token',
-    WTF_CSRF_CHECK_DEFAULT=True,
-    DEBUG=True
+    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF in development
+    WTF_CSRF_TIME_LIMIT=3600,  # 1 hour CSRF token validity
+    DEBUG=not is_production
 )
 
 # Initialize session and CSRF protection
 Session(app)
 csrf = CSRFProtect()
 csrf.init_app(app)
+
+# Add CORS headers for production
+@app.after_request
+def add_cors_headers(response):
+    if is_production:
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+        response.headers['X-XSS-Protection'] = '1; mode=block'
+    return response
+
+# Add security headers
+@app.after_request
+def add_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    if is_production:
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    return response
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -876,16 +900,15 @@ def toggle_bot():
 def get_replacements():
     try:
         user_id = session.get('user_id')
-
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute("""
-                    SELECT original_text, replacement_text 
+                    SELECT original_text, replacement_text
                     FROM text_replacements
                     WHERE user_id = %s
-                    ORDER BY id DESC
                 """, (user_id,))
-                replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
+                replacements = {row['original_text']: row['replacement_text'] 
+                            for row in cur.fetchall()}
                 return jsonify(replacements)
     except Exception as e:
         logger.error(f"❌ Get replacements error: {str(e)}")

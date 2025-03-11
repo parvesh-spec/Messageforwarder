@@ -16,11 +16,11 @@
         {% endif %}
     {% endwith %}
 
-    <form method="POST" action="{{ url_for('login_post') }}">
-        {{ form.csrf_token }}
+    <form method="POST" action="{{ url_for('login_post') }}" id="login-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         {% if form.csrf_token.errors %}
             <div class="alert alert-error">
-                सेशन एक्सपायर हो गया है। कृपया पेज को रिफ्रेश करें।
+                Session expired. Please refresh the page and try again.
             </div>
         {% endif %}
 
@@ -57,4 +57,14 @@
         <p>Don't have an account? <a href="{{ url_for('register') }}">Register here</a></p>
     </div>
 </div>
+
+<script>
+document.getElementById('login-form').addEventListener('submit', function(e) {
+    // Refresh CSRF token if needed
+    if (document.querySelector('.alert-error')?.textContent.includes('Session expired')) {
+        e.preventDefault();
+        window.location.reload();
+    }
+});
+</script>
 {% endblock %}
