@@ -588,9 +588,37 @@ async def verify_otp():
                 me = await client.get_me()
                 session_string = client.session.save()
 
-                # Update database
+                # Check if this Telegram account is already connected to another user
                 with get_db() as conn:
                     with conn.cursor() as cur:
+                        # First check if this Telegram ID exists
+                        cur.execute("""
+                            SELECT id, telegram_id 
+                            FROM users 
+                            WHERE telegram_id = %s
+                        """, (me.id,))
+                        existing_user = cur.fetchone()
+
+                        if existing_user and existing_user[0] != session.get('user_id'):
+                            # Disconnect from old user first
+                            cur.execute("""
+                                UPDATE users 
+                                SET telegram_id = NULL,
+                                    telegram_username = NULL,
+                                    auth_date = NULL,
+                                    session_string = NULL
+                                WHERE telegram_id = %s
+                            """, (me.id,))
+                            logger.info(f"✅ Disconnected Telegram from old user {existing_user[0]}")
+
+                            # Also deactivate any existing forwarding configs
+                            cur.execute("""
+                                UPDATE forwarding_configs
+                                SET is_active = false
+                                WHERE user_id = %s
+                            """, (existing_user[0],))
+
+                        # Now connect to new user
                         cur.execute("""
                             UPDATE users 
                             SET telegram_id = %s,
@@ -623,7 +651,7 @@ async def verify_otp():
 
     except Exception as e:
         logger.error(f"❌ Verification error: {str(e)}")
-        return jsonify({'error': 'An unexpected error occurred'}), 500
+        return jsonify({'error': str(e)}), 500
 
 @app.before_request
 def check_session_expiry():
@@ -900,7 +928,7 @@ def get_replacements():
                 replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
                 return jsonify(replacements)
     except Exception as e:
-        logger.error(f"❌ Get replacements error: {str(e)}")
+        logger.error(f"❌Get replacements error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/add-replacement', methods=['POST'])
@@ -919,16 +947,16 @@ def add_replacement():
 
         # Validate input lengths
         if len(original) > 500 or len(replacement) > 500:
-            return jsonify({'error': 'Text toolong (max 500 characters)'}), 400
+            return jsonify({'error': 'Text too long (max 500 characters)'}), 400
 
         with get_db() as conn:
             with conn.cursor() as cur:
                 try:
                     # Check if replacement already exists
                     cur.execute("""
-                        SELECT` COUNT(*) 
+                        SELECT COUNT(*) 
                         FROM text_replacements 
-                        WHERE user_id = %s AND original_text =%s
+                        WHERE user_id = %s AND original_text = %s
                     """, (user_id, original))
 
                     if cur.fetchone()[0] > 0:
