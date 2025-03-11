@@ -16,7 +16,7 @@ from flask_session import Session
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
-from flask_wtf.csrf import CSRFProtect
+from flask_wtf.csrf import CSRFProtect, CSRFError
 
 # Set up logging
 logging.basicConfig(
@@ -28,31 +28,42 @@ logger = logging.getLogger(__name__)
 # Configure Flask application
 app = Flask(__name__)
 
-# Session configuration
+# Session and security configuration
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    SESSION_FILE_DIR='flask_session',  # Directory for session files
-    SESSION_FILE_THRESHOLD=500,  # Maximum number of session files
-    SESSION_USE_SIGNER=True,  # Sign the session cookie
-    SESSION_KEY_PREFIX='session:',  # Session key prefix
-    SESSION_COOKIE_NAME='session_id',  # Session cookie name
-    SESSION_COOKIE_SECURE=False,  # Set to True in production
-    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
-    SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
-    WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
-    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
-    DEBUG=True
+    SESSION_FILE_DIR='/tmp/flask_session',  # Use /tmp for deployment compatibility
+    SESSION_FILE_THRESHOLD=500,
+    SESSION_USE_SIGNER=True,
+    SESSION_KEY_PREFIX='session:',
+    SESSION_COOKIE_NAME='session_id',
+    SESSION_COOKIE_SECURE=True,  # Enable for HTTPS
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    WTF_CSRF_ENABLED=True,
+    WTF_CSRF_SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
+    WTF_CSRF_TIME_LIMIT=None,
+    WTF_CSRF_SSL_STRICT=True,  # Enable for deployment
+    WTF_CSRF_CHECK_DEFAULT=True,
+    DEBUG=False  # Disable debug in production
 )
 
-# Initialize session after config
-Session(app)
+# Ensure session directory exists
+os.makedirs('/tmp/flask_session', exist_ok=True)
 
-# Initialize CSRF protection after session
-csrf = CSRFProtect(app)
+# Initialize session and CSRF protection
+Session(app)
+csrf = CSRFProtect()
 csrf.init_app(app)
+
+# Add CSRF error handler
+@app.errorhandler(CSRFError)
+def handle_csrf_error(e):
+    return jsonify({
+        'error': 'CSRF token validation failed. Please refresh the page and try again.'
+    }), 400
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -311,6 +322,7 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
+
 
 
 @app.route('/authorization')
