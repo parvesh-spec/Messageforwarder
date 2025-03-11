@@ -11,13 +11,12 @@ import asyncio
 from functools import wraps
 import psycopg2
 from psycopg2.extras import DictCursor
-from psycopg2.pool import ThreadedConnectionPool
-import psycopg2.extensions
+from psycopg2 import pool
 from flask_session import Session
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
-from flask_wtf.csrf import CSRFProtect, CSRFError
+from flask_wtf.csrf import CSRFProtect
 
 # Set up logging
 logging.basicConfig(
@@ -26,91 +25,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Flask application
+# Configure Flask application
 app = Flask(__name__)
 
-# Global database pool variable
-db_pool = None
-
-def get_db_pool():
-    """Get the global database pool, initializing it if necessary"""
-    global db_pool
-    if db_pool is None:
-        try:
-            db_pool = ThreadedConnectionPool(
-                minconn=1,
-                maxconn=10,
-                dsn=os.getenv('DATABASE_URL'),
-                sslmode='require'  # Enable SSL mode
-            )
-            logger.info("✅ Database pool initialized successfully")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize database pool: {str(e)}")
-            raise
-    return db_pool
-
-@contextmanager
-def get_db():
-    """Get a database connection from the pool"""
-    conn = None
-    try:
-        pool = get_db_pool()
-        conn = pool.getconn()
-        conn.set_session(autocommit=True)
-        yield conn
-    except psycopg2.OperationalError as e:
-        logger.error(f"❌ Database connection error: {str(e)}")
-        global db_pool
-        if db_pool:
-            try:
-                db_pool.closeall()
-            except:
-                pass
-            db_pool = None
-        raise
-    finally:
-        if conn and db_pool:
-            try:
-                db_pool.putconn(conn)
-            except:
-                pass
-
-# Session and security configuration
+# Session configuration
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    SESSION_FILE_DIR='/tmp/flask_session',  # Use /tmp for deployment compatibility
-    SESSION_FILE_THRESHOLD=500,
-    SESSION_USE_SIGNER=True,
-    SESSION_KEY_PREFIX='session:',
-    SESSION_COOKIE_NAME='session_id',
-    SESSION_COOKIE_SECURE=True,  # Enable for HTTPS
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax',
-    WTF_CSRF_ENABLED=True,
-    WTF_CSRF_SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
-    WTF_CSRF_TIME_LIMIT=None,
-    WTF_CSRF_SSL_STRICT=True,  # Enable for deployment
-    WTF_CSRF_CHECK_DEFAULT=True,
-    DEBUG=False  # Disable debug in production
+    SESSION_FILE_DIR='flask_session',  # Directory for session files
+    SESSION_FILE_THRESHOLD=500,  # Maximum number of session files
+    SESSION_USE_SIGNER=True,  # Sign the session cookie
+    SESSION_KEY_PREFIX='session:',  # Session key prefix
+    SESSION_COOKIE_NAME='session_id',  # Session cookie name
+    SESSION_COOKIE_SECURE=False,  # Set to True in production
+    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
+    SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
+    WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
+    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
+    DEBUG=True
 )
 
-# Ensure session directory exists
-os.makedirs('/tmp/flask_session', exist_ok=True)
-
-# Initialize session and CSRF protection
+# Initialize session after config
 Session(app)
-csrf = CSRFProtect()
-csrf.init_app(app)
 
-# Add CSRF error handler
-@app.errorhandler(CSRFError)
-def handle_csrf_error(e):
-    return jsonify({
-        'error': 'CSRF token validation failed. Please refresh the page and try again.'
-    }), 400
+# Initialize CSRF protection after session
+csrf = CSRFProtect(app)
+csrf.init_app(app)
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -206,6 +148,23 @@ def async_route(f):
             return jsonify({'error': str(e)}), 500
     return wrapped
 
+# Database pool for connections
+db_pool = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dsn=os.getenv('DATABASE_URL')
+)
+
+# Database connection context manager
+@contextmanager
+def get_db():
+    conn = db_pool.getconn()
+    try:
+        conn.autocommit = True
+        yield conn
+    finally:
+        db_pool.putconn(conn)
+
 # Authentication decorator
 def login_required(f):
     @wraps(f)
@@ -235,37 +194,26 @@ def login_post():
     email = form.email.data
     password = form.password.data
 
-    try:
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-                user = cur.fetchone()
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+            user = cur.fetchone()
 
-                if not user or not check_password_hash(user['password_hash'], password):
-                    form.email.errors.append('Please check your email and password')
-                    return render_template('auth/login.html', form=form)
+            if not user or not check_password_hash(user['password_hash'], password):
+                form.email.errors.append('Please check your email and password')
+                return render_template('auth/login.html', form=form)
 
-                # Update login status
-                cur.execute("""
-                    UPDATE users 
-                    SET is_logged_in = true,
-                        last_login_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                """, (user['id'],))
+            # Update login status
+            cur.execute("""
+                UPDATE users 
+                SET is_logged_in = true,
+                    last_login_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (user['id'],))
 
-                session['user_id'] = user['id']
-                session['telegram_id'] = user['telegram_id']
-                return redirect(url_for('dashboard'))
-
-    except psycopg2.OperationalError as e:
-        logger.error(f"❌ Database error in login: {str(e)}")
-        form.email.errors.append('Database connection error. Please try again.')
-        return render_template('auth/login.html', form=form)
-    except Exception as e:
-        logger.error(f"❌ Login error: {str(e)}")
-        form.email.errors.append('An error occurred. Please try again.')
-        return render_template('auth/login.html', form=form)
-
+            session['user_id'] = user['id']
+            session['telegram_id'] = user['telegram_id']
+            return redirect(url_for('dashboard'))
 
 @app.route('/register')
 def register():
@@ -363,7 +311,6 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
-
 
 
 @app.route('/authorization')
@@ -588,37 +535,9 @@ async def verify_otp():
                 me = await client.get_me()
                 session_string = client.session.save()
 
-                # Check if this Telegram account is already connected to another user
+                # Update database
                 with get_db() as conn:
                     with conn.cursor() as cur:
-                        # First check if this Telegram ID exists
-                        cur.execute("""
-                            SELECT id, telegram_id 
-                            FROM users 
-                            WHERE telegram_id = %s
-                        """, (me.id,))
-                        existing_user = cur.fetchone()
-
-                        if existing_user and existing_user[0] != session.get('user_id'):
-                            # Disconnect from old user first
-                            cur.execute("""
-                                UPDATE users 
-                                SET telegram_id = NULL,
-                                    telegram_username = NULL,
-                                    auth_date = NULL,
-                                    session_string = NULL
-                                WHERE telegram_id = %s
-                            """, (me.id,))
-                            logger.info(f"✅ Disconnected Telegram from old user {existing_user[0]}")
-
-                            # Also deactivate any existing forwarding configs
-                            cur.execute("""
-                                UPDATE forwarding_configs
-                                SET is_active = false
-                                WHERE user_id = %s
-                            """, (existing_user[0],))
-
-                        # Now connect to new user
                         cur.execute("""
                             UPDATE users 
                             SET telegram_id = %s,
@@ -651,7 +570,7 @@ async def verify_otp():
 
     except Exception as e:
         logger.error(f"❌ Verification error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An unexpected error occurred'}), 500
 
 @app.before_request
 def check_session_expiry():
@@ -928,7 +847,7 @@ def get_replacements():
                 replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
                 return jsonify(replacements)
     except Exception as e:
-        logger.error(f"❌Get replacements error: {str(e)}")
+        logger.error(f"❌ Get replacements error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/add-replacement', methods=['POST'])
@@ -1070,6 +989,4 @@ def format_datetime(timestamp):
     return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
 if __name__ == '__main__':
-    # Initialize the database pool here, before the app starts running
-    get_db_pool()  
     app.run(host='0.0.0.0', port=5000)

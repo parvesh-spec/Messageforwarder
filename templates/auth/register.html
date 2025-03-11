@@ -12,9 +12,8 @@
         {% endif %}
     {% endwith %}
 
-    <form method="POST" action="{{ url_for('register_post') }}" id="register-form">
+    <form method="POST" action="{{ url_for('register_post') }}">
         {{ form.csrf_token }}
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-group">
             <label>Email Address</label>
             {{ form.email(class="form-control") }}
@@ -55,14 +54,6 @@
             <button type="submit" class="btn btn-primary">Register</button>
         </div>
     </form>
-
-    <script>
-    document.getElementById('register-form').addEventListener('submit', function(e) {
-        // Refresh CSRF token before submission
-        const csrfToken = document.querySelector('input[name="csrf_token"]').value;
-        this.querySelector('input[name="csrf_token"]').value = csrfToken;
-    });
-    </script>
 
     <div class="auth-links">
         <p>Already have an account? <a href="{{ url_for('login') }}">Login here</a></p>
