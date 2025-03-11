@@ -11,7 +11,8 @@ import asyncio
 from functools import wraps
 import psycopg2
 from psycopg2.extras import DictCursor
-from psycopg2 import pool
+from psycopg2.pool import ThreadedConnectionPool
+import psycopg2.extensions
 from flask_session import Session
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -25,8 +26,54 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configure Flask application
+# Initialize Flask application
 app = Flask(__name__)
+
+# Global database pool variable
+db_pool = None
+
+def get_db_pool():
+    """Get the global database pool, initializing it if necessary"""
+    global db_pool
+    if db_pool is None:
+        try:
+            db_pool = ThreadedConnectionPool(
+                minconn=1,
+                maxconn=10,
+                dsn=os.getenv('DATABASE_URL'),
+                sslmode='require'  # Enable SSL mode
+            )
+            logger.info("✅ Database pool initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize database pool: {str(e)}")
+            raise
+    return db_pool
+
+@contextmanager
+def get_db():
+    """Get a database connection from the pool"""
+    conn = None
+    try:
+        pool = get_db_pool()
+        conn = pool.getconn()
+        conn.set_session(autocommit=True)
+        yield conn
+    except psycopg2.OperationalError as e:
+        logger.error(f"❌ Database connection error: {str(e)}")
+        global db_pool
+        if db_pool:
+            try:
+                db_pool.closeall()
+            except:
+                pass
+            db_pool = None
+        raise
+    finally:
+        if conn and db_pool:
+            try:
+                db_pool.putconn(conn)
+            except:
+                pass
 
 # Session and security configuration
 app.config.update(
@@ -159,23 +206,6 @@ def async_route(f):
             return jsonify({'error': str(e)}), 500
     return wrapped
 
-# Database pool for connections
-db_pool = psycopg2.pool.ThreadedConnectionPool(
-    minconn=1,
-    maxconn=10,
-    dsn=os.getenv('DATABASE_URL')
-)
-
-# Database connection context manager
-@contextmanager
-def get_db():
-    conn = db_pool.getconn()
-    try:
-        conn.autocommit = True
-        yield conn
-    finally:
-        db_pool.putconn(conn)
-
 # Authentication decorator
 def login_required(f):
     @wraps(f)
@@ -205,26 +235,37 @@ def login_post():
     email = form.email.data
     password = form.password.data
 
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-            user = cur.fetchone()
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+                user = cur.fetchone()
 
-            if not user or not check_password_hash(user['password_hash'], password):
-                form.email.errors.append('Please check your email and password')
-                return render_template('auth/login.html', form=form)
+                if not user or not check_password_hash(user['password_hash'], password):
+                    form.email.errors.append('Please check your email and password')
+                    return render_template('auth/login.html', form=form)
 
-            # Update login status
-            cur.execute("""
-                UPDATE users 
-                SET is_logged_in = true,
-                    last_login_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-            """, (user['id'],))
+                # Update login status
+                cur.execute("""
+                    UPDATE users 
+                    SET is_logged_in = true,
+                        last_login_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (user['id'],))
 
-            session['user_id'] = user['id']
-            session['telegram_id'] = user['telegram_id']
-            return redirect(url_for('dashboard'))
+                session['user_id'] = user['id']
+                session['telegram_id'] = user['telegram_id']
+                return redirect(url_for('dashboard'))
+
+    except psycopg2.OperationalError as e:
+        logger.error(f"❌ Database error in login: {str(e)}")
+        form.email.errors.append('Database connection error. Please try again.')
+        return render_template('auth/login.html', form=form)
+    except Exception as e:
+        logger.error(f"❌ Login error: {str(e)}")
+        form.email.errors.append('An error occurred. Please try again.')
+        return render_template('auth/login.html', form=form)
+
 
 @app.route('/register')
 def register():
@@ -878,16 +919,16 @@ def add_replacement():
 
         # Validate input lengths
         if len(original) > 500 or len(replacement) > 500:
-            return jsonify({'error': 'Text too long (max 500 characters)'}), 400
+            return jsonify({'error': 'Text toolong (max 500 characters)'}), 400
 
         with get_db() as conn:
             with conn.cursor() as cur:
                 try:
                     # Check if replacement already exists
                     cur.execute("""
-                        SELECT COUNT(*) 
+                        SELECT` COUNT(*) 
                         FROM text_replacements 
-                        WHERE user_id = %s AND original_text = %s
+                        WHERE user_id = %s AND original_text =%s
                     """, (user_id, original))
 
                     if cur.fetchone()[0] > 0:
@@ -1001,4 +1042,6 @@ def format_datetime(timestamp):
     return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
 
 if __name__ == '__main__':
+    # Initialize the database pool here, before the app starts running
+    get_db_pool()  
     app.run(host='0.0.0.0', port=5000)
