@@ -16,7 +16,7 @@ from flask_session import Session
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
-from flask_wtf.csrf import CSRFProtect
+from flask_wtf.csrf import CSRFProtect, CSRFError
 
 # Set up logging
 logging.basicConfig(
@@ -38,6 +38,11 @@ app.config.update(
     SESSION_COOKIE_SECURE=False,  # Set to True in production
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
+    WTF_CSRF_ENABLED=True,
+    WTF_CSRF_SECRET_KEY=os.environ.get('CSRF_SECRET_KEY', os.urandom(24)),
+    WTF_CSRF_METHODS=['POST', 'PUT', 'PATCH', 'DELETE'],
+    WTF_CSRF_FIELD_NAME='csrf_token',
+    WTF_CSRF_CHECK_DEFAULT=True,
     DEBUG=True
 )
 
@@ -182,11 +187,16 @@ def login_post():
     try:
         form = LoginForm()
         if not form.validate_on_submit():
-            if 'csrf_token' in form.errors:
-                # Handle CSRF token errors separately
-                logger.error("❌ CSRF token validation failed")
-                return render_template('auth/login.html', form=form, 
-                    error="Session expired. Please refresh the page and try again.")
+            if form.errors:
+                # Handle specific form errors
+                error_messages = []
+                for field, errors in form.errors.items():
+                    if field == 'csrf_token':
+                        return render_template('auth/login.html', form=form,
+                            error="सेशन एक्सपायर हो गया है। कृपया पेज को रिफ्रेश करें।")
+                    error_messages.extend(errors)
+                return render_template('auth/login.html', form=form,
+                    error=", ".join(error_messages))
             return render_template('auth/login.html', form=form)
 
         email = form.email.data
@@ -198,8 +208,8 @@ def login_post():
                 user = cur.fetchone()
 
                 if not user or not check_password_hash(user['password_hash'], password):
-                    form.email.errors.append('Please check your email and password')
-                    return render_template('auth/login.html', form=form)
+                    return render_template('auth/login.html', form=form,
+                        error="कृपया अपना ईमेल और पासवर्ड चेक करें")
 
                 # Update login status
                 cur.execute("""
@@ -209,14 +219,18 @@ def login_post():
                     WHERE id = %s
                 """, (user['id'],))
 
+                # Set session data
+                session.clear()  # Clear any existing session data
                 session['user_id'] = user['id']
                 session['telegram_id'] = user['telegram_id']
+                session.permanent = True
+
                 return redirect(url_for('dashboard'))
 
     except Exception as e:
         logger.error(f"❌ Login error: {str(e)}")
-        return render_template('auth/login.html', form=form, 
-            error="An error occurred. Please try again.")
+        return render_template('auth/login.html', form=form,
+            error="एक त्रुटि हुई है। कृपया दोबारा कोशिश करें।")
 
 @app.route('/register')
 def register():
@@ -225,29 +239,52 @@ def register():
 
 @app.route('/register', methods=['POST'])
 def register_post():
-    form = RegisterForm()
-    if not form.validate_on_submit():
-        return render_template('auth/register.html', form=form)
+    try:
+        form = RegisterForm()
+        if not form.validate_on_submit():
+            if form.errors:
+                # Handle specific form errors
+                error_messages = []
+                for field, errors in form.errors.items():
+                    if field == 'csrf_token':
+                        return render_template('auth/register.html', form=form,
+                            error="सेशन एक्सपायर हो गया है। कृपया पेज को रिफ्रेश करें।")
+                    error_messages.extend(errors)
+                return render_template('auth/register.html', form=form,
+                    error=", ".join(error_messages))
+            return render_template('auth/register.html', form=form)
 
-    email = form.email.data
-    password = form.password.data
+        email = form.email.data
+        password = form.password.data
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-            if cur.fetchone():
-                form.email.errors.append('Email already registered')
-                return render_template('auth/register.html', form=form)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Check if email already exists
+                cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+                if cur.fetchone():
+                    return render_template('auth/register.html', form=form,
+                        error="यह ईमेल पहले से रजिस्टर्ड है")
 
-            cur.execute("""
-                INSERT INTO users (email, password_hash)
-                VALUES (%s, %s)
-                RETURNING id
-            """, (email, generate_password_hash(password)))
+                # Create new user
+                cur.execute("""
+                    INSERT INTO users (email, password_hash)
+                    VALUES (%s, %s)
+                    RETURNING id
+                """, (email, generate_password_hash(password)))
 
-            user_id = cur.fetchone()[0]
-            session['user_id'] = user_id
-            return redirect(url_for('dashboard'))
+                user_id = cur.fetchone()[0]
+
+                # Set session data
+                session.clear()  # Clear any existing session data
+                session['user_id'] = user_id
+                session.permanent = True
+
+                return redirect(url_for('dashboard'))
+
+    except Exception as e:
+        logger.error(f"❌ Register error: {str(e)}")
+        return render_template('auth/register.html', form=form,
+            error="एक त्रुटि हुई है। कृपया दोबारा कोशिश करें।")
 
 @app.route('/logout')
 def logout():
@@ -314,6 +351,7 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
+
 
 
 @app.route('/authorization')
@@ -881,7 +919,7 @@ def add_replacement():
                         WHERE user_id = %s AND original_text = %s
                     """, (user_id, original))
 
-                    if cur.fetchone()[0] > 0:
+                    if cur.fetchone()[0]> 0:
                         return jsonify({'error': 'This replacement already exists'}), 400
 
                     # Add new replacement
@@ -990,6 +1028,13 @@ def handle_db_error(e, operation):
 @app.template_filter('datetime')
 def format_datetime(timestamp):
     return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+
+# Error handler for CSRF errors
+@app.errorhandler(CSRFError)
+def handle_csrf_error(e):
+    logger.error(f"❌ CSRF error: {str(e)}")
+    return render_template('auth/error.html',
+        error="आपका सेशन एक्सपायर हो गया है। कृपया पेज को रिफ्रेश करें और दोबारा कोशिश करें।"), 400
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)

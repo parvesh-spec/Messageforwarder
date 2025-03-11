@@ -1,0 +1,13 @@
+{% extends "layouts/base.html" %}
+
+{% block auth_content %}
+<div class="auth-box">
+    <h2>Error</h2>
+    <div class="alert alert-error">
+        {{ error }}
+    </div>
+    <div class="auth-links">
+        <a href="{{ url_for('login') }}" class="btn btn-primary">वापस लॉगिन पेज पर जाएं</a>
+    </div>
+</div>
+{% endblock %}
