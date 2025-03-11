@@ -17,15 +17,7 @@
     {% endif %}
 
     <form method="POST" action="{{ url_for('login_post') }}">
-        {{ form.csrf_token }}
-        <!-- Debug info - Remove in production -->
-        {% if debug %}
-        <div style="display: none;">
-            <p>CSRF Token: {{ form.csrf_token._value() }}</p>
-            <p>Session Token: {{ session.get('csrf_token') }}</p>
-        </div>
-        {% endif %}
-
+        {{ form.hidden_tag() }}
         <div class="form-group">
             <label>Email Address</label>
             {{ form.email(class="form-control") }}

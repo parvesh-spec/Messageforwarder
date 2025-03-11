@@ -42,12 +42,14 @@ app.config.update(
     SESSION_COOKIE_SECURE=False,  # Set to True in production
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
-    SESSION_COOKIE_NAME='session',
+    WTF_CSRF_ENABLED=True,
+    WTF_CSRF_CHECK_DEFAULT=True,
     WTF_CSRF_SECRET_KEY=os.environ.get('FLASK_SECRET_KEY'),
-    WTF_CSRF_TIME_LIMIT=3600,  # 1 hour
-    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
     DEBUG=True
 )
+
+# Create session directory if it doesn't exist
+os.makedirs(app.config['SESSION_FILE_DIR'], exist_ok=True)
 
 # Initialize Flask Session first
 Session(app)
@@ -55,26 +57,6 @@ Session(app)
 # Initialize CSRF Protection after Session
 csrf = CSRFProtect()
 csrf.init_app(app)
-
-# Create session directory if it doesn't exist
-os.makedirs(app.config['SESSION_FILE_DIR'], exist_ok=True)
-
-@app.before_request
-def csrf_protect():
-    """Extra CSRF protection and logging"""
-    if request.method == "POST":
-        csrf_token = session.get('csrf_token')
-        form_token = request.form.get('csrf_token')
-
-        logger.debug(f"Session CSRF token: {csrf_token}")
-        logger.debug(f"Form CSRF token: {form_token}")
-
-        if not csrf_token or not form_token or csrf_token != form_token:
-            logger.error("CSRF token validation failed")
-            logger.error(f"Session token: {csrf_token}")
-            logger.error(f"Form token: {form_token}")
-            return jsonify({'error': 'CSRF token mismatch'}), 400
-
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -205,16 +187,19 @@ def login():
     if session.get('user_id'):
         return redirect(url_for('dashboard'))
     form = LoginForm()
+    logger.debug("Generated new login form with CSRF token")
     return render_template('auth/login.html', form=form)
 
 @app.route('/login', methods=['POST'])
 def login_post():
     try:
         form = LoginForm()
+        logger.debug(f"Processing login form with CSRF token: {form.csrf_token._value()}")
+
         if not form.validate_on_submit():
             if 'csrf_token' in form.errors:
-                # Handle CSRF token errors separately
                 logger.error("❌ CSRF token validation failed")
+                logger.debug(f"Form errors: {form.errors}")
                 return render_template('auth/login.html', form=form, 
                     error="Session expired. Please refresh the page and try again.")
             return render_template('auth/login.html', form=form)
@@ -239,8 +224,11 @@ def login_post():
                     WHERE id = %s
                 """, (user['id'],))
 
+                session.clear()  # Clear any existing session data
                 session['user_id'] = user['id']
                 session['telegram_id'] = user['telegram_id']
+                session.permanent = True
+                logger.info(f"✅ User {user['id']} logged in successfully")
                 return redirect(url_for('dashboard'))
 
     except Exception as e:
@@ -344,7 +332,6 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
-
 
 
 @app.route('/authorization')
