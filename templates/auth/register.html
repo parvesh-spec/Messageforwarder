@@ -55,23 +55,6 @@
         </div>
     </form>
 
-    <script>
-    document.getElementById('register-form')?.addEventListener('submit', function(e) {
-        // Ensure CSRF token is fresh before submission
-        fetch('/csrf-token')
-            .then(response => response.json())
-            .then(data => {
-                document.querySelector('input[name="csrf_token"]').value = data.csrf_token;
-                this.submit();
-            })
-            .catch(error => {
-                console.error('Error refreshing CSRF token:', error);
-                alert('Error submitting form. Please try again.');
-            });
-        e.preventDefault();
-    });
-    </script>
-
     <div class="auth-links">
         <p>Already have an account? <a href="{{ url_for('login') }}">Login here</a></p>
     </div>
