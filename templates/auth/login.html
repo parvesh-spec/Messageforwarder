@@ -12,12 +12,8 @@
         {% endif %}
     {% endwith %}
 
-    {% if error %}
-        <div class="alert alert-error">{{ error }}</div>
-    {% endif %}
-
     <form method="POST" action="{{ url_for('login_post') }}">
-        {{ form.hidden_tag() }}
+        {{ form.csrf_token }}
         <div class="form-group">
             <label>Email Address</label>
             {{ form.email(class="form-control") }}

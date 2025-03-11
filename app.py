@@ -28,13 +28,9 @@ logger = logging.getLogger(__name__)
 # Configure Flask application
 app = Flask(__name__)
 
-# Generate a secure secret key if not set
-if not os.environ.get('FLASK_SECRET_KEY'):
-    os.environ['FLASK_SECRET_KEY'] = os.urandom(24).hex()
-
 # Session configuration
 app.config.update(
-    SECRET_KEY=os.environ.get('FLASK_SECRET_KEY'),
+    SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
@@ -42,19 +38,11 @@ app.config.update(
     SESSION_COOKIE_SECURE=False,  # Set to True in production
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
-    WTF_CSRF_ENABLED=True,
-    WTF_CSRF_CHECK_DEFAULT=True,
-    WTF_CSRF_SECRET_KEY=os.environ.get('FLASK_SECRET_KEY'),
     DEBUG=True
 )
 
-# Create session directory if it doesn't exist
-os.makedirs(app.config['SESSION_FILE_DIR'], exist_ok=True)
-
-# Initialize Flask Session first
+# Initialize session and CSRF protection
 Session(app)
-
-# Initialize CSRF Protection after Session
 csrf = CSRFProtect()
 csrf.init_app(app)
 
@@ -152,69 +140,22 @@ def async_route(f):
             return jsonify({'error': str(e)}), 500
     return wrapped
 
-# Configure database connection pool with retries
-def get_db_pool():
-    """Create database connection pool with retries"""
-    max_retries = 3
-    retry_count = 0
+# Database pool for connections
+db_pool = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dsn=os.getenv('DATABASE_URL')
+)
 
-    while retry_count < max_retries:
-        try:
-            return psycopg2.pool.ThreadedConnectionPool(
-                minconn=1,
-                maxconn=10,
-                dsn=os.getenv('DATABASE_URL'),
-                connect_timeout=3,
-                keepalives=1,
-                keepalives_idle=30,
-                keepalives_interval=10,
-                keepalives_count=5
-            )
-        except psycopg2.Error as e:
-            logger.error(f"❌ Database connection attempt {retry_count + 1} failed: {str(e)}")
-            retry_count += 1
-            if retry_count == max_retries:
-                raise
-            time.sleep(1)  # Wait before retrying
-
-# Initialize database pool
-try:
-    db_pool = get_db_pool()
-    logger.info("✅ Database pool initialized successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to initialize database pool: {str(e)}")
-    db_pool = None
-
+# Database connection context manager
 @contextmanager
 def get_db():
-    """Get database connection with retry logic"""
-    max_retries = 3
-    retry_count = 0
-    conn = None
-
-    while retry_count < max_retries:
-        try:
-            conn = db_pool.getconn()
-            conn.autocommit = True
-            yield conn
-            return
-        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            logger.error(f"❌ Database operation attempt {retry_count + 1} failed: {str(e)}")
-            if conn:
-                try:
-                    db_pool.putconn(conn)
-                except:
-                    pass
-            retry_count += 1
-            if retry_count == max_retries:
-                raise
-            time.sleep(1)  # Wait before retrying
-        finally:
-            if conn:
-                try:
-                    db_pool.putconn(conn)
-                except:
-                    pass
+    conn = db_pool.getconn()
+    try:
+        conn.autocommit = True
+        yield conn
+    finally:
+        db_pool.putconn(conn)
 
 # Authentication decorator
 def login_required(f):
@@ -234,20 +175,16 @@ def login():
     if session.get('user_id'):
         return redirect(url_for('dashboard'))
     form = LoginForm()
-    logger.debug("Generated new login form with CSRF token")
     return render_template('auth/login.html', form=form)
 
 @app.route('/login', methods=['POST'])
 def login_post():
-    """Handle login form submission with retry logic"""
     try:
         form = LoginForm()
-        logger.debug(f"Processing login form with CSRF token: {form.csrf_token._value()}")
-
         if not form.validate_on_submit():
             if 'csrf_token' in form.errors:
+                # Handle CSRF token errors separately
                 logger.error("❌ CSRF token validation failed")
-                logger.debug(f"Form errors: {form.errors}")
                 return render_template('auth/login.html', form=form, 
                     error="Session expired. Please refresh the page and try again.")
             return render_template('auth/login.html', form=form)
@@ -255,35 +192,26 @@ def login_post():
         email = form.email.data
         password = form.password.data
 
-        try:
-            with get_db() as conn:
-                with conn.cursor(cursor_factory=DictCursor) as cur:
-                    cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-                    user = cur.fetchone()
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+                user = cur.fetchone()
 
-                    if not user or not check_password_hash(user['password_hash'], password):
-                        form.email.errors.append('Please check your email and password')
-                        return render_template('auth/login.html', form=form)
+                if not user or not check_password_hash(user['password_hash'], password):
+                    form.email.errors.append('Please check your email and password')
+                    return render_template('auth/login.html', form=form)
 
-                    # Update login status
-                    cur.execute("""
-                        UPDATE users 
-                        SET is_logged_in = true,
-                            last_login_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                    """, (user['id'],))
+                # Update login status
+                cur.execute("""
+                    UPDATE users 
+                    SET is_logged_in = true,
+                        last_login_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (user['id'],))
 
-                    session.clear()  # Clear any existing session data
-                    session['user_id'] = user['id']
-                    session['telegram_id'] = user['telegram_id']
-                    session.permanent = True
-                    logger.info(f"✅ User {user['id']} logged in successfully")
-                    return redirect(url_for('dashboard'))
-
-        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            logger.error(f"❌ Database error during login: {str(e)}")
-            return render_template('auth/login.html', form=form,
-                error="Connection error. Please try again.")
+                session['user_id'] = user['id']
+                session['telegram_id'] = user['telegram_id']
+                return redirect(url_for('dashboard'))
 
     except Exception as e:
         logger.error(f"❌ Login error: {str(e)}")
@@ -386,7 +314,6 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
-
 
 
 @app.route('/authorization')
