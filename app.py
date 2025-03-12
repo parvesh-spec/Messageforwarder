@@ -16,7 +16,7 @@ from flask_session import Session
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
-from flask_wtf.csrf import CSRFProtect
+from flask_wtf.csrf import CSRFProtect, CSRFError
 
 # Set up logging
 logging.basicConfig(
@@ -28,31 +28,39 @@ logger = logging.getLogger(__name__)
 # Configure Flask application
 app = Flask(__name__)
 
-# Session configuration
+# Enhanced Session configuration for production
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    SESSION_FILE_DIR='flask_session',  # Directory for session files
-    SESSION_FILE_THRESHOLD=500,  # Maximum number of session files
-    SESSION_USE_SIGNER=True,  # Sign the session cookie
-    SESSION_KEY_PREFIX='session:',  # Session key prefix
-    SESSION_COOKIE_NAME='session_id',  # Session cookie name
-    SESSION_COOKIE_SECURE=False,  # Set to True in production
-    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
-    SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
+    SESSION_FILE_DIR='flask_session',
+    SESSION_FILE_THRESHOLD=500,
+    SESSION_USE_SIGNER=True,
+    SESSION_KEY_PREFIX='session:',
+    SESSION_COOKIE_NAME='session_id',
+    SESSION_COOKIE_SECURE=True,  # Enable secure cookies in production
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Strict',  # Stricter CSRF protection
+    WTF_CSRF_ENABLED=True,
     WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
-    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
-    DEBUG=True
+    WTF_CSRF_SSL_STRICT=True,  # Enforce HTTPS for CSRF
+    DEBUG=False  # Disable debug mode in production
 )
 
-# Initialize session after config
+# Initialize Flask-Session
 Session(app)
 
-# Initialize CSRF protection after session
-csrf = CSRFProtect(app)
+# Initialize CSRF protection with custom config
+csrf = CSRFProtect()
 csrf.init_app(app)
+
+# Add CSRF error handler
+@app.errorhandler(CSRFError)
+def handle_csrf_error(e):
+    return jsonify({
+        'error': 'CSRF token validation failed. Please refresh the page and try again.'
+    }), 400
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -917,7 +925,7 @@ def remove_replacement():
         user_id = session.get('user_id')
 
         if not all([original, user_id]):
-            return jsonify({'error': 'Missing required data'}), 400
+            returnjsonify({'error': 'Missing required data'}), 400
 
         with get_db() as conn:
             with conn.cursor() as cur:
