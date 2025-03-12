@@ -591,7 +591,7 @@ async def verify_otp():
                 session_string = client.session.save()
 
                 with get_db() as conn:
-                    with conn.cursor() as cur:
+                    with conn.cursor(cursor_factory=DictCursor) as cur:
                         # Check if this Telegram account is already connected to the same user
                         cur.execute("""
                             SELECT user_id, is_active 
@@ -603,6 +603,7 @@ async def verify_otp():
                         if existing:
                             if existing['user_id'] == session.get('user_id'):
                                 if existing['is_active']:
+                                    logger.info(f"❌ Account {me.id} already connected to user {session.get('user_id')}")
                                     return jsonify({'error': 'This Telegram account is already connected to your account'}), 400
                                 else:
                                     # If account exists but is inactive, reactivate it
@@ -623,6 +624,7 @@ async def verify_otp():
                             else:
                                 # Check if the account is active for another user
                                 if existing['is_active']:
+                                    logger.info(f"❌ Account {me.id} connected to different user {existing['user_id']}")
                                     return jsonify({'error': 'This Telegram account is connected to another user'}), 400
 
                         # If no active connection exists, create a new one
@@ -888,7 +890,7 @@ def toggle_bot():
 
                         # Stop bot
                         import main
-                        main.remove_user_session(telegram_id)
+                        main.remove_user_session(telegramid)
 
                         return jsonify({
                             'status': False,
