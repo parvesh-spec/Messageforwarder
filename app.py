@@ -17,7 +17,6 @@ from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
 from flask_wtf.csrf import CSRFProtect
-from urllib.parse import urlparse
 
 # Set up logging
 logging.basicConfig(
@@ -43,8 +42,6 @@ app.config.update(
     SESSION_COOKIE_SECURE=False,  # Set to True in production
     SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
     SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
-    WTF_CSRF_ENABLED=True,  # Enable CSRF protection
-    WTF_CSRF_SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),  # Use same secret key
     WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
     WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
     DEBUG=True
@@ -54,7 +51,7 @@ app.config.update(
 Session(app)
 
 # Initialize CSRF protection after session
-csrf = CSRFProtect()
+csrf = CSRFProtect(app)
 csrf.init_app(app)
 
 class TelegramManager:
@@ -151,67 +148,22 @@ def async_route(f):
             return jsonify({'error': str(e)}), 500
     return wrapped
 
-# Database pool setup with better error handling and SSL config
-def setup_db_pool():
-    """Setup database connection pool with retries"""
-    max_retries = 3
-    retry_count = 0
+# Database pool for connections
+db_pool = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dsn=os.getenv('DATABASE_URL')
+)
 
-    while retry_count < max_retries:
-        try:
-            # Parse DATABASE_URL to add SSL mode if not present
-            db_url = os.getenv('DATABASE_URL')
-            if 'sslmode=' not in db_url:
-                db_url += '?sslmode=require'
-
-            return psycopg2.pool.ThreadedConnectionPool(
-                minconn=1,
-                maxconn=10,
-                dsn=db_url,
-                connect_timeout=3
-            )
-        except psycopg2.Error as e:
-            retry_count += 1
-            if retry_count == max_retries:
-                raise Exception(f"Failed to connect to database after {max_retries} attempts: {str(e)}")
-            time.sleep(1)  # Wait before retrying
-
-# Initialize database pool
-try:
-    db_pool = setup_db_pool()
-except Exception as e:
-    logger.error(f"❌ Database initialization error: {str(e)}")
-    raise
-
-# Enhanced database connection context manager
+# Database connection context manager
 @contextmanager
 def get_db():
-    global db_pool  # Moved global declaration to start of function
-    conn = None
+    conn = db_pool.getconn()
     try:
-        conn = db_pool.getconn()
         conn.autocommit = True
         yield conn
-    except psycopg2.OperationalError as e:
-        logger.error(f"❌ Database connection error: {str(e)}")
-        # Attempt to re-establish pool
-        try:
-            db_pool = setup_db_pool()
-            conn = db_pool.getconn()
-            conn.autocommit = True
-            yield conn
-        except Exception as e:
-            logger.error(f"❌ Database reconnection failed: {str(e)}")
-            raise
-    except Exception as e:
-        logger.error(f"❌ Database error: {str(e)}")
-        raise
     finally:
-        if conn:
-            try:
-                db_pool.putconn(conn)
-            except Exception as e:
-                logger.error(f"❌ Error returning connection to pool: {str(e)}")
+        db_pool.putconn(conn)
 
 # Authentication decorator
 def login_required(f):
@@ -921,10 +873,10 @@ def add_replacement():
                 try:
                     # Check if replacement already exists
                     cur.execute("""
-SELECT COUNT(*) 
-        FROM text_replacements 
-        WHERE user_id = %s AND original_text = %s
-    """, (user_id, original))
+                        SELECT COUNT(*) 
+                        FROM text_replacements 
+                        WHERE user_id = %s AND original_text = %s
+                    """, (user_id, original))
 
                     if cur.fetchone()[0] > 0:
                         return jsonify({'error': 'This replacement already exists'}), 400
