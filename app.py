@@ -818,12 +818,15 @@ def get_replacements():
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute("""
-                    SELECT original_text, replacement_text 
+                    SELECT original_text, replacement_text, is_active 
                     FROM text_replacements
                     WHERE user_id = %s
                     ORDER BY id DESC
                 """, (user_id,))
-                replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
+                replacements = {row['original_text']: {
+                    'text': row['replacement_text'],
+                    'is_active': row['is_active']
+                } for row in cur.fetchall()}
                 return jsonify(replacements)
     except Exception as e:
         logger.error(f"❌ Get replacements error: {str(e)}")
@@ -862,8 +865,8 @@ def add_replacement():
 
                     # Add new replacement
                     cur.execute("""
-                        INSERT INTO text_replacements (user_id, original_text, replacement_text)
-                        VALUES (%s, %s, %s)
+                        INSERT INTO text_replacements (user_id, original_text, replacement_text, is_active)
+                        VALUES (%s, %s, %s, true)
                         RETURNING id
                     """, (user_id, original, replacement))
 
@@ -942,6 +945,45 @@ def clear_replacements():
         return jsonify({'message': 'All replacements cleared'})
     except Exception as e:
         logger.error(f"❌ Clear replacements error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/toggle-replacement', methods=['POST'])
+@login_required
+def toggle_replacement():
+    try:
+        if not request.form:
+            return jsonify({'error': 'No form data received'}), 400
+
+        original = request.form.get('original')
+        user_id = session.get('user_id')
+
+        if not all([original, user_id]):
+            return jsonify({'error': 'Missing required data'}), 400
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Toggle is_active status
+                cur.execute("""
+                    UPDATE text_replacements 
+                    SET is_active = NOT is_active
+                    WHERE user_id = %s AND original_text = %s
+                    RETURNING id, is_active
+                """, (user_id, original))
+
+                result = cur.fetchone()
+                if result:
+                    logger.info(f"Toggled replacement {result[0]} for user {user_id} to {result[1]}")
+
+                    # Update bot replacements if running
+                    import main
+                    main.update_user_replacements(session.get('telegram_id'))
+
+                    return jsonify({'message': 'Replacement updated successfully'})
+                else:
+                    return jsonify({'error': 'Replacement not found'}), 404
+
+    except Exception as e:
+        logger.error(f"❌ Toggle replacement error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 def handle_db_error(e, operation):

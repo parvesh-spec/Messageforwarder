@@ -27,8 +27,18 @@
         {% if replacements %}
             {% for original, replacement in replacements.items() %}
             <div class="replacement-item">
-                <span>'{{ original }}' → '{{ replacement }}'</span>
-                <button onclick="removeReplacement('{{ original }}')" class="btn btn-danger">Remove</button>
+                <div class="replacement-content">
+                    <span class="replacement-text">'{{ original }}' → '{{ replacement.text }}'</span>
+                    <div class="replacement-actions">
+                        <label class="switch">
+                            <input type="checkbox" 
+                                   onchange="toggleReplacement('{{ original }}')" 
+                                   {% if replacement.is_active %}checked{% endif %}>
+                            <span class="slider round"></span>
+                        </label>
+                        <button onclick="removeReplacement('{{ original }}')" class="btn btn-danger">Remove</button>
+                    </div>
+                </div>
             </div>
             {% endfor %}
         {% else %}
@@ -48,7 +58,6 @@ async function addReplacement(event) {
     const button = form.querySelector('button[type="submit"]');
     const token = document.querySelector('input[name="csrf_token"]').value;
 
-    // Show loading state
     button.disabled = true;
     button.textContent = 'Adding...';
 
@@ -72,7 +81,6 @@ async function addReplacement(event) {
             throw new Error(data.error || `Request failed with status ${response.status}`);
         }
 
-        // Clear form and reload replacements on success
         form.reset();
         await loadReplacements();
         showMessage('Replacement added successfully');
@@ -81,6 +89,32 @@ async function addReplacement(event) {
     } finally {
         button.disabled = false;
         button.textContent = 'Add Replacement';
+    }
+}
+
+async function toggleReplacement(original) {
+    try {
+        const token = document.querySelector('input[name="csrf_token"]').value;
+        const response = await fetch('/toggle-replacement', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRFToken': token
+            },
+            body: `original=${encodeURIComponent(original)}`
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || `Request failed with status ${response.status}`);
+        }
+
+        showMessage('Replacement status updated successfully');
+    } catch (error) {
+        showMessage(error.message || 'Failed to update replacement status', true);
+        // Revert checkbox state on error
+        await loadReplacements();
     }
 }
 
@@ -159,8 +193,18 @@ async function loadReplacements() {
             const div = document.createElement('div');
             div.className = 'replacement-item';
             div.innerHTML = `
-                <span>'${original}' → '${replacement}'</span>
-                <button onclick="removeReplacement('${original}')" class="btn btn-danger">Remove</button>
+                <div class="replacement-content">
+                    <span class="replacement-text">'${original}' → '${replacement.text}'</span>
+                    <div class="replacement-actions">
+                        <label class="switch">
+                            <input type="checkbox" 
+                                   onchange="toggleReplacement('${original}')" 
+                                   ${replacement.is_active ? 'checked' : ''}>
+                            <span class="slider round"></span>
+                        </label>
+                        <button onclick="removeReplacement('${original}')" class="btn btn-danger">Remove</button>
+                    </div>
+                </div>
             `;
             list.appendChild(div);
         }
@@ -170,7 +214,6 @@ async function loadReplacements() {
 }
 
 function showMessage(message, isError = false) {
-    // Remove any existing message
     const existingMessage = document.querySelector('.alert');
     if (existingMessage) {
         existingMessage.remove();
@@ -223,15 +266,79 @@ document.getElementById('replacement-form').addEventListener('submit', addReplac
 }
 
 .replacement-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
     padding: 10px;
     border-bottom: 1px solid #eee;
 }
 
-.replacement-item:last-child {
-    border-bottom: none;
+.replacement-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.replacement-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.replacement-text {
+    flex: 1;
+}
+
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 24px;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #ccc;
+    transition: .4s;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: .4s;
+}
+
+input:checked + .slider {
+    background-color: #2196F3;
+}
+
+input:focus + .slider {
+    box-shadow: 0 0 1px #2196F3;
+}
+
+input:checked + .slider:before {
+    transform: translateX(24px);
+}
+
+.slider.round {
+    border-radius: 24px;
+}
+
+.slider.round:before {
+    border-radius: 50%;
 }
 
 .btn-danger {
