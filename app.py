@@ -320,15 +320,16 @@ def authorization():
     with get_db() as conn:
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
-                SELECT telegram_id, telegram_username, auth_date, session_string, is_primary
-                FROM telegram_accounts 
-                WHERE user_id = %s
-                ORDER BY is_primary DESC, created_at DESC
+                SELECT telegram_id, telegram_username, auth_date, session_string
+                FROM users 
+                WHERE id = %s
             """, (session.get('user_id'),))
-            accounts = cur.fetchall()
+            user = cur.fetchone()
 
     return render_template('dashboard/authorization.html',
-                         telegram_accounts=accounts)
+                         telegram_authorized=check_telegram_auth(user),
+                         telegram_username=user['telegram_username'] if user else None,
+                         telegram_auth_date=user['auth_date'] if user else None)
 
 @app.route('/replacements')
 @login_required
@@ -492,26 +493,30 @@ async def send_otp():
 async def verify_otp():
     """Verify OTP and complete Telegram authorization"""
     try:
+        # Get verification data
         stored_phone, stored_hash = telegram_manager.get_verification_data()
         phone = session.get('user_phone', stored_phone)
         phone_code_hash = session.get('phone_code_hash', stored_hash)
         otp = request.form.get('otp')
-        password = request.form.get('password')
+        password = request.form.get('password')  # Get 2FA password if provided
 
         if not all([phone, phone_code_hash, otp]):
             logger.error("❌ Missing verification data")
             return jsonify({'error': 'Please request a new OTP'}), 400
 
         try:
+            # Get client
             client = await telegram_manager.get_client()
             if not client:
                 raise Exception("Failed to initialize Telegram client")
             logger.info("✅ Got Telegram client for verification")
 
             try:
+                # First try to sign in with OTP
                 await client.sign_in(phone=phone, code=otp, phone_code_hash=phone_code_hash)
 
             except SessionPasswordNeededError:
+                # If 2FA is enabled and password is provided
                 if password:
                     try:
                         await client.sign_in(password=password)
@@ -525,35 +530,28 @@ async def verify_otp():
                         'message': 'Two-factor authentication required'
                     })
 
+            # Check if successfully authorized
             if await client.is_user_authorized():
                 me = await client.get_me()
                 session_string = client.session.save()
 
-                # Check if this Telegram account is already connected
+                # Update database
                 with get_db() as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
-                            SELECT user_id 
-                            FROM telegram_accounts 
-                            WHERE telegram_id = %s
-                        """, (me.id,))
-                        existing = cur.fetchone()
+                            UPDATE users 
+                            SET telegram_id = %s,
+                                telegram_username = %s,
+                                auth_date = CURRENT_TIMESTAMP,
+                                session_string = %s
+                            WHERE id = %s
+                        """, (me.id, me.username, session_string, session.get('user_id')))
 
-                        if existing:
-                            if existing[0] != session.get('user_id'):
-                                return jsonify({'error': 'This Telegram account is already connected to another user'}), 400
-                            return jsonify({'error': 'This Telegram account is already connected to your account'}), 400
-
-                        # Add new Telegram account
-                        cur.execute("""
-                            INSERT INTO telegram_accounts 
-                            (user_id, telegram_id, telegram_username, auth_date, session_string, is_primary)
-                            VALUES (%s, %s, %s, CURRENT_TIMESTAMP, %s, 
-                                   NOT EXISTS(SELECT 1 FROM telegram_accounts WHERE user_id = %s))
-                            RETURNING id
-                        """, (session.get('user_id'), me.id, me.username, session_string, session.get('user_id')))
-
+                # Update session
+                session['telegram_id'] = me.id
+                session['session_string'] = session_string
                 logger.info(f"✅ Successfully authorized user {me.id}")
+
                 return jsonify({'message': 'Authorization successful'})
             else:
                 logger.error("❌ Authorization failed")
@@ -572,111 +570,60 @@ async def verify_otp():
 
     except Exception as e:
         logger.error(f"❌ Verification error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An unexpected error occurred'}), 500
 
-@app.route('/disconnect-account', methods=['POST'])
-@login_required
-@async_route
-async def disconnect_account():
-    """Disconnect specific Telegram account"""
-    try:
+@app.before_request
+def check_session_expiry():
+    if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout', 'register', 'register_post', 'login_post']:
+        # Get current user data
         user_id = session.get('user_id')
-        telegram_id = request.form.get('telegram_id')
-
-        if not telegram_id:
-            return jsonify({'error': 'No Telegram account specified'}), 400
+        if not user_id:
+            session.clear()
+            return redirect(url_for('login'))
 
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
-                # Check if account exists and belongs to user
+                # Check user login status and telegram auth
                 cur.execute("""
-                    SELECT session_string, is_primary
-                    FROM telegram_accounts
-                    WHERE user_id = %s AND telegram_id = %s
-                """, (user_id, telegram_id))
-                account = cur.fetchone()
+                    SELECT is_logged_in, telegram_id, session_string 
+                    FROM users 
+                    WHERE id = %s
+                """, (user_id,))
+                user = cur.fetchone()
 
-                if not account:
-                    return jsonify({'error': 'Account not found'}), 404
+                if not user or not user['is_logged_in']:
+                    session.clear()
+                    return redirect(url_for('login'))
 
-                # Cannot disconnect primary account if it's the only account
-                if account['is_primary']:
-                    cur.execute("SELECT COUNT(*) FROM telegram_accounts WHERE user_id = %s", (user_id,))
-                    if cur.fetchone()[0] == 1:
-                        return jsonify({'error': 'Cannot disconnect the only account. Add another account first.'}), 400
+                # Update session with telegram data if available
+                if user['telegram_id'] and user['session_string']:
+                    session['telegram_id'] = user['telegram_id']
+                    session['session_string'] = user['session_string']
 
-                # Clean up any running sessions
-                import main
-                main.remove_user_session(telegram_id)
-
-                # Delete the account
-                cur.execute("""
-                    DELETE FROM telegram_accounts
-                    WHERE user_id = %s AND telegram_id = %s
-                """, (user_id, telegram_id))
-
-                # If this was the primary account, make the oldest remaining account primary
-                if account['is_primary']:
-                    cur.execute("""
-                        UPDATE telegram_accounts
-                        SET is_primary = true
-                        WHERE user_id = %s
-                        AND id = (
-                            SELECT id
-                            FROM telegram_accounts
-                            WHERE user_id = %s
-                            ORDER BY created_at ASC
-                            LIMIT 1
-                        )
-                    """, (user_id, user_id))
-
-        logger.info(f"✅ Successfully disconnected Telegram account {telegram_id} for user {user_id}")
-        return jsonify({'message': 'Successfully disconnected'})
-
-    except Exception as e:
-        logger.error(f"❌ Disconnect account error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/set-primary-account', methods=['POST'])
-@login_required
-def set_primary_account():
-    """Set a Telegram account as primary"""
+@app.route('/check-auth')
+def check_auth():
     try:
         user_id = session.get('user_id')
-        telegram_id = request.form.get('telegram_id')
+        if not user_id:
+            return jsonify({'authenticated': False}), 401
 
-        if not telegram_id:
-            return jsonify({'error': 'No Telegram account specified'}), 400
-
+        # Verify user is logged in in database
         with get_db() as conn:
             with conn.cursor() as cur:
-                # Verify account exists and belongs to user
                 cur.execute("""
-                    SELECT 1
-                    FROM telegram_accounts
-                    WHERE user_id = %s AND telegram_id = %s
-                """, (user_id, telegram_id))
+                    SELECT is_logged_in 
+                    FROM users 
+                    WHERE id = %s
+                """, (user_id,))
+                result = cur.fetchone()
+                if not result or not result[0]:
+                    session.clear()
+                    return jsonify({'authenticated': False}), 401
 
-                if not cur.fetchone():
-                    return jsonify({'error': 'Account not found'}), 404
-
-                # Update primary status
-                cur.execute("""
-                    UPDATE telegram_accounts
-                    SET is_primary = false
-                    WHERE user_id = %s;
-
-                    UPDATE telegram_accounts
-                    SET is_primary = true
-                    WHERE user_id = %s AND telegram_id = %s;
-                """, (user_id, user_id, telegram_id))
-
-        logger.info(f"✅ Successfully set account {telegram_id} as primary for user {user_id}")
-        return jsonify({'message': 'Successfully updated primary account'})
-
+        return jsonify({'authenticated': True})
     except Exception as e:
-        logger.error(f"❌ Set primary account error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"❌ Auth check error: {str(e)}")
+        return jsonify({'authenticated': False}), 401
 
 @app.route('/disconnect', methods=['POST'])
 @login_required

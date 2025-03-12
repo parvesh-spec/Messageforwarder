@@ -4,32 +4,19 @@
 <div class="dashboard-card">
     <h3>Telegram Authorization</h3>
 
-    <div class="connected-accounts">
-        <h4>Connected Accounts</h4>
-        {% if telegram_accounts %}
-            {% for account in telegram_accounts %}
-            <div class="account-card">
-                <div class="status-badge active">
-                    Connected as {{ account.telegram_username }}
-                    {% if account.is_primary %}
-                        <span class="primary-badge">Primary</span>
-                    {% endif %}
-                </div>
-                <div class="account-actions">
-                    {% if not account.is_primary %}
-                        <button onclick="setPrimaryAccount('{{ account.telegram_id }}')" class="btn btn-secondary">Set as Primary</button>
-                    {% endif %}
-                    <button onclick="disconnectAccount('{{ account.telegram_id }}')" class="btn btn-danger">Disconnect</button>
-                </div>
-            </div>
-            {% endfor %}
-        {% else %}
-            <p>No Telegram accounts connected.</p>
-        {% endif %}
+    {% if telegram_authorized %}
+    <div class="auth-status">
+        <div class="status-badge active">
+            Connected as {{ telegram_username }}
+        </div>
+        <p>Your Telegram account is connected and ready to use.</p>
+        <button onclick="disconnectTelegram()" class="btn btn-danger">Disconnect Telegram</button>
     </div>
+    {% else %}
+    <div class="auth-status">
+        <div class="status-badge inactive">Not Connected</div>
+        <p>Connect your Telegram account to start forwarding messages.</p>
 
-    <div class="add-account">
-        <h4>Add New Account</h4>
         <form id="telegram-auth-form" class="auth-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="form-group">
@@ -50,9 +37,10 @@
                 <small class="form-text">Enter your Telegram 2FA password if enabled</small>
             </div>
 
-            <button type="submit" class="btn btn-primary" id="auth-button">Connect New Account</button>
+            <button type="submit" class="btn btn-primary" id="auth-button">Send OTP</button>
         </form>
     </div>
+    {% endif %}
 </div>
 
 <script>
@@ -65,11 +53,13 @@ async function handleAuth(event) {
     const button = document.getElementById('auth-button');
     const token = document.querySelector('input[name="csrf_token"]').value;
 
+    // Validate phone number format
     if (!otp && !phone.match(/^\+[0-9]{12}$/)) {
         showMessage('Please enter a valid phone number in format: +91XXXXXXXXXX', true);
         return;
     }
 
+    // Show loading state
     button.disabled = true;
     button.classList.add('btn-loading');
     const originalText = button.textContent;
@@ -77,6 +67,7 @@ async function handleAuth(event) {
 
     try {
         if (!otp) {
+            // Send OTP
             const response = await fetch('/send-otp', {
                 method: 'POST',
                 headers: {
@@ -92,10 +83,15 @@ async function handleAuth(event) {
                 throw new Error(data.error || `Request failed with status ${response.status}`);
             }
 
+            if (data.error) {
+                throw new Error(data.error);
+            }
+
             document.getElementById('otp-group').style.display = 'block';
             button.textContent = 'Verify OTP';
             showMessage('OTP sent successfully');
         } else {
+            // Verify OTP
             const response = await fetch('/verify-otp', {
                 method: 'POST',
                 headers: {
@@ -123,6 +119,7 @@ async function handleAuth(event) {
         }
     } catch (error) {
         showMessage(error.message, true);
+        // Reset button state on error
         button.textContent = originalText;
     } finally {
         button.disabled = false;
@@ -130,19 +127,18 @@ async function handleAuth(event) {
     }
 }
 
-async function disconnectAccount(telegramId) {
-    if (!confirm('Are you sure you want to disconnect this Telegram account?')) {
+async function disconnectTelegram() {
+    if (!confirm('Are you sure you want to disconnect your Telegram account?')) {
         return;
     }
 
     try {
-        const response = await fetch('/disconnect-account', {
+        const response = await fetch('/disconnect', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
                 'X-CSRFToken': '{{ csrf_token() }}'
-            },
-            body: `telegram_id=${telegramId}`
+            }
         });
 
         if (!response.ok) {
@@ -156,33 +152,8 @@ async function disconnectAccount(telegramId) {
     }
 }
 
-async function setPrimaryAccount(telegramId) {
-    if (!confirm('Set this account as primary? This will be used as the default account for all operations.')) {
-        return;
-    }
-
-    try {
-        const response = await fetch('/set-primary-account', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'X-CSRFToken': '{{ csrf_token() }}'
-            },
-            body: `telegram_id=${telegramId}`
-        });
-
-        if (!response.ok) {
-            const data = await response.json();
-            throw new Error(data.error || `Request failed with status ${response.status}`);
-        }
-
-        window.location.reload();
-    } catch (error) {
-        alert('Failed to set primary account: ' + error.message);
-    }
-}
-
 function showMessage(message, isError = false) {
+    // Remove any existing message
     const existingMessage = document.querySelector('.alert');
     if (existingMessage) {
         existingMessage.remove();
@@ -195,6 +166,7 @@ function showMessage(message, isError = false) {
     const form = document.getElementById('telegram-auth-form');
     form.insertBefore(messageDiv, form.firstChild);
 
+    // Auto-hide message after 5 seconds
     setTimeout(() => messageDiv.remove(), 5000);
 }
 
@@ -202,34 +174,6 @@ document.getElementById('telegram-auth-form')?.addEventListener('submit', handle
 </script>
 
 <style>
-.connected-accounts {
-    margin-bottom: 30px;
-}
-
-.account-card {
-    background: #f5f5f5;
-    border-radius: 8px;
-    padding: 15px;
-    margin-bottom: 15px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-
-.account-actions {
-    display: flex;
-    gap: 10px;
-}
-
-.primary-badge {
-    background: #4CAF50;
-    color: white;
-    padding: 2px 8px;
-    border-radius: 12px;
-    font-size: 0.8em;
-    margin-left: 10px;
-}
-
 .btn-loading {
     opacity: 0.7;
     cursor: not-allowed;
@@ -294,22 +238,14 @@ document.getElementById('telegram-auth-form')?.addEventListener('submit', handle
     width: 100%;
 }
 
-.btn-secondary {
-    background-color: #757575;
-    color: white;
-}
-
 .btn-danger {
     background-color: #dc3545;
     color: white;
+    margin-top: 15px;
 }
 
 .btn-primary:hover {
     background-color: #1976d2;
-}
-
-.btn-secondary:hover {
-    background-color: #616161;
 }
 
 .btn-danger:hover {
