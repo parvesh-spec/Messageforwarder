@@ -42,6 +42,8 @@ app.config.update(
     SESSION_COOKIE_SECURE=False,  # Set to True in production
     SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
     SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
+    WTF_CSRF_ENABLED=True,  # Enable CSRF protection
+    WTF_CSRF_SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),  # Use same secret key
     WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
     WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
     DEBUG=True
@@ -51,7 +53,7 @@ app.config.update(
 Session(app)
 
 # Initialize CSRF protection after session
-csrf = CSRFProtect(app)
+csrf = CSRFProtect()
 csrf.init_app(app)
 
 class TelegramManager:

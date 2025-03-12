@@ -13,7 +13,7 @@
     {% endwith %}
 
     <form method="POST" action="{{ url_for('login_post') }}">
-        {{ form.csrf_token }}
+        {{ form.hidden_tag() }}
         <div class="form-group">
             <label>Email Address</label>
             {{ form.email(class="form-control") }}
