@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta
-from flask import Flask, render_template, request, session, redirect, url_for, jsonify
+from flask import Flask, render_template, request, session, redirect, url_for, jsonify, flash
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
 from telethon.sessions import StringSession
@@ -1051,6 +1051,40 @@ def handle_db_error(e, operation):
 @app.template_filter('datetime')
 def format_datetime(timestamp):
     return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+
+@app.route('/accounts')
+@login_required
+def accounts():
+    """Account management dashboard"""
+    try:
+        user_id = session.get('user_id')
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                # Get all telegram accounts with their forwarding configs
+                cur.execute("""
+                    SELECT 
+                        ta.*,
+                        fc.source_channel,
+                        fc.destination_channel,
+                        fc.is_active,
+                        COUNT(fl.id) as messages_count
+                    FROM telegram_accounts ta
+                    LEFT JOIN forwarding_configs fc ON fc.user_id = ta.user_id 
+                        AND fc.telegram_id = ta.telegram_id
+                    LEFT JOIN forwarding_logs fl ON fl.user_id = ta.user_id 
+                        AND fl.telegram_id = ta.telegram_id
+                    WHERE ta.user_id = %s
+                    GROUP BY ta.id, fc.id
+                    ORDER BY ta.is_primary DESC, ta.auth_date DESC
+                """, (user_id,))
+                accounts = cur.fetchall()
+
+                return render_template('dashboard/accounts.html', accounts=accounts)
+
+    except Exception as e:
+        logger.error(f"❌ Account dashboard error: {str(e)}")
+        flash('Failed to load accounts dashboard', 'error')
+        return redirect(url_for('dashboard'))
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)

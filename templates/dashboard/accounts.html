@@ -1,0 +1,269 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}Account Management{% endblock %}
+
+{% block content %}
+<div class="dashboard-card">
+    <div class="card-header">
+        <h3>Telegram Accounts</h3>
+        <a href="{{ url_for('authorization') }}" class="btn btn-primary">
+            <i class="fas fa-plus"></i> Add New Account
+        </a>
+    </div>
+
+    {% if accounts %}
+    <div class="accounts-grid">
+        {% for account in accounts %}
+        <div class="account-card {% if account.is_primary %}primary{% endif %}">
+            <div class="account-header">
+                <div class="account-info">
+                    <h4>{{ account.telegram_username }}</h4>
+                    {% if account.is_primary %}
+                    <span class="badge primary">Primary</span>
+                    {% endif %}
+                    <span class="badge {% if account.is_active %}active{% else %}inactive{% endif %}">
+                        {{ 'Active' if account.is_active else 'Inactive' }}
+                    </span>
+                </div>
+                <div class="account-meta">
+                    <small>Connected: {{ account.auth_date.strftime('%Y-%m-%d %H:%M') }}</small>
+                    <small>ID: {{ account.telegram_id }}</small>
+                </div>
+            </div>
+
+            <div class="account-config">
+                <div class="config-item">
+                    <label>Source Channel:</label>
+                    <span>{{ account.source_channel or 'Not configured' }}</span>
+                </div>
+                <div class="config-item">
+                    <label>Destination Channel:</label>
+                    <span>{{ account.destination_channel or 'Not configured' }}</span>
+                </div>
+                <div class="config-item">
+                    <label>Forwarded Messages:</label>
+                    <span>{{ account.messages_count or 0 }}</span>
+                </div>
+            </div>
+
+            <div class="account-actions">
+                {% if not account.is_primary %}
+                <button onclick="makePrimary('{{ account.telegram_id }}')" class="btn btn-secondary">
+                    Make Primary
+                </button>
+                {% endif %}
+                <a href="{{ url_for('forwarding', account_id=account.telegram_id) }}" class="btn btn-primary">
+                    Configure Forwarding
+                </a>
+                <button onclick="disconnectAccount('{{ account.telegram_id }}')" class="btn btn-danger">
+                    Disconnect
+                </button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <i class="fas fa-user-circle fa-3x"></i>
+        <p>No Telegram accounts connected yet.</p>
+        <a href="{{ url_for('authorization') }}" class="btn btn-primary">Connect Account</a>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+async function makePrimary(telegramId) {
+    if (!confirm('Make this account primary? The current primary account will become secondary.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/make-primary/${telegramId}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRFToken': '{{ csrf_token() }}'
+            }
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.error || `Request failed with status ${response.status}`);
+        }
+
+        window.location.reload();
+    } catch (error) {
+        alert('Failed to set as primary: ' + error.message);
+    }
+}
+
+async function disconnectAccount(telegramId) {
+    if (!confirm('Are you sure you want to disconnect this account? This will stop any active forwarding.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/disconnect/${telegramId}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRFToken': '{{ csrf_token() }}'
+            }
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.error || `Request failed with status ${response.status}`);
+        }
+
+        window.location.reload();
+    } catch (error) {
+        alert('Failed to disconnect account: ' + error.message);
+    }
+}
+</script>
+
+<style>
+.dashboard-card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    padding: 20px;
+}
+
+.card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.accounts-grid {
+    display: grid;
+    gap: 20px;
+}
+
+.account-card {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 20px;
+    background: white;
+    transition: all 0.3s ease;
+}
+
+.account-card.primary {
+    border-color: #2196f3;
+    background: #f8fbff;
+}
+
+.account-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 15px;
+}
+
+.account-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.account-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    color: #666;
+}
+
+.badge {
+    padding: 4px 8px;
+    border-radius: 12px;
+    font-size: 0.8em;
+    font-weight: 500;
+}
+
+.badge.primary {
+    background: #2196f3;
+    color: white;
+}
+
+.badge.active {
+    background: #4caf50;
+    color: white;
+}
+
+.badge.inactive {
+    background: #ff9800;
+    color: white;
+}
+
+.account-config {
+    display: grid;
+    gap: 10px;
+    margin: 15px 0;
+}
+
+.config-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid #eee;
+}
+
+.config-item:last-child {
+    border-bottom: none;
+}
+
+.config-item label {
+    color: #666;
+    font-weight: 500;
+}
+
+.account-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 15px;
+}
+
+.btn {
+    padding: 8px 16px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+.btn-primary {
+    background: #2196f3;
+    color: white;
+}
+
+.btn-secondary {
+    background: #f5f5f5;
+    color: #333;
+    border: 1px solid #ddd;
+}
+
+.btn-danger {
+    background: #dc3545;
+    color: white;
+}
+
+.btn:hover {
+    opacity: 0.9;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 40px;
+    color: #666;
+}
+
+.empty-state i {
+    margin-bottom: 20px;
+    color: #999;
+}
+</style>
+{% endblock %}

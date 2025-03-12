@@ -20,6 +20,11 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a href="{{ url_for('accounts') }}" class="nav-link {% if request.endpoint == 'accounts' %}active{% endif %}">
+                            <i class="fas fa-users"></i> Accounts
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a href="{{ url_for('authorization') }}" class="nav-link {% if request.endpoint == 'authorization' %}active{% endif %}">
                             <i class="fas fa-key"></i> Authorization
                         </a>
