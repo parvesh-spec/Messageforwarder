@@ -43,13 +43,13 @@ app.config.update(
     SESSION_FILE_DIR='flask_session',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
+    SESSION_COOKIE_SECURE=True,  # Use secure cookies
+    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
+    SESSION_COOKIE_SAMESITE='Strict',  # CSRF protection
+    WTF_CSRF_ENABLED=True,  # Enable CSRF protection
+    WTF_CSRF_SSL_STRICT=True,  # Require HTTPS for CSRF
     WTF_CSRF_TIME_LIMIT=3600,  # 1 hour token expiry
-    WTF_CSRF_SSL_STRICT=True,  # Enforce HTTPS
-    WTF_CSRF_ENABLED=True,
-    WTF_CSRF_METHODS={'POST', 'PUT', 'PATCH', 'DELETE'},
-    WTF_CSRF_HEADERS=['X-CSRFToken', 'X-CSRF-Token'],
-    WTF_CSRF_SECRET_KEY=os.environ.get('CSRF_SECRET_KEY', os.urandom(32)),
-    DEBUG=True
+    DEBUG=False  # Disable debug mode in production
 )
 
 # Initialize extensions
@@ -57,86 +57,32 @@ db = SQLAlchemy(app)
 Session(app)
 csrf = CSRFProtect(app)
 
-def generate_csrf_token():
-    """Generate a strong CSRF token with timestamp"""
-    timestamp = str(int(datetime.utcnow().timestamp()))
-    random_bytes = secrets.token_bytes(32)
-    message = timestamp.encode() + random_bytes
-
-    # Handle the secret key properly whether it's bytes or string
-    secret_key = app.config['WTF_CSRF_SECRET_KEY']
-    if isinstance(secret_key, str):
-        secret_key = secret_key.encode()
-
-    signature = hmac.new(
-        secret_key,
-        message,
-        hashlib.sha256
-    ).hexdigest()
-    token = f"{timestamp}.{signature}"
-    return token
-
-def verify_csrf_token(token):
-    """Verify CSRF token and check expiry"""
-    try:
-        timestamp, signature = token.split('.')
-        timestamp = int(timestamp)
-        now = int(datetime.utcnow().timestamp())
-
-        # Check token age
-        if now - timestamp > app.config['WTF_CSRF_TIME_LIMIT']:
-            logger.warning(f"CSRF token expired: {now - timestamp} seconds old")
-            return False
-
-        # Verify signature
-        message = str(timestamp).encode()
-
-        # Handle the secret key properly whether it's bytes or string
-        secret_key = app.config['WTF_CSRF_SECRET_KEY']
-        if isinstance(secret_key, str):
-            secret_key = secret_key.encode()
-
-        expected_signature = hmac.new(
-            secret_key,
-            message,
-            hashlib.sha256
-        ).hexdigest()
-
-        return hmac.compare_digest(signature, expected_signature)
-    except Exception as e:
-        logger.error(f"CSRF token verification failed: {str(e)}")
-        return False
-
-@app.before_request
-def validate_csrf():
-    """Validate CSRF token for unsafe methods"""
-    if request.method not in app.config['WTF_CSRF_METHODS']:
-        return
-
-    token = request.headers.get('X-CSRFToken') or request.form.get('csrf_token')
-    if not token:
-        logger.warning("CSRF token missing")
-        abort(400, "CSRF token missing")
-
-    if not verify_csrf_token(token):
-        logger.warning("CSRF token validation failed")
-        abort(400, "Invalid or expired CSRF token")
-
+# CSRF token handling
 @app.after_request
-def refresh_csrf_token(response):
-    """Refresh CSRF token after each request"""
+def add_csrf_token(response):
+    """Add CSRF token to response cookies"""
     if 'text/html' in response.content_type:
-        token = generate_csrf_token()
-        session['csrf_token'] = token
+        csrf_token = generate_csrf()
         response.set_cookie(
             'csrf_token',
-            token,
+            csrf_token,
             secure=True,
             httponly=True,
             samesite='Strict',
-            max_age=app.config['WTF_CSRF_TIME_LIMIT']
+            max_age=3600  # 1 hour expiry
         )
     return response
+
+@app.errorhandler(400)
+def handle_csrf_error(e):
+    """Handle CSRF validation errors"""
+    if 'CSRF' in str(e):
+        logger.warning(f"CSRF Error: {str(e)}")
+        return render_template(
+            'error.html',
+            error="Security verification failed. Please refresh the page and try again."
+        ), 400
+    return e
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -938,7 +884,7 @@ def remove_replacement():
         user_id = session.get('user_id')
 
         if not all([original, user_id]):
-            return jsonify({'error': 'Missing required data'}), 400
+            return jsonify({'error':'Missing required data'}), 400
 
         with db.session.begin():
             result = db.session.execute(db.text("""
@@ -1008,7 +954,7 @@ def handle_csrf_error(e):
         logger.warning(f"CSRF Error: {str(e)}")
         return render_template(
             'error.html',
-            error="Security verification failed. Please try again."
+            error="Security verification failed. Please refresh the page and try again."
         ), 400
     return e
 

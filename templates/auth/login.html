@@ -13,7 +13,7 @@
     {% endwith %}
 
     <form method="POST" action="{{ url_for('login_post') }}" id="login-form">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        {{ form.csrf_token }}
         <div class="form-group">
             <label>Email Address</label>
             {{ form.email(class="form-control") }}
@@ -47,25 +47,4 @@
         <p>Don't have an account? <a href="{{ url_for('register') }}">Register here</a></p>
     </div>
 </div>
-
-<script>
-// Add event listener for form submission
-document.getElementById('login-form')?.addEventListener('submit', function(e) {
-    // Prevent default form submission
-    e.preventDefault();
-
-    // Get the CSRF token from the cookie
-    const token = document.cookie.split('; ')
-        .find(row => row.startsWith('csrf_token='))
-        ?.split('=')[1];
-
-    if (token) {
-        // Update the CSRF token in the form
-        document.querySelector('input[name="csrf_token"]').value = token;
-    }
-
-    // Submit the form
-    this.submit();
-});
-</script>
 {% endblock %}
