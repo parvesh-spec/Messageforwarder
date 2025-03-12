@@ -28,39 +28,30 @@ logger = logging.getLogger(__name__)
 # Configure Flask application
 app = Flask(__name__)
 
-# Generate a stable secret key
-if not os.path.exists('.secret_key'):
-    with open('.secret_key', 'wb') as secret_file:
-        secret_file.write(os.urandom(32))
-
-with open('.secret_key', 'rb') as secret_file:
-    app.secret_key = secret_file.read()
-
 # Session configuration
 app.config.update(
+    SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    SESSION_FILE_DIR='flask_session',
-    SESSION_FILE_THRESHOLD=500,
-    SESSION_USE_SIGNER=True,
-    SESSION_KEY_PREFIX='session:',
-    SESSION_COOKIE_NAME='session_id',
+    SESSION_FILE_DIR='flask_session',  # Directory for session files
+    SESSION_FILE_THRESHOLD=500,  # Maximum number of session files
+    SESSION_USE_SIGNER=True,  # Sign the session cookie
+    SESSION_KEY_PREFIX='session:',  # Session key prefix
+    SESSION_COOKIE_NAME='session_id',  # Session cookie name
     SESSION_COOKIE_SECURE=False,  # Set to True in production
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax',
-    WTF_CSRF_ENABLED=True,
-    WTF_CSRF_SECRET_KEY=os.urandom(32),
-    WTF_CSRF_TIME_LIMIT=None,
-    WTF_CSRF_SSL_STRICT=False,
+    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
+    SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
+    WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
+    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
     DEBUG=True
 )
 
-# Initialize session
+# Initialize session after config
 Session(app)
 
 # Initialize CSRF protection after session
-csrf = CSRFProtect()
+csrf = CSRFProtect(app)
 csrf.init_app(app)
 
 class TelegramManager:
@@ -320,7 +311,6 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
-
 
 
 @app.route('/authorization')
