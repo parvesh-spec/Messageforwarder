@@ -11,13 +11,12 @@ import asyncio
 from functools import wraps
 import psycopg2
 from psycopg2.extras import DictCursor
-from psycopg2.pool import ThreadedConnectionPool
+from psycopg2 import pool
 from flask_session import Session
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
-from flask_wtf.csrf import CSRFProtect, CSRFError
-import urllib.parse
+from flask_wtf.csrf import CSRFProtect
 
 # Set up logging
 logging.basicConfig(
@@ -29,39 +28,31 @@ logger = logging.getLogger(__name__)
 # Configure Flask application
 app = Flask(__name__)
 
-# Enhanced Session configuration for production
+# Session configuration
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    SESSION_FILE_DIR='flask_session',
-    SESSION_FILE_THRESHOLD=500,
-    SESSION_USE_SIGNER=True,
-    SESSION_KEY_PREFIX='session:',
-    SESSION_COOKIE_NAME='session_id',
-    SESSION_COOKIE_SECURE=True,  # Enable secure cookies in production
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Strict',  # Stricter CSRF protection
-    WTF_CSRF_ENABLED=True,
+    SESSION_FILE_DIR='flask_session',  # Directory for session files
+    SESSION_FILE_THRESHOLD=500,  # Maximum number of session files
+    SESSION_USE_SIGNER=True,  # Sign the session cookie
+    SESSION_KEY_PREFIX='session:',  # Session key prefix
+    SESSION_COOKIE_NAME='session_id',  # Session cookie name
+    SESSION_COOKIE_SECURE=False,  # Set to True in production
+    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
+    SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
     WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
-    WTF_CSRF_SSL_STRICT=True,  # Enforce HTTPS for CSRF
-    DEBUG=False  # Disable debug mode in production
+    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
+    DEBUG=True
 )
 
-# Initialize Flask-Session
+# Initialize session after config
 Session(app)
 
-# Initialize CSRF protection with custom config
-csrf = CSRFProtect()
+# Initialize CSRF protection after session
+csrf = CSRFProtect(app)
 csrf.init_app(app)
-
-# Add CSRF error handler
-@app.errorhandler(CSRFError)
-def handle_csrf_error(e):
-    return jsonify({
-        'error': 'CSRF token validation failed. Please refresh the page and try again.'
-    }), 400
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -158,58 +149,21 @@ def async_route(f):
     return wrapped
 
 # Database pool for connections
-def create_db_pool():
-    """Create database connection pool with proper SSL handling"""
-    try:
-        # Parse DATABASE_URL to add SSL mode if needed
-        db_url = os.getenv('DATABASE_URL')
-        result = urllib.parse.urlparse(db_url)
+db_pool = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dsn=os.getenv('DATABASE_URL')
+)
 
-        # Get port, default to 5432 if not specified
-        port = result.port if result.port else 5432
-
-        # Construct DSN with SSL parameters
-        dsn = f"dbname={result.path[1:]} user={result.username} password={result.password} " \
-              f"host={result.hostname} port={port} " \
-              "sslmode=require sslcert=null"
-
-        return ThreadedConnectionPool(
-            minconn=1,
-            maxconn=10,
-            dsn=dsn
-        )
-    except Exception as e:
-        logger.error(f"❌ Failed to create database pool: {str(e)}")
-        raise
-
-# Initialize database pool
-try:
-    db_pool = create_db_pool()
-    logger.info("✅ Database pool created successfully")
-except Exception as e:
-    logger.error(f"❌ Database initialization error: {str(e)}")
-    raise
-
-# Database connection context manager with retry logic
+# Database connection context manager
 @contextmanager
-def get_db(max_retries=3):
-    """Get database connection with retry logic"""
-    conn = None
-    for attempt in range(max_retries):
-        try:
-            conn = db_pool.getconn()
-            conn.autocommit = True
-            yield conn
-            break
-        except psycopg2.OperationalError as e:
-            logger.error(f"❌ Database connection attempt {attempt + 1} failed: {str(e)}")
-            if conn:
-                db_pool.putconn(conn)
-            if attempt == max_retries - 1:
-                raise
-        finally:
-            if conn:
-                db_pool.putconn(conn)
+def get_db():
+    conn = db_pool.getconn()
+    try:
+        conn.autocommit = True
+        yield conn
+    finally:
+        db_pool.putconn(conn)
 
 # Authentication decorator
 def login_required(f):
@@ -357,7 +311,6 @@ def dashboard():
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
-
 
 
 @app.route('/authorization')
@@ -931,7 +884,7 @@ def add_replacement():
                     # Add new replacement
                     cur.execute("""
                         INSERT INTO text_replacements (user_id, original_text, replacement_text)
-                        VALUES(%s, %s, %s)
+                        VALUES (%s, %s, %s)
                         RETURNING id
                     """, (user_id, original, replacement))
 
