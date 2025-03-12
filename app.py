@@ -563,34 +563,54 @@ async def verify_otp():
                     with conn.cursor() as cur:
                         # Check if this Telegram account is already connected to the same user
                         cur.execute("""
-                            SELECT user_id FROM telegram_accounts 
-                            WHERE telegram_id = %s AND user_id = %s
-                        """, (me.id, session.get('user_id')))
+                            SELECT user_id, is_active 
+                            FROM telegram_accounts 
+                            WHERE telegram_id = %s
+                        """, (me.id,))
                         existing = cur.fetchone()
 
                         if existing:
-                            return jsonify({'error': 'This Telegram account is already connected to your account'}), 400
+                            if existing['user_id'] == session.get('user_id'):
+                                if existing['is_active']:
+                                    return jsonify({'error': 'This Telegram account is already connected to your account'}), 400
+                                else:
+                                    # If account exists but is inactive, reactivate it
+                                    cur.execute("""
+                                        UPDATE telegram_accounts 
+                                        SET session_string = %s,
+                                            auth_date = CURRENT_TIMESTAMP,
+                                            is_active = true
+                                        WHERE telegram_id = %s AND user_id = %s
+                                        RETURNING id
+                                    """, (session_string, me.id, session.get('user_id')))
 
-                        # Check if this Telegram account is connected to another user
-                        cur.execute("""
-                            SELECT user_id FROM telegram_accounts 
-                            WHERE telegram_id = %s AND user_id != %s
-                        """, (me.id, session.get('user_id')))
-                        other_user = cur.fetchone()
+                                    if cur.fetchone():
+                                        logger.info(f"✅ Successfully reactivated Telegram account {me.id}")
+                                        return jsonify({'message': 'Account reactivated successfully'})
+                                    else:
+                                        return jsonify({'error': 'Failed to reactivate account'}), 500
+                            else:
+                                # Check if the account is active for another user
+                                if existing['is_active']:
+                                    return jsonify({'error': 'This Telegram account is connected to another user'}), 400
 
-                        if other_user:
-                            return jsonify({'error': 'This Telegram account is connected to another user'}), 400
-
-                        # Insert new account
+                        # If no active connection exists, create a new one
                         cur.execute("""
                             INSERT INTO telegram_accounts 
-                            (user_id, telegram_id, telegram_username, auth_date, session_string, is_primary)
+                            (user_id, telegram_id, telegram_username, auth_date, session_string, is_primary, is_active)
                             VALUES (%s, %s, %s, CURRENT_TIMESTAMP, %s, 
-                                   NOT EXISTS(SELECT 1 FROM telegram_accounts WHERE user_id = %s))
+                                   NOT EXISTS(SELECT 1 FROM telegram_accounts WHERE user_id = %s AND is_active = true),
+                                   true)
+                            RETURNING id
                         """, (session.get('user_id'), me.id, me.username, session_string, session.get('user_id')))
 
-                logger.info(f"✅ Successfully added new Telegram account {me.id}")
-                return jsonify({'message': 'Authorization successful'})
+                        result = cur.fetchone()
+                        if result:
+                            logger.info(f"✅ Successfully added new Telegram account {me.id}")
+                            return jsonify({'message': 'Authorization successful'})
+                        else:
+                            return jsonify({'error': 'Failed to add account'}), 500
+
             else:
                 logger.error("❌ Authorization failed")
                 return jsonify({'error': 'Authorization failed'}), 400
