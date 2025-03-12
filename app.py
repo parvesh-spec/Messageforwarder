@@ -500,6 +500,9 @@ async def send_otp():
                 logger.error(f"❌ Invalid phone number format: {phone}")
                 return jsonify({'error': 'Please enter a valid phone number with country code'}), 400
             except Exception as e:
+                error_msg = str(e).lower()
+                if "resendcoderequest" in error_msg:
+                    return jsonify({'error': 'Please wait a few minutes before requesting a new OTP'}), 429
                 logger.error(f"❌ Failed to send OTP: {str(e)}")
                 return jsonify({'error': 'Failed to send OTP. Please try again.'}), 500
 
@@ -525,7 +528,7 @@ async def verify_otp():
 
         if not all([phone, phone_code_hash, otp]):
             logger.error("❌ Missing verification data")
-            return jsonify({'error': 'Please request a new OTP'}), 400
+            return jsonify({'error': 'OTP session expired. Please request a new OTP'}), 400
 
         try:
             client = await telegram_manager.get_client()
@@ -534,8 +537,10 @@ async def verify_otp():
             logger.info("✅ Got Telegram client for verification")
 
             try:
+                # First try to sign in with OTP
                 await client.sign_in(phone=phone, code=otp, phone_code_hash=phone_code_hash)
             except SessionPasswordNeededError:
+                # If 2FA is enabled and password is provided
                 if password:
                     try:
                         await client.sign_in(password=password)
@@ -549,24 +554,32 @@ async def verify_otp():
                         'message': 'Two-factor authentication required'
                     })
 
+            # Check if successfully authorized
             if await client.is_user_authorized():
                 me = await client.get_me()
                 session_string = client.session.save()
 
                 with get_db() as conn:
                     with conn.cursor() as cur:
-                        # Check if this Telegram account is already connected
+                        # Check if this Telegram account is already connected to the same user
                         cur.execute("""
                             SELECT user_id FROM telegram_accounts 
-                            WHERE telegram_id = %s
-                        """, (me.id,))
+                            WHERE telegram_id = %s AND user_id = %s
+                        """, (me.id, session.get('user_id')))
                         existing = cur.fetchone()
 
                         if existing:
-                            if existing[0] != session.get('user_id'):
-                                return jsonify({'error': 'This Telegram account is already connected to another user'}), 400
-                            else:
-                                return jsonify({'error': 'This Telegram account is already connected to your account'}), 400
+                            return jsonify({'error': 'This Telegram account is already connected to your account'}), 400
+
+                        # Check if this Telegram account is connected to another user
+                        cur.execute("""
+                            SELECT user_id FROM telegram_accounts 
+                            WHERE telegram_id = %s AND user_id != %s
+                        """, (me.id, session.get('user_id')))
+                        other_user = cur.fetchone()
+
+                        if other_user:
+                            return jsonify({'error': 'This Telegram account is connected to another user'}), 400
 
                         # Insert new account
                         cur.execute("""
@@ -590,6 +603,8 @@ async def verify_otp():
                 return jsonify({'error': 'OTP expired. Please request a new one.'}), 400
             elif "phone code invalid" in error_msg:
                 return jsonify({'error': 'Invalid OTP. Please try again.'}), 400
+            elif "resendcoderequest" in error_msg:
+                return jsonify({'error': 'Please wait a few minutes before requesting a new OTP.'}), 429
 
             return jsonify({'error': 'Failed to verify OTP'}), 400
 
