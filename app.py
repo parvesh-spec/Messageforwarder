@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta
-from flask import Flask, render_template, request, session, redirect, url_for, jsonify, abort
+from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneNumberInvalidError
 from telethon.sessions import StringSession
@@ -13,14 +13,10 @@ import psycopg2
 from psycopg2.extras import DictCursor
 from psycopg2 import pool
 from flask_session import Session
-from flask_sqlalchemy import SQLAlchemy
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
-from flask_wtf.csrf import CSRFProtect, generate_csrf
-import hashlib
-import hmac
-import secrets
+from flask_wtf.csrf import CSRFProtect
 
 # Set up logging
 logging.basicConfig(
@@ -32,57 +28,31 @@ logger = logging.getLogger(__name__)
 # Configure Flask application
 app = Flask(__name__)
 
-# Database configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-# Basic app configuration
+# Session configuration
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
     SESSION_TYPE='filesystem',
-    SESSION_FILE_DIR='flask_session',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    SESSION_COOKIE_SECURE=True,  # Use secure cookies
+    SESSION_FILE_DIR='flask_session',  # Directory for session files
+    SESSION_FILE_THRESHOLD=500,  # Maximum number of session files
+    SESSION_USE_SIGNER=True,  # Sign the session cookie
+    SESSION_KEY_PREFIX='session:',  # Session key prefix
+    SESSION_COOKIE_NAME='session_id',  # Session cookie name
+    SESSION_COOKIE_SECURE=False,  # Set to True in production
     SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
-    SESSION_COOKIE_SAMESITE='Strict',  # CSRF protection
-    WTF_CSRF_ENABLED=True,  # Enable CSRF protection
-    WTF_CSRF_SSL_STRICT=True,  # Require HTTPS for CSRF
-    WTF_CSRF_TIME_LIMIT=3600,  # 1 hour token expiry
-    DEBUG=False  # Disable debug mode in production
+    SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
+    WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
+    WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
+    DEBUG=True
 )
 
-# Initialize extensions
-db = SQLAlchemy(app)
+# Initialize session after config
 Session(app)
+
+# Initialize CSRF protection after session
 csrf = CSRFProtect(app)
-
-# CSRF token handling
-@app.after_request
-def add_csrf_token(response):
-    """Add CSRF token to response cookies"""
-    if 'text/html' in response.content_type:
-        csrf_token = generate_csrf()
-        response.set_cookie(
-            'csrf_token',
-            csrf_token,
-            secure=True,
-            httponly=True,
-            samesite='Strict',
-            max_age=3600  # 1 hour expiry
-        )
-    return response
-
-@app.errorhandler(400)
-def handle_csrf_error(e):
-    """Handle CSRF validation errors"""
-    if 'CSRF' in str(e):
-        logger.warning(f"CSRF Error: {str(e)}")
-        return render_template(
-            'error.html',
-            error="Security verification failed. Please refresh the page and try again."
-        ), 400
-    return e
+csrf.init_app(app)
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -178,9 +148,22 @@ def async_route(f):
             return jsonify({'error': str(e)}), 500
     return wrapped
 
-def check_telegram_auth(user_data):
-    """Helper to check Telegram authorization status"""
-    return bool(user_data and user_data.telegram_id and user_data.session_string)
+# Database pool for connections
+db_pool = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dsn=os.getenv('DATABASE_URL')
+)
+
+# Database connection context manager
+@contextmanager
+def get_db():
+    conn = db_pool.getconn()
+    try:
+        conn.autocommit = True
+        yield conn
+    finally:
+        db_pool.putconn(conn)
 
 # Authentication decorator
 def login_required(f):
@@ -190,6 +173,10 @@ def login_required(f):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
+
+def check_telegram_auth(user_data):
+    """Helper to check Telegram authorization status"""
+    return bool(user_data and user_data['telegram_id'] and user_data['session_string'])
 
 @app.route('/')
 def login():
@@ -207,25 +194,26 @@ def login_post():
     email = form.email.data
     password = form.password.data
 
-    with db.session.begin():
-        user = db.session.execute(db.text("SELECT * FROM users WHERE email = :email"), {"email": email}).fetchone()
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+            user = cur.fetchone()
 
-    if not user or not check_password_hash(user.password_hash, password):
-        form.email.errors.append('Please check your email and password')
-        return render_template('auth/login.html', form=form)
+            if not user or not check_password_hash(user['password_hash'], password):
+                form.email.errors.append('Please check your email and password')
+                return render_template('auth/login.html', form=form)
 
-    # Update login status
-    with db.session.begin():
-        db.session.execute(db.text("""
-            UPDATE users
-            SET is_logged_in = true,
-                last_login_at = CURRENT_TIMESTAMP
-            WHERE id = :id
-        """), {"id": user.id})
+            # Update login status
+            cur.execute("""
+                UPDATE users 
+                SET is_logged_in = true,
+                    last_login_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (user['id'],))
 
-    session['user_id'] = user.id
-    session['telegram_id'] = user.telegram_id
-    return redirect(url_for('dashboard'))
+            session['user_id'] = user['id']
+            session['telegram_id'] = user['telegram_id']
+            return redirect(url_for('dashboard'))
 
 @app.route('/register')
 def register():
@@ -241,32 +229,34 @@ def register_post():
     email = form.email.data
     password = form.password.data
 
-    with db.session.begin():
-        user_exists = db.session.execute(db.text("SELECT id FROM users WHERE email = :email"), {"email": email}).fetchone()
-        if user_exists:
-            form.email.errors.append('Email already registered')
-            return render_template('auth/register.html', form=form)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+            if cur.fetchone():
+                form.email.errors.append('Email already registered')
+                return render_template('auth/register.html', form=form)
 
-        db.session.execute(db.text("""
-            INSERT INTO users (email, password_hash)
-            VALUES (:email, :password_hash)
-            RETURNING id
-        """), {"email": email, "password_hash": generate_password_hash(password)})
-        user_id = db.session.scalar()
-        session['user_id'] = user_id
-        return redirect(url_for('dashboard'))
+            cur.execute("""
+                INSERT INTO users (email, password_hash)
+                VALUES (%s, %s)
+                RETURNING id
+            """, (email, generate_password_hash(password)))
 
+            user_id = cur.fetchone()[0]
+            session['user_id'] = user_id
+            return redirect(url_for('dashboard'))
 
 @app.route('/logout')
 def logout():
     user_id = session.get('user_id')
     if user_id:
-        with db.session.begin():
-            db.session.execute(db.text("""
-                UPDATE users
-                SET is_logged_in = false
-                WHERE id = :id
-            """), {"id": user_id})
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE users 
+                    SET is_logged_in = false 
+                    WHERE id = %s
+                """, (user_id,))
 
     session.clear()
     return redirect(url_for('login'))
@@ -275,41 +265,50 @@ def logout():
 @login_required
 def dashboard():
     user_id = session.get('user_id')
-    with db.session.begin():
-        user = db.session.execute(db.text("""
-            SELECT telegram_id, telegram_username, auth_date, session_string
-            FROM users
-            WHERE id = :id
-        """), {"id": user_id}).fetchone()
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            # Get user data
+            cur.execute("""
+                SELECT telegram_id, telegram_username, auth_date, session_string
+                FROM users
+                WHERE id = %s
+            """, (user_id,))
+            user = cur.fetchone()
 
-        config = db.session.execute(db.text("""
-            SELECT *
-            FROM forwarding_configs
-            WHERE user_id = :id
-        """), {"id": user_id}).fetchone()
+            # Get forwarding config
+            cur.execute("""
+                SELECT *
+                FROM forwarding_configs
+                WHERE user_id = %s
+            """, (user_id,))
+            config = cur.fetchone()
 
-        replacements_count = db.session.execute(db.text("""
-            SELECT COUNT(*)
-            FROM text_replacements
-            WHERE user_id = :id
-        """), {"id": user_id}).scalar()
+            # Get replacement count
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM text_replacements
+                WHERE user_id = %s
+            """, (user_id,))
+            replacements_count = cur.fetchone()[0]
 
-        forwarding_logs = db.session.execute(db.text("""
-            SELECT source_message_id, dest_message_id,
-                   message_text, received_at, forwarded_at
-            FROM forwarding_logs
-            WHERE user_id = :id
-            ORDER BY created_at DESC
-            LIMIT 5
-        """), {"id": user_id}).fetchall()
+            # Get recent forwarding logs
+            cur.execute("""
+                SELECT source_message_id, dest_message_id, 
+                       message_text, received_at, forwarded_at
+                FROM forwarding_logs
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 5
+            """, (user_id,))
+            forwarding_logs = cur.fetchall()
 
     return render_template('dashboard/overview.html',
                        telegram_authorized=check_telegram_auth(user),
-                       telegram_username=user.telegram_username if user else None,
-                       telegram_auth_date=user.auth_date if user else None,
-                       source_channel=config.source_channel if config else None,
-                       dest_channel=config.destination_channel if config else None,
-                       is_active=config.is_active if config else False,
+                       telegram_username=user['telegram_username'] if user else None,
+                       telegram_auth_date=user['auth_date'] if user else None,
+                       source_channel=config['source_channel'] if config else None,
+                       dest_channel=config['destination_channel'] if config else None,
+                       is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
 
@@ -318,28 +317,33 @@ def dashboard():
 @login_required
 def authorization():
     """Authorization page route handler"""
-    with db.session.begin():
-        user = db.session.execute(db.text("""
-            SELECT telegram_id, telegram_username, auth_date, session_string
-            FROM users
-            WHERE id = :id
-        """), {"id": session.get('user_id')}).fetchone()
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT telegram_id, telegram_username, auth_date, session_string
+                FROM users 
+                WHERE id = %s
+            """, (session.get('user_id'),))
+            user = cur.fetchone()
 
     return render_template('dashboard/authorization.html',
                          telegram_authorized=check_telegram_auth(user),
-                         telegram_username=user.telegram_username if user else None,
-                         telegram_auth_date=user.auth_date if user else None)
+                         telegram_username=user['telegram_username'] if user else None,
+                         telegram_auth_date=user['auth_date'] if user else None)
 
 @app.route('/replacements')
 @login_required
 def replacements():
-    with db.session.begin():
-        replacements = {row.original_text: row.replacement_text for row in db.session.execute(db.text("""
-            SELECT original_text, replacement_text
-            FROM text_replacements
-            WHERE user_id = :id
-            ORDER BY id DESC
-        """), {"id": session.get('user_id')}).fetchall()}
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute("""
+                SELECT original_text, replacement_text
+                FROM text_replacements
+                WHERE user_id = %s
+                ORDER BY id DESC
+            """, (session.get('user_id'),))
+            replacements = {row['original_text']: row['replacement_text'] 
+                          for row in cur.fetchall()}
 
     return render_template('dashboard/replacements.html',
                          replacements=replacements)
@@ -352,34 +356,42 @@ async def forwarding():
     try:
         user_id = session.get('user_id')
 
-        with db.session.begin():
-            user = db.session.execute(db.text("""
-                SELECT telegram_id, telegram_username, auth_date, session_string
-                FROM users
-                WHERE id = :id
-            """), {"id": user_id}).fetchone()
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                # Get user data with telegram auth info
+                cur.execute("""
+                    SELECT telegram_id, telegram_username, auth_date, session_string
+                    FROM users
+                    WHERE id = %s
+                """, (user_id,))
+                user = cur.fetchone()
 
-            if not check_telegram_auth(user):
-                return render_template('dashboard/forwarding.html',
-                                  telegram_authorized=False)
+                if not check_telegram_auth(user):
+                    return render_template('dashboard/forwarding.html',
+                                      telegram_authorized=False)
 
-            config = db.session.execute(db.text("""
-                SELECT source_channel, destination_channel, is_active
-                FROM forwarding_configs
-                WHERE user_id = :id
-            """), {"id": user_id}).fetchone()
+                # Get forwarding config
+                cur.execute("""
+                    SELECT source_channel, destination_channel, is_active
+                    FROM forwarding_configs
+                    WHERE user_id = %s
+                """, (user_id,))
+                config = cur.fetchone()
 
-            replacements = {row.original_text: row.replacement_text for row in db.session.execute(db.text("""
-                SELECT original_text, replacement_text
-                FROM text_replacements
-                WHERE user_id = :id
-            """), {"id": user_id}).fetchall()}
+                # Get replacements
+                cur.execute("""
+                    SELECT original_text, replacement_text
+                    FROM text_replacements
+                    WHERE user_id = %s
+                """, (user_id,))
+                replacements = {row['original_text']: row['replacement_text'] 
+                              for row in cur.fetchall()}
 
         # Get channel list from Telegram
         channels = []
         try:
             # Create a new client instance for this request
-            client = await telegram_manager.get_client(user.session_string)
+            client = await telegram_manager.get_client(user['session_string'])
             logger.info("✅ Got Telegram client")
 
             # Get all dialogs (channels)
@@ -408,9 +420,9 @@ async def forwarding():
         return render_template('dashboard/forwarding.html',
                           telegram_authorized=True,
                           channels=channels,
-                          source_channel=config.source_channel if config else None,
-                          dest_channel=config.destination_channel if config else None,
-                          bot_status=config.is_active if config else False,
+                          source_channel=config['source_channel'] if config else None,
+                          dest_channel=config['destination_channel'] if config else None,
+                          bot_status=config['is_active'] if config else False,
                           replacements=replacements)
 
     except Exception as e:
@@ -524,15 +536,16 @@ async def verify_otp():
                 session_string = client.session.save()
 
                 # Update database
-                with db.session.begin():
-                    db.session.execute(db.text("""
-                        UPDATE users
-                        SET telegram_id = :telegram_id,
-                            telegram_username = :telegram_username,
-                            auth_date = CURRENT_TIMESTAMP,
-                            session_string = :session_string
-                        WHERE id = :id
-                    """), {"telegram_id": me.id, "telegram_username": me.username, "session_string": session_string, "id": session.get('user_id')})
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE users 
+                            SET telegram_id = %s,
+                                telegram_username = %s,
+                                auth_date = CURRENT_TIMESTAMP,
+                                session_string = %s
+                            WHERE id = %s
+                        """, (me.id, me.username, session_string, session.get('user_id')))
 
                 # Update session
                 session['telegram_id'] = me.id
@@ -561,28 +574,31 @@ async def verify_otp():
 
 @app.before_request
 def check_session_expiry():
-    if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout', 'register', 'register_post', 'login_post', 'get_csrf_token']:
+    if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout', 'register', 'register_post', 'login_post']:
         # Get current user data
         user_id = session.get('user_id')
         if not user_id:
             session.clear()
             return redirect(url_for('login'))
 
-        with db.session.begin():
-            user = db.session.execute(db.text("""
-                SELECT is_logged_in, telegram_id, session_string
-                FROM users
-                WHERE id = :id
-            """), {"id": user_id}).fetchone()
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                # Check user login status and telegram auth
+                cur.execute("""
+                    SELECT is_logged_in, telegram_id, session_string 
+                    FROM users 
+                    WHERE id = %s
+                """, (user_id,))
+                user = cur.fetchone()
 
-        if not user or not user.is_logged_in:
-            session.clear()
-            return redirect(url_for('login'))
+                if not user or not user['is_logged_in']:
+                    session.clear()
+                    return redirect(url_for('login'))
 
-        # Update session with telegram data if available
-        if user.telegram_id and user.session_string:
-            session['telegram_id'] = user.telegram_id
-            session['session_string'] = user.session_string
+                # Update session with telegram data if available
+                if user['telegram_id'] and user['session_string']:
+                    session['telegram_id'] = user['telegram_id']
+                    session['session_string'] = user['session_string']
 
 @app.route('/check-auth')
 def check_auth():
@@ -592,15 +608,17 @@ def check_auth():
             return jsonify({'authenticated': False}), 401
 
         # Verify user is logged in in database
-        with db.session.begin():
-            result = db.session.execute(db.text("""
-                SELECT is_logged_in
-                FROM users
-                WHERE id = :id
-            """), {"id": user_id}).fetchone()
-            if not result or not result.is_logged_in:
-                session.clear()
-                return jsonify({'authenticated': False}), 401
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT is_logged_in 
+                    FROM users 
+                    WHERE id = %s
+                """, (user_id,))
+                result = cur.fetchone()
+                if not result or not result[0]:
+                    session.clear()
+                    return jsonify({'authenticated': False}), 401
 
         return jsonify({'authenticated': True})
     except Exception as e:
@@ -623,21 +641,24 @@ async def disconnect():
         import main
         main.remove_user_session(telegram_id)
 
-        with db.session.begin():
-            db.session.execute(db.text("""
-                UPDATE users
-                SET telegram_id = NULL,
-                    telegram_username = NULL,
-                    auth_date = NULL,
-                    session_string = NULL
-                WHERE id = :id
-            """), {"id": user_id})
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Reset Telegram credentials
+                cur.execute("""
+                    UPDATE users 
+                    SET telegram_id = NULL,
+                        telegram_username = NULL,
+                        auth_date = NULL,
+                        session_string = NULL
+                    WHERE id = %s
+                """, (user_id,))
 
-            db.session.execute(db.text("""
-                UPDATE forwarding_configs
-                SET is_active = false
-                WHERE user_id = :id
-            """), {"id": user_id})
+                # Deactivate any forwarding configs
+                cur.execute("""
+                    UPDATE forwarding_configs
+                    SET is_active = false
+                    WHERE user_id = %s
+                """, (user_id,))
 
         # Clear session data
         session.pop('telegram_id', None)
@@ -671,30 +692,31 @@ def update_channels():
         if not destination.startswith('-100'):
             destination = f"-100{destination.lstrip('-')}"
 
-        with db.session.begin():
-            try:
-                # First, delete any existing config
-                db.session.execute(db.text("""
-                    DELETE FROM forwarding_configs
-                    WHERE user_id = :id
-                """), {"id": user_id})
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                try:
+                    # First, delete any existing config
+                    cur.execute("""
+                        DELETE FROM forwarding_configs 
+                        WHERE user_id = %s
+                    """, (user_id,))
 
-                # Then insert new config
-                db.session.execute(db.text("""
-                    INSERT INTO forwarding_configs
-                    (user_id, source_channel, destination_channel, is_active)
-                    VALUES (:id, :source, :destination, false)
-                """), {"id": user_id, "source": source, "destination": destination})
+                    # Then insert new config
+                    cur.execute("""
+                        INSERT INTO forwarding_configs 
+                        (user_id, source_channel, destination_channel, is_active)
+                        VALUES (%s, %s, %s, false)
+                    """, (user_id, source, destination))
 
-                # Stop any running forwarding
-                import main
-                main.remove_user_session(session.get('telegram_id'))
+                    # Stop any running forwarding
+                    import main
+                    main.remove_user_session(session.get('telegram_id'))
 
-                return jsonify({'message': 'Channels updated successfully'})
-            except Exception as e:
-                db.session.rollback()
-                logger.error(f"❌ Database error in update_channels: {str(e)}")
-                return jsonify({'error': 'Failed to save channel configuration'}), 400
+                    return jsonify({'message': 'Channels updated successfully'})
+                except psycopg2.Error as e:
+                    conn.rollback()
+                    logger.error(f"❌ Database error in update_channels: {str(e)}")
+                    return jsonify({'error': 'Failed to save channel configuration'}), 400
 
     except Exception as e:
         logger.error(f"❌ Channel update error: {str(e)}")
@@ -713,92 +735,96 @@ def toggle_bot():
         if not telegram_id or not session_string:
             return jsonify({'error': 'Please authorize Telegram first'}), 401
 
-        with db.session.begin():
-            config = db.session.execute(db.text("""
-                SELECT source_channel, destination_channel, is_active
-                FROM forwarding_configs
-                WHERE user_id = :id
-            """), {"id": user_id}).fetchone()
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                # Get forwarding config
+                cur.execute("""
+                    SELECT source_channel, destination_channel, is_active
+                    FROM forwarding_configs
+                    WHERE user_id = %s
+                """, (user_id,))
+                config = cur.fetchone()
 
-            if not config:
-                return jsonify({'error': 'Please configure channels first'}), 400
+                if not config:
+                    return jsonify({'error': 'Please configure channels first'}), 400
 
-            if status:
-                try:
-                    # Update database first
-                    db.session.execute(db.text("""
-                        UPDATE forwarding_configs
-                        SET is_active = true,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE user_id = :id
-                        RETURNING id
-                    """), {"id": user_id})
-                    if not db.session.scalar():
-                        return jsonify({'error': 'Failed to update forwarding status'}), 500
-
-                    # Start bot
-                    import main
-                    source_channel = str(config.source_channel)
-                    dest_channel = str(config.destination_channel)
-
-                    # Ensure proper channel ID format
-                    if not source_channel.startswith('-100'):
-                        source_channel = f"-100{source_channel.lstrip('-')}"
-                    if not dest_channel.startswith('-100'):
-                        dest_channel = f"-100{dest_channel.lstrip('-')}"
-
-                    success = main.add_user_session(
-                        user_id=int(telegram_id),
-                        session_string=session_string,
-                        source_channel=source_channel,
-                        destination_channel=dest_channel
-                    )
-
-                    if not success:
-                        # Rollback on failure
-                        db.session.execute(db.text("""
+                if status:
+                    try:
+                        # Update database first
+                        cur.execute("""
                             UPDATE forwarding_configs
-                            SET is_active = false
-                            WHERE user_id = :id
-                        """), {"id": user_id})
-                        return jsonify({'error': 'Failed to start bot. Please try again.'}), 500
+                            SET is_active = true,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE user_id = %s
+                            RETURNING id
+                        """, (user_id,))
 
-                    return jsonify({
-                        'status': True,
-                        'message': 'Bot is now running'
-                    })
+                        if not cur.fetchone():
+                            return jsonify({'error': 'Failed to update forwarding status'}), 500
 
-                except Exception as e:
-                    logger.error(f"❌ Bot start error: {str(e)}")
-                    # Ensure inactive on error
-                    db.session.execute(db.text("""
-                        UPDATE forwarding_configs
-                        SET is_active = false
-                        WHERE user_id = :id
-                    """), {"id": user_id})
-                    return jsonify({'error': str(e)}), 500
-            else:
-                try:
-                    # Update database first
-                    db.session.execute(db.text("""
-                        UPDATE forwarding_configs
-                        SET is_active = false,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE user_id = :id
-                    """), {"id": user_id})
+                        # Start bot
+                        import main
+                        source_channel = str(config['source_channel'])
+                        dest_channel = str(config['destination_channel'])
 
-                    # Stop bot
-                    import main
-                    main.remove_user_session(telegram_id)
+                        # Ensure proper channel ID format
+                        if not source_channel.startswith('-100'):
+                            source_channel = f"-100{source_channel.lstrip('-')}"
+                        if not dest_channel.startswith('-100'):
+                            dest_channel = f"-100{dest_channel.lstrip('-')}"
 
-                    return jsonify({
-                        'status': False,
-                        'message': 'Bot is now stopped'
-                    })
+                        success = main.add_user_session(
+                            user_id=int(telegram_id),
+                            session_string=session_string,
+                            source_channel=source_channel,
+                            destination_channel=dest_channel
+                        )
 
-                except Exception as e:
-                    logger.error(f"❌ Bot stop error: {str(e)}")
-                    return jsonify({'error': str(e)}), 500
+                        if not success:
+                            # Rollback on failure
+                            cur.execute("""
+                                UPDATE forwarding_configs 
+                                SET is_active = false 
+                                WHERE user_id = %s
+                            """, (user_id,))
+                            return jsonify({'error': 'Failed to start bot. Please try again.'}), 500
+
+                        return jsonify({
+                            'status': True,
+                            'message': 'Bot is now running'
+                        })
+
+                    except Exception as e:
+                        logger.error(f"❌ Bot start error: {str(e)}")
+                        # Ensure inactive on error
+                        cur.execute("""
+                            UPDATE forwarding_configs 
+                            SET is_active = false 
+                            WHERE user_id = %s
+                        """, (user_id,))
+                        return jsonify({'error': str(e)}), 500
+                else:
+                    try:
+                        # Update database first
+                        cur.execute("""
+                            UPDATE forwarding_configs 
+                            SET is_active = false,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE user_id = %s
+                        """, (user_id,))
+
+                        # Stop bot
+                        import main
+                        main.remove_user_session(telegram_id)
+
+                        return jsonify({
+                            'status': False,
+                            'message': 'Bot is now stopped'
+                        })
+
+                    except Exception as e:
+                        logger.error(f"❌ Bot stop error: {str(e)}")
+                        return jsonify({'error': str(e)}), 500
 
     except Exception as e:
         logger.error(f"❌ Bot toggle error: {str(e)}")
@@ -810,14 +836,16 @@ def get_replacements():
     try:
         user_id = session.get('user_id')
 
-        with db.session.begin():
-            replacements = {row.original_text: row.replacement_text for row in db.session.execute(db.text("""
-                SELECT original_text, replacement_text
-                FROM text_replacements
-                WHERE user_id = :id
-                ORDER BY id DESC
-            """), {"id": user_id}).fetchall()}
-            return jsonify(replacements)
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT original_text, replacement_text 
+                    FROM text_replacements
+                    WHERE user_id = %s
+                    ORDER BY id DESC
+                """, (user_id,))
+                replacements = {row['original_text']: row['replacement_text'] for row in cur.fetchall()}
+                return jsonify(replacements)
     except Exception as e:
         logger.error(f"❌ Get replacements error: {str(e)}")
         return jsonify({'error': str(e)}), 500
@@ -840,37 +868,42 @@ def add_replacement():
         if len(original) > 500 or len(replacement) > 500:
             return jsonify({'error': 'Text too long (max 500 characters)'}), 400
 
-        with db.session.begin():
-            try:
-                #                # Check if replacement already exists
-                count = db.session.execute(db.text("""
-                    SELECT COUNT(*)
-                    FROM text_replacements
-                    WHERE user_id = :id AND original_text = :original
-                """), {"id": user_id, "original": original}).scalar()
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                try:
+                    # Check if replacement already exists
+                    cur.execute("""
+                        SELECT COUNT(*) 
+                        FROM text_replacements 
+                        WHERE user_id = %s AND original_text = %s
+                    """, (user_id, original))
 
-                if count > 0:
-                    return jsonify({'error': 'This replacement already exists'}), 400
+                    if cur.fetchone()[0] > 0:
+                        return jsonify({'error': 'This replacement already exists'}), 400
 
-                # Add new replacement
-                db.session.execute(db.text("""
-                    INSERT INTO text_replacements (user_id, original_text, replacement_text)
-                    VALUES (:id, :original, :replacement)
-                    RETURNING id
-                """), {"id": user_id, "original": original, "replacement": replacement})
-                replacement_id = db.session.scalar()
+                    # Add new replacement
+                    cur.execute("""
+                        INSERT INTO text_replacements (user_id, original_text, replacement_text)
+                        VALUES (%s, %s, %s)
+                        RETURNING id
+                    """, (user_id, original, replacement))
 
-                if replacement_id:
-                    logger.info(f"Added replacement {replacement_id} for user {user_id}")
-                    return jsonify({'message': 'Replacement added successfully'})
-                else:
-                    logger.error("Failed to add replacement: no ID returned")
+                    replacement_id = cur.fetchone()[0]
+                    logger.info(f"Added replacement {replacement_id} for user {user_id}: '{original}' → '{replacement}'")
+
+                    # Update bot replacements if running
+                    import main
+                    main.update_user_replacements(session.get('telegram_id'))
+
+                    return jsonify({
+                        'message': 'Replacement added successfully',
+                        'original': original,
+                        'replacement': replacement
+                    })
+
+                except psycopg2.Error as e:
+                    logger.error(f"Database error in add_replacement: {str(e)}")
                     return jsonify({'error': 'Failed to add replacement'}), 400
-
-            except Exception as e:
-                db.session.rollback()
-                logger.error(f"Database error in add_replacement: {str(e)}")
-                return jsonify({'error': 'Failed to add replacement'}), 400
 
     except Exception as e:
         logger.error(f"Error in add_replacement: {str(e)}")
@@ -884,20 +917,27 @@ def remove_replacement():
         user_id = session.get('user_id')
 
         if not all([original, user_id]):
-            return jsonify({'error':'Missing required data'}), 400
+            return jsonify({'error': 'Missing required data'}), 400
 
-        with db.session.begin():
-            result = db.session.execute(db.text("""
-                DELETE FROM text_replacements
-                WHERE user_id = :id AND original_text = :original
-                RETURNING id
-            """), {"id": user_id, "original": original})
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM text_replacements 
+                    WHERE user_id = %s AND original_text = %s
+                    RETURNING id
+                """, (user_id, original))
 
-            if result.rowcount > 0:
-                logger.info(f"Removed replacement for user {user_id}")
-                return jsonify({'message': 'Replacement removed successfully'})
-            else:
-                return jsonify({'error': 'Replacement not found'}), 404
+                result = cur.fetchone()
+                if result:
+                    logger.info(f"Removed replacement {result[0]} for user {user_id}")
+
+                    # Update bot replacements if running
+                    import main
+                    main.update_user_replacements(session.get('telegram_id'))
+
+                    return jsonify({'message': 'Replacement removed successfully'})
+                else:
+                    return jsonify({'error': 'Replacement not found'}), 404
 
     except Exception as e:
         logger.error(f"❌ Remove replacement error: {str(e)}")
@@ -909,11 +949,12 @@ def clear_replacements():
     try:
         user_id = session.get('user_id')
 
-        with db.session.begin():
-            db.session.execute(db.text("""
-                DELETE FROM text_replacements
-                WHERE user_id = :id
-            """), {"id": user_id})
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM text_replacements
+                    WHERE user_id = %s
+                """, (user_id,))
 
         # Update bot
         import main
@@ -946,17 +987,6 @@ def handle_db_error(e, operation):
 @app.template_filter('datetime')
 def format_datetime(timestamp):
     return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
-
-@app.errorhandler(400)
-def handle_csrf_error(e):
-    """Handle CSRF validation errors"""
-    if 'CSRF' in str(e):
-        logger.warning(f"CSRF Error: {str(e)}")
-        return render_template(
-            'error.html',
-            error="Security verification failed. Please refresh the page and try again."
-        ), 400
-    return e
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
