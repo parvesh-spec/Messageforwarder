@@ -174,9 +174,6 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-def check_telegram_auth(user_data):
-    """Helper to check Telegram authorization status"""
-    return bool(user_data and user_data['telegram_id'] and user_data['session_string'])
 
 @app.route('/')
 def login():
@@ -212,7 +209,7 @@ def login_post():
             """, (user['id'],))
 
             session['user_id'] = user['id']
-            session['telegram_id'] = user['telegram_id']
+            session['telegram_id'] = user['telegram_id'] #This line might need adjustment depending on how telegram id is handled in the new schema.
             return redirect(url_for('dashboard'))
 
 @app.route('/register')
@@ -267,13 +264,13 @@ def dashboard():
     user_id = session.get('user_id')
     with get_db() as conn:
         with conn.cursor(cursor_factory=DictCursor) as cur:
-            # Get user data
+            # Get primary Telegram account
             cur.execute("""
                 SELECT telegram_id, telegram_username, auth_date, session_string
-                FROM users
-                WHERE id = %s
+                FROM telegram_accounts
+                WHERE user_id = %s AND is_primary = true
             """, (user_id,))
-            user = cur.fetchone()
+            primary_account = cur.fetchone()
 
             # Get forwarding config
             cur.execute("""
@@ -303,15 +300,14 @@ def dashboard():
             forwarding_logs = cur.fetchall()
 
     return render_template('dashboard/overview.html',
-                       telegram_authorized=check_telegram_auth(user),
-                       telegram_username=user['telegram_username'] if user else None,
-                       telegram_auth_date=user['auth_date'] if user else None,
+                       telegram_authorized=bool(primary_account),
+                       telegram_username=primary_account['telegram_username'] if primary_account else None,
+                       telegram_auth_date=primary_account['auth_date'] if primary_account else None,
                        source_channel=config['source_channel'] if config else None,
                        dest_channel=config['destination_channel'] if config else None,
                        is_active=config['is_active'] if config else False,
                        replacements_count=replacements_count,
                        forwarding_logs=forwarding_logs)
-
 
 @app.route('/authorization')
 @login_required
@@ -320,16 +316,15 @@ def authorization():
     with get_db() as conn:
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
-                SELECT telegram_id, telegram_username, auth_date, session_string
-                FROM users 
-                WHERE id = %s
+                SELECT telegram_id, telegram_username, auth_date, session_string, is_primary
+                FROM telegram_accounts 
+                WHERE user_id = %s
+                ORDER BY is_primary DESC, auth_date DESC
             """, (session.get('user_id'),))
-            user = cur.fetchone()
+            accounts = cur.fetchall()
 
     return render_template('dashboard/authorization.html',
-                         telegram_authorized=check_telegram_auth(user),
-                         telegram_username=user['telegram_username'] if user else None,
-                         telegram_auth_date=user['auth_date'] if user else None)
+                         telegram_accounts=accounts)
 
 @app.route('/replacements')
 @login_required
@@ -366,7 +361,7 @@ async def forwarding():
                 """, (user_id,))
                 user = cur.fetchone()
 
-                if not check_telegram_auth(user):
+                if not bool(user and user['telegram_id'] and user['session_string']): #Simplified check
                     return render_template('dashboard/forwarding.html',
                                       telegram_authorized=False)
 
@@ -498,25 +493,21 @@ async def verify_otp():
         phone = session.get('user_phone', stored_phone)
         phone_code_hash = session.get('phone_code_hash', stored_hash)
         otp = request.form.get('otp')
-        password = request.form.get('password')  # Get 2FA password if provided
+        password = request.form.get('password')
 
         if not all([phone, phone_code_hash, otp]):
             logger.error("❌ Missing verification data")
             return jsonify({'error': 'Please request a new OTP'}), 400
 
         try:
-            # Get client
             client = await telegram_manager.get_client()
             if not client:
                 raise Exception("Failed to initialize Telegram client")
             logger.info("✅ Got Telegram client for verification")
 
             try:
-                # First try to sign in with OTP
                 await client.sign_in(phone=phone, code=otp, phone_code_hash=phone_code_hash)
-
             except SessionPasswordNeededError:
-                # If 2FA is enabled and password is provided
                 if password:
                     try:
                         await client.sign_in(password=password)
@@ -530,28 +521,34 @@ async def verify_otp():
                         'message': 'Two-factor authentication required'
                     })
 
-            # Check if successfully authorized
             if await client.is_user_authorized():
                 me = await client.get_me()
                 session_string = client.session.save()
 
-                # Update database
                 with get_db() as conn:
                     with conn.cursor() as cur:
+                        # Check if this Telegram account is already connected
                         cur.execute("""
-                            UPDATE users 
-                            SET telegram_id = %s,
-                                telegram_username = %s,
-                                auth_date = CURRENT_TIMESTAMP,
-                                session_string = %s
-                            WHERE id = %s
-                        """, (me.id, me.username, session_string, session.get('user_id')))
+                            SELECT user_id FROM telegram_accounts 
+                            WHERE telegram_id = %s
+                        """, (me.id,))
+                        existing = cur.fetchone()
 
-                # Update session
-                session['telegram_id'] = me.id
-                session['session_string'] = session_string
-                logger.info(f"✅ Successfully authorized user {me.id}")
+                        if existing:
+                            if existing[0] != session.get('user_id'):
+                                return jsonify({'error': 'This Telegram account is already connected to another user'}), 400
+                            else:
+                                return jsonify({'error': 'This Telegram account is already connected to your account'}), 400
 
+                        # Insert new account
+                        cur.execute("""
+                            INSERT INTO telegram_accounts 
+                            (user_id, telegram_id, telegram_username, auth_date, session_string, is_primary)
+                            VALUES (%s, %s, %s, CURRENT_TIMESTAMP, %s, 
+                                   NOT EXISTS(SELECT 1 FROM telegram_accounts WHERE user_id = %s))
+                        """, (session.get('user_id'), me.id, me.username, session_string, session.get('user_id')))
+
+                logger.info(f"✅ Successfully added new Telegram account {me.id}")
                 return jsonify({'message': 'Authorization successful'})
             else:
                 logger.error("❌ Authorization failed")
@@ -570,105 +567,87 @@ async def verify_otp():
 
     except Exception as e:
         logger.error(f"❌ Verification error: {str(e)}")
-        return jsonify({'error': 'An unexpected error occurred'}), 500
+        return jsonify({'error': str(e)}), 500
 
-@app.before_request
-def check_session_expiry():
-    if request.endpoint not in ['login', 'static', 'send-otp', 'verify-otp', 'check-auth', 'logout', 'register', 'register_post', 'login_post']:
-        # Get current user data
-        user_id = session.get('user_id')
-        if not user_id:
-            session.clear()
-            return redirect(url_for('login'))
-
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cur:
-                # Check user login status and telegram auth
-                cur.execute("""
-                    SELECT is_logged_in, telegram_id, session_string 
-                    FROM users 
-                    WHERE id = %s
-                """, (user_id,))
-                user = cur.fetchone()
-
-                if not user or not user['is_logged_in']:
-                    session.clear()
-                    return redirect(url_for('login'))
-
-                # Update session with telegram data if available
-                if user['telegram_id'] and user['session_string']:
-                    session['telegram_id'] = user['telegram_id']
-                    session['session_string'] = user['session_string']
-
-@app.route('/check-auth')
-def check_auth():
-    try:
-        user_id = session.get('user_id')
-        if not user_id:
-            return jsonify({'authenticated': False}), 401
-
-        # Verify user is logged in in database
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT is_logged_in 
-                    FROM users 
-                    WHERE id = %s
-                """, (user_id,))
-                result = cur.fetchone()
-                if not result or not result[0]:
-                    session.clear()
-                    return jsonify({'authenticated': False}), 401
-
-        return jsonify({'authenticated': True})
-    except Exception as e:
-        logger.error(f"❌ Auth check error: {str(e)}")
-        return jsonify({'authenticated': False}), 401
-
-@app.route('/disconnect', methods=['POST'])
+@app.route('/disconnect/<int:telegram_id>', methods=['POST'])
 @login_required
 @async_route
-async def disconnect():
-    """Disconnect Telegram account"""
+async def disconnect_account(telegram_id):
+    """Disconnect specific Telegram account"""
     try:
         user_id = session.get('user_id')
-        telegram_id = session.get('telegram_id')
-
-        if not telegram_id:
-            return jsonify({'error': 'No Telegram account connected'}), 400
-
-        # Clean up any running sessions
-        import main
-        main.remove_user_session(telegram_id)
 
         with get_db() as conn:
             with conn.cursor() as cur:
-                # Reset Telegram credentials
+                # Verify ownership
                 cur.execute("""
-                    UPDATE users 
-                    SET telegram_id = NULL,
-                        telegram_username = NULL,
-                        auth_date = NULL,
-                        session_string = NULL
-                    WHERE id = %s
-                """, (user_id,))
+                    SELECT session_string, is_primary 
+                    FROM telegram_accounts 
+                    WHERE user_id = %s AND telegram_id = %s
+                """, (user_id, telegram_id))
+                account = cur.fetchone()
 
-                # Deactivate any forwarding configs
+                if not account:
+                    return jsonify({'error': 'Account not found'}), 404
+
+                if account[1]:  # is_primary
+                    return jsonify({'error': 'Cannot disconnect primary account. Make another account primary first.'}), 400
+
+                # Remove account
                 cur.execute("""
-                    UPDATE forwarding_configs
-                    SET is_active = false
-                    WHERE user_id = %s
-                """, (user_id,))
+                    DELETE FROM telegram_accounts 
+                    WHERE user_id = %s AND telegram_id = %s
+                    RETURNING id
+                """, (user_id, telegram_id))
 
-        # Clear session data
-        session.pop('telegram_id', None)
-        session.pop('session_string', None)
+                if cur.fetchone():
+                    # Clean up any running sessions
+                    import main
+                    main.remove_user_session(telegram_id)
 
-        logger.info(f"✅ Successfully disconnected Telegram for user {user_id}")
-        return jsonify({'message': 'Successfully disconnected'})
+                    logger.info(f"✅ Successfully disconnected Telegram account {telegram_id}")
+                    return jsonify({'message': 'Successfully disconnected'})
+                else:
+                    return jsonify({'error': 'Failed to disconnect account'}), 500
 
     except Exception as e:
         logger.error(f"❌ Disconnect error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/make-primary/<int:telegram_id>', methods=['POST'])
+@login_required
+def make_primary(telegram_id):
+    """Make specific Telegram account primary"""
+    try:
+        user_id = session.get('user_id')
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Verify ownership
+                cur.execute("""
+                    SELECT 1 FROM telegram_accounts 
+                    WHERE user_id = %s AND telegram_id = %s
+                """, (user_id, telegram_id))
+
+                if not cur.fetchone():
+                    return jsonify({'error': 'Account not found'}), 404
+
+                # Update primary status
+                cur.execute("""
+                    UPDATE telegram_accounts 
+                    SET is_primary = CASE
+                        WHEN telegram_id = %s THEN true
+                        ELSE false
+                    END
+                    WHERE user_id = %s
+                """, (telegram_id, user_id))
+
+                conn.commit()
+                logger.info(f"✅ Successfully set Telegram account {telegram_id} as primary")
+                return jsonify({'message': 'Successfully updated primary account'})
+
+    except Exception as e:
+        logger.error(f"❌ Make primary error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/update-channels', methods=['POST'])
