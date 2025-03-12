@@ -47,4 +47,55 @@
         <p>Don't have an account? <a href="{{ url_for('register') }}">Register here</a></p>
     </div>
 </div>
+
+<style>
+.auth-box {
+    max-width: 400px;
+    margin: 40px auto;
+    padding: 20px;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.form-group {
+    margin-bottom: 15px;
+}
+
+.form-control {
+    width: 100%;
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+.alert {
+    padding: 10px;
+    margin-bottom: 15px;
+    border-radius: 4px;
+}
+
+.alert-error {
+    background-color: #ffebee;
+    color: #c62828;
+    border: 1px solid #ef9a9a;
+}
+
+.alert-success {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+    border: 1px solid #a5d6a7;
+}
+
+.errors {
+    color: #c62828;
+    font-size: 0.9em;
+    margin-top: 5px;
+}
+
+.auth-links {
+    margin-top: 20px;
+    text-align: center;
+}
+</style>
 {% endblock %}

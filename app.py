@@ -212,33 +212,64 @@ def login():
 
 @app.route('/login', methods=['POST'])
 def login_post():
-    form = LoginForm()
-    if not form.validate_on_submit():
+    try:
+        logger.info("Processing login request")
+        form = LoginForm()
+        if not form.validate_on_submit():
+            logger.error(f"Form validation failed: {form.errors}")
+            flash('Please fill all required fields correctly', 'error')
+            return render_template('auth/login.html', form=form)
+
+        email = form.email.data
+        password = form.password.data
+        logger.info(f"Attempting login for email: {email}")
+
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                try:
+                    cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+                    user = cur.fetchone()
+                    logger.info(f"Database query result: {bool(user)}")
+
+                    if not user:
+                        logger.error(f"No user found with email: {email}")
+                        flash('Invalid email or password', 'error')
+                        return render_template('auth/login.html', form=form)
+
+                    if not check_password_hash(user['password_hash'], password):
+                        logger.error(f"Invalid password for user: {email}")
+                        flash('Invalid email or password', 'error')
+                        return render_template('auth/login.html', form=form)
+
+                    # Update login status
+                    cur.execute("""
+                        UPDATE users 
+                        SET is_logged_in = true,
+                            last_login_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id
+                    """, (user['id'],))
+
+                    if not cur.fetchone():
+                        logger.error(f"Failed to update login status for user: {user['id']}")
+                        flash('Login failed. Please try again.', 'error')
+                        return render_template('auth/login.html', form=form)
+
+                    logger.info(f"Login successful for user: {user['id']}")
+                    session.clear()  # Clear any existing session data
+                    session['user_id'] = user['id']
+                    session.permanent = True  # Make session permanent
+                    return redirect(url_for('dashboard'))
+
+                except psycopg2.Error as e:
+                    logger.error(f"Database error during login: {str(e)}")
+                    flash('An error occurred. Please try again.', 'error')
+                    return render_template('auth/login.html', form=form)
+
+    except Exception as e:
+        logger.error(f"Login error: {str(e)}")
+        flash('An error occurred. Please try again.', 'error')
         return render_template('auth/login.html', form=form)
-
-    email = form.email.data
-    password = form.password.data
-
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute("SELECT * FROM users WHERE email = %s", (email,))
-            user = cur.fetchone()
-
-            if not user or not check_password_hash(user['password_hash'], password):
-                form.email.errors.append('Please check your email and password')
-                return render_template('auth/login.html', form=form)
-
-            # Update login status
-            cur.execute("""
-                UPDATE users 
-                SET is_logged_in = true,
-                    last_login_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-            """, (user['id'],))
-
-            session['user_id'] = user['id']
-            session['telegram_id'] = user['telegram_id'] #This line might need adjustment depending on how telegram id is handled in the new schema.
-            return redirect(url_for('dashboard'))
 
 @app.route('/register')
 def register():
