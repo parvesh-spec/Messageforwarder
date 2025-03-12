@@ -555,18 +555,15 @@ async def verify_otp():
 
                 with get_db() as conn:
                     with conn.cursor() as cur:
-                        # Check if this Telegram account is already connected
+                        # Check if this Telegram account is already connected to this user
                         cur.execute("""
-                            SELECT user_id FROM telegram_accounts 
-                            WHERE telegram_id = %s
-                        """, (me.id,))
+                            SELECT id FROM telegram_accounts 
+                            WHERE user_id = %s AND telegram_id = %s
+                        """, (session.get('user_id'), me.id))
                         existing = cur.fetchone()
 
                         if existing:
-                            if existing[0] != session.get('user_id'):
-                                return jsonify({'error': 'This Telegram account is already connected to another user'}), 400
-                            else:
-                                return jsonify({'error': 'This Telegram account is already connected to your account'}), 400
+                            return jsonify({'error': 'This Telegram account is already connected to your account'}), 400
 
                         # Insert new account
                         cur.execute("""
