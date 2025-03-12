@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
 from flask_wtf.csrf import CSRFProtect
+from urllib.parse import urlparse, parse_qs
 
 # Set up logging
 logging.basicConfig(
@@ -53,6 +54,50 @@ Session(app)
 # Initialize CSRF protection after session
 csrf = CSRFProtect(app)
 csrf.init_app(app)
+
+try:
+    # Parse database URL to properly handle query parameters
+    db_url = os.getenv('DATABASE_URL')
+    parsed_url = urlparse(db_url)
+
+    # Get existing query parameters
+    query_params = parse_qs(parsed_url.query)
+
+    # Add sslmode=disable if not present
+    if 'sslmode' not in query_params:
+        new_query = f"{parsed_url.query}&sslmode=disable" if parsed_url.query else "sslmode=disable"
+        db_url = f"{db_url}{'&' if parsed_url.query else '?'}{new_query}"
+
+    logger.info("Initializing database connection pool...")
+
+    # Database pool for connections
+    db_pool = psycopg2.pool.ThreadedConnectionPool(
+        minconn=1,
+        maxconn=10,
+        dsn=db_url
+    )
+    logger.info("✅ Database connection pool initialized successfully")
+
+except Exception as e:
+    logger.error(f"❌ Failed to initialize database connection pool: {str(e)}")
+    raise
+
+# Database connection context manager
+@contextmanager
+def get_db():
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        conn.autocommit = True
+        yield conn
+    except psycopg2.OperationalError as e:
+        logger.error(f"❌ Database connection error: {str(e)}")
+        if conn:
+            db_pool.putconn(conn)
+        raise
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 class TelegramManager:
     def __init__(self, api_id, api_hash):
@@ -147,23 +192,6 @@ def async_route(f):
             logger.error(f"❌ Async route error: {str(e)}")
             return jsonify({'error': str(e)}), 500
     return wrapped
-
-# Database pool for connections
-db_pool = psycopg2.pool.ThreadedConnectionPool(
-    minconn=1,
-    maxconn=10,
-    dsn=os.getenv('DATABASE_URL')
-)
-
-# Database connection context manager
-@contextmanager
-def get_db():
-    conn = db_pool.getconn()
-    try:
-        conn.autocommit = True
-        yield conn
-    finally:
-        db_pool.putconn(conn)
 
 # Authentication decorator
 def login_required(f):
@@ -878,8 +906,7 @@ def add_replacement():
                     main.update_user_replacements(session.get('telegram_id'))
 
                     return jsonify({
-                        'message': 'Replacement added successfully',
-                        'original': original,
+                        'message': 'Replacement added successfully',                        'original': original,
                         'replacement': replacement
                     })
 
@@ -903,6 +930,7 @@ def remove_replacement():
 
         with get_db() as conn:
             with conn.cursor() as cur:
+                # Remove replacement
                 cur.execute("""
                     DELETE FROM text_replacements 
                     WHERE user_id = %s AND original_text = %s
