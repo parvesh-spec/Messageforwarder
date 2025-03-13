@@ -5,23 +5,22 @@ import time
 from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from flask import Flask, jsonify
 import asyncio
 import psycopg2
 from psycopg2.extras import DictCursor
-from psycopg2 import pool
 
-# Configure logging to only show important messages
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+logger = logging.getLogger(__name__)
 
 # Disable debug logs from telethon
 logging.getLogger('telethon').setLevel(logging.WARNING)
 logging.getLogger('asyncio').setLevel(logging.WARNING)
-logger = logging.getLogger(__name__)
+
 
 # Global variables for multi-user support
 USER_SESSIONS = {}  # user_id: {client, source, destination, replacements}
@@ -31,27 +30,12 @@ MESSAGE_IDS = {}    # user_id: {source_msg_id: destination_msg_id}
 API_ID = int(os.getenv('API_ID', '27202142'))
 API_HASH = os.getenv('API_HASH', 'db4dd0d95dc68d46b77518bf997ed165')
 
-# Create a small Flask app for health checks
-health_app = Flask(__name__)
 
-@health_app.route('/')
-def health_check():
-    return jsonify({"status": "ok"}), 200
-
-# Database connection pool
-db_pool = psycopg2.pool.ThreadedConnectionPool(
-    minconn=1,
-    maxconn=10,
-    dsn=os.getenv('DATABASE_URL')
-)
-
-# Lock for thread safety
-db_lock = threading.Lock()
-
+# Database connection 
 def get_db():
     """Get database connection from pool"""
     try:
-        conn = db_pool.getconn()
+        conn = psycopg2.connect(os.getenv('DATABASE_URL'))
         conn.autocommit = True
         return conn
     except Exception as e:
@@ -61,13 +45,14 @@ def get_db():
 def release_db(conn):
     """Release connection back to pool"""
     if conn:
-        db_pool.putconn(conn)
+        conn.close()
+
 
 async def setup_client(user_id, session_string, max_retries=3, retry_delay=5):
     """Initialize Telegram client for a specific user"""
     for attempt in range(max_retries):
         try:
-            # Create new client instance
+            # Create new client instance with in-memory session
             client = TelegramClient(
                 StringSession(session_string),
                 API_ID,
@@ -423,14 +408,6 @@ def update_user_replacements(user_id):
 
 if __name__ == "__main__":
     try:
-        # Start health check server in a separate thread
-        health_thread = threading.Thread(
-            target=lambda: health_app.run(host='0.0.0.0', port=9001, debug=False),
-            daemon=True
-        )
-        health_thread.start()
-        logger.info("✅ Started health check server")
-
         # Keep the main thread running
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)

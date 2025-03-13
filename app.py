@@ -106,8 +106,10 @@ class TelegramManager:
         """Initialize the Telegram client"""
         try:
             if not self._client:
+                # Always use in-memory session
+                session = StringSession(session_string) if session_string else StringSession()
                 self._client = TelegramClient(
-                    ':memory:' if not session_string else StringSession(session_string),
+                    session,
                     self.api_id,
                     self.api_hash,
                     device_model="Replit Web",
