@@ -880,7 +880,8 @@ def toggle_bot():
 
                         if not success:
                             # Rollback on failure
-                            cur.execute("""
+                            cur.execute```python
+("""
                                 UPDATE forwarding_configs 
                                 SET is_active = false 
                                 WHERE user_id = %s
@@ -931,24 +932,106 @@ def toggle_bot():
 @app.route('/get-replacements')
 @login_required
 def get_replacements():
+    """Get all replacements for the current user"""
     try:
-        user_id = session.get('user_id')
-
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute("""
-                    SELECT original_text, replacement_text, is_active 
+                    SELECT original_text, replacement_text, is_active
                     FROM text_replacements
                     WHERE user_id = %s
                     ORDER BY id DESC
-                """, (user_id,))
-                replacements = {row['original_text']: {
-                    'text': row['replacement_text'],
-                    'is_active': row['is_active']
-                } for row in cur.fetchall()}
+                """, (session.get('user_id'),))
+
+                replacements = {
+                    row['original_text']: {
+                        'text': row['replacement_text'],
+                        'is_active': row['is_active']
+                    } for row in cur.fetchall()
+                }
+
                 return jsonify(replacements)
     except Exception as e:
-        logger.error(f"❌ Get replacements error: {str(e)}")
+        logger.error(f"❌ Error fetching replacements: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/toggle-replacement', methods=['POST'])
+@login_required
+def toggle_replacement():
+    """Toggle active status of a text replacement"""
+    try:
+        original = request.form.get('original')
+        if not original:
+            return jsonify({'error': 'Original text is required'}), 400
+
+        user_id = session.get('user_id')
+        telegram_id = session.get('telegram_id')
+
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                # First check if the replacement exists and get current status
+                cur.execute("""
+                    SELECT id, is_active 
+                    FROM text_replacements 
+                    WHERE user_id = %s AND original_text = %s
+                """, (user_id, original))
+
+                result = cur.fetchone()
+                if not result:
+                    return jsonify({'error': 'Replacement not found'}), 404
+
+                # Toggle the status
+                new_status = not result['is_active']
+                cur.execute("""
+                    UPDATE text_replacements 
+                    SET is_active = %s
+                    WHERE id = %s
+                    RETURNING is_active
+                """, (new_status, result['id']))
+
+                # Verify update was successful
+                updated = cur.fetchone()
+                if updated:
+                    logger.info(f"✅ Replacement status updated: {original} -> {new_status}")
+                    # Update bot replacements if running
+                    import main
+                    if telegram_id:
+                        main.update_user_replacements(telegram_id)
+                    return jsonify({
+                        'status': 'success',
+                        'is_active': new_status
+                    })
+                else:
+                    return jsonify({'error': 'Failed to update status'}), 500
+
+    except Exception as e:
+        logger.error(f"❌ Error toggling replacement: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/get-replacements')
+@login_required
+def get_replacements():
+    """Get all replacements for the current user"""
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT original_text, replacement_text, is_active
+                    FROM text_replacements
+                    WHERE user_id = %s
+                    ORDER BY id DESC
+                """, (session.get('user_id'),))
+
+                replacements = {
+                    row['original_text']: {
+                        'text': row['replacement_text'],
+                        'is_active': row['is_active']
+                    } for row in cur.fetchall()
+                }
+
+                return jsonify(replacements)
+    except Exception as e:
+        logger.error(f"❌ Error fetching replacements: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/add-replacement', methods=['POST'])
@@ -1064,45 +1147,6 @@ def clear_replacements():
         return jsonify({'message': 'All replacements cleared'})
     except Exception as e:
         logger.error(f"❌ Clear replacements error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/toggle-replacement', methods=['POST'])
-@login_required
-def toggle_replacement():
-    try:
-        if not request.form:
-            return jsonify({'error': 'No form data received'}), 400
-
-        original = request.form.get('original')
-        user_id = session.get('user_id')
-
-        if not all([original, user_id]):
-            return jsonify({'error': 'Missing required data'}), 400
-
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                # Toggle is_active status
-                cur.execute("""
-                    UPDATE text_replacements 
-                    SET is_active = NOT is_active
-                    WHERE user_id = %s AND original_text = %s
-                    RETURNING id, is_active
-                """, (user_id, original))
-
-                result = cur.fetchone()
-                if result:
-                    logger.info(f"Toggled replacement {result[0]} for user {user_id} to {result[1]}")
-
-                    # Update bot replacements if running
-                    import main
-                    main.update_user_replacements(session.get('telegram_id'))
-
-                    return jsonify({'message': 'Replacement updated successfully'})
-                else:
-                    return jsonify({'error': 'Replacement not found'}), 404
-
-    except Exception as e:
-        logger.error(f"❌ Toggle replacement error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 def handle_db_error(e, operation):

@@ -28,7 +28,12 @@
             {% for original, replacement in replacements.items() %}
             <div class="replacement-item">
                 <div class="replacement-content">
-                    <span class="replacement-text">'{{ original }}' → '{{ replacement.text }}'</span>
+                    <div class="replacement-info">
+                        <span class="replacement-text">'{{ original }}' → '{{ replacement.text }}'</span>
+                        <span class="status-badge {% if replacement.is_active %}active{% endif %}">
+                            {{ 'Active' if replacement.is_active else 'Inactive' }}
+                        </span>
+                    </div>
                     <div class="replacement-actions">
                         <label class="switch">
                             <input type="checkbox" 
@@ -111,10 +116,9 @@ async function toggleReplacement(original) {
         }
 
         showMessage('Replacement status updated successfully');
+        await loadReplacements();
     } catch (error) {
         showMessage(error.message || 'Failed to update replacement status', true);
-        // Revert checkbox state on error
-        await loadReplacements();
     }
 }
 
@@ -194,7 +198,12 @@ async function loadReplacements() {
             div.className = 'replacement-item';
             div.innerHTML = `
                 <div class="replacement-content">
-                    <span class="replacement-text">'${original}' → '${replacement.text}'</span>
+                    <div class="replacement-info">
+                        <span class="replacement-text">'${original}' → '${replacement.text}'</span>
+                        <span class="status-badge ${replacement.is_active ? 'active' : ''}">
+                            ${replacement.is_active ? 'Active' : 'Inactive'}
+                        </span>
+                    </div>
                     <div class="replacement-actions">
                         <label class="switch">
                             <input type="checkbox" 
@@ -247,27 +256,14 @@ document.getElementById('replacement-form').addEventListener('submit', addReplac
     flex: 1;
 }
 
-.alert {
-    padding: 10px;
-    margin-bottom: 15px;
-    border-radius: 4px;
-}
-
-.alert-error {
-    background-color: #ffebee;
-    color: #c62828;
-    border: 1px solid #ef9a9a;
-}
-
-.alert-success {
-    background-color: #e8f5e9;
-    color: #2e7d32;
-    border: 1px solid #a5d6a7;
-}
-
 .replacement-item {
-    padding: 10px;
+    padding: 15px;
     border-bottom: 1px solid #eee;
+    transition: background-color 0.3s;
+}
+
+.replacement-item:hover {
+    background-color: #f8f9fa;
 }
 
 .replacement-content {
@@ -276,14 +272,36 @@ document.getElementById('replacement-form').addEventListener('submit', addReplac
     align-items: center;
 }
 
+.replacement-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+}
+
 .replacement-actions {
     display: flex;
-    gap: 10px;
+    gap: 15px;
     align-items: center;
 }
 
 .replacement-text {
-    flex: 1;
+    font-family: monospace;
+    font-size: 0.95em;
+}
+
+.status-badge {
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 0.8em;
+    font-weight: 500;
+    background-color: #e9ecef;
+    color: #6c757d;
+}
+
+.status-badge.active {
+    background-color: #e8f5e9;
+    color: #2e7d32;
 }
 
 .switch {
@@ -308,6 +326,7 @@ document.getElementById('replacement-form').addEventListener('submit', addReplac
     bottom: 0;
     background-color: #ccc;
     transition: .4s;
+    border-radius: 24px;
 }
 
 .slider:before {
@@ -319,6 +338,7 @@ document.getElementById('replacement-form').addEventListener('submit', addReplac
     bottom: 3px;
     background-color: white;
     transition: .4s;
+    border-radius: 50%;
 }
 
 input:checked + .slider {
@@ -333,39 +353,68 @@ input:checked + .slider:before {
     transform: translateX(24px);
 }
 
-.slider.round {
-    border-radius: 24px;
+.btn {
+    padding: 8px 16px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background-color 0.3s;
 }
 
-.slider.round:before {
-    border-radius: 50%;
+.btn-primary {
+    background-color: #2196F3;
+    color: white;
+}
+
+.btn-primary:hover {
+    background-color: #1976D2;
 }
 
 .btn-danger {
-    background-color: #f44336;
+    background-color: #dc3545;
     color: white;
-    border: none;
-    padding: 5px 10px;
-    border-radius: 4px;
-    cursor: pointer;
+    padding: 6px 12px;
+    font-size: 0.9em;
 }
 
 .btn-danger:hover {
-    background-color: #d32f2f;
+    background-color: #c82333;
 }
 
 .btn-secondary {
-    background-color: #757575;
+    background-color: #6c757d;
     color: white;
-    border: none;
-    padding: 10px 20px;
-    border-radius: 4px;
-    cursor: pointer;
     margin-top: 20px;
 }
 
 .btn-secondary:hover {
-    background-color: #616161;
+    background-color: #5a6268;
 }
+
+.alert {
+    padding: 12px;
+    margin-bottom: 15px;
+    border-radius: 4px;
+    animation: fadeIn 0.3s ease-in;
+}
+
+.alert-error {
+    background-color: #ffebee;
+    color: #c62828;
+    border: 1px solid #ef9a9a;
+}
+
+.alert-success {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+    border: 1px solid #a5d6a7;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
 </style>
 {% endblock %}
