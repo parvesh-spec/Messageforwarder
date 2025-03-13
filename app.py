@@ -412,9 +412,6 @@ async def forwarding():
     """Forwarding page route handler"""
     try:
         user_id = session.get('user_id')
-        channels = []
-        config = None
-        client = None
 
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
@@ -427,7 +424,6 @@ async def forwarding():
                 primary_account = cur.fetchone()
 
                 if not primary_account:
-                    logger.warning(f"No primary Telegram account found for user {user_id}")
                     return render_template('dashboard/forwarding.html',
                                       telegram_authorized=False)
 
@@ -439,16 +435,20 @@ async def forwarding():
                 """, (user_id,))
                 config = cur.fetchone()
 
-                if config:
-                    logger.info(f"✅ Loaded forwarding config for user {user_id}")
-                    # Ensure proper channel ID format
-                    if config['source_channel'] and not str(config['source_channel']).startswith('-100'):
-                        config['source_channel'] = f"-100{str(config['source_channel']).lstrip('-')}"
-                    if config['destination_channel'] and not str(config['destination_channel']).startswith('-100'):
-                        config['destination_channel'] = f"-100{str(config['destination_channel']).lstrip('-')}"
+                # Get replacements
+                cur.execute("""
+                    SELECT original_text, replacement_text
+                    FROM text_replacements
+                    WHERE user_id = %s AND is_active = true
+                """, (user_id,))
+                replacements = {row['original_text']: row['replacement_text'] 
+                              for row in cur.fetchall()}
 
         # Get channel list from Telegram
+        channels = []
+        client = None
         try:
+            # Create a new client instance for this request
             client = await telegram_manager.get_client(primary_account['session_string'])
             logger.info("✅ Got Telegram client")
 
@@ -463,7 +463,6 @@ async def forwarding():
                         'id': channel_id,
                         'name': dialog.name
                     })
-                    logger.debug(f"Found channel: {dialog.name} ({channel_id})")
 
             logger.info(f"✅ Found {len(channels)} channels")
 
@@ -480,15 +479,13 @@ async def forwarding():
                 except Exception as e:
                     logger.error(f"❌ Client cleanup error: {str(e)}")
 
-        # Sort channels by name for better UX
-        channels.sort(key=lambda x: x['name'].lower())
-
         return render_template('dashboard/forwarding.html',
                           telegram_authorized=True,
                           channels=channels,
                           source_channel=config['source_channel'] if config else None,
                           dest_channel=config['destination_channel'] if config else None,
-                          bot_status=config['is_active'] if config else False)
+                          bot_status=config['is_active'] if config else False,
+                          replacements=replacements)
 
     except Exception as e:
         logger.error(f"❌ Forwarding page error: {str(e)}")
