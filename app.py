@@ -674,10 +674,10 @@ async def disconnect_account(telegram_id):
         user_id = session.get('user_id')
 
         with get_db() as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
                 # Verify ownership
                 cur.execute("""
-                    SELECT session_string, is_primary 
+                    SELECT session_string
                     FROM telegram_accounts 
                     WHERE user_id = %s AND telegram_id = %s
                 """, (user_id, telegram_id))
@@ -685,9 +685,6 @@ async def disconnect_account(telegram_id):
 
                 if not account:
                     return jsonify({'error': 'Account not found'}), 404
-
-                if account[1]:  # is_primary
-                    return jsonify({'error': 'Cannot disconnect primary account. Make another account primary first.'}), 400
 
                 # Remove account
                 cur.execute("""
@@ -890,7 +887,7 @@ def toggle_bot():
 
                         # Stop bot
                         import main
-                        main.remove_user_session(telegramid)
+                        main.remove_user_session(telegram_id)
 
                         return jsonify({
                             'status': False,
