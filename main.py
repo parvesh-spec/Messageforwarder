@@ -155,7 +155,7 @@ def load_user_replacements(user_id):
             replacements = {}
             for row in cur.fetchall():
                 replacements[row['original_text']] = row['replacement_text']
-                logger.info(f"Loaded active replacement: '{row['original_text']}' → '{row['replacement_text']}'")
+                logger.info(f"✅ Loaded active replacement: '{row['original_text']}' → '{row['replacement_text']}'")
 
             logger.info(f"✅ Loaded {len(replacements)} active replacements for telegram_id {telegram_id}")
             return replacements

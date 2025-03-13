@@ -450,7 +450,7 @@ async def forwarding():
                 cur.execute("""
                     SELECT original_text, replacement_text
                     FROM text_replacements
-                    WHERE user_id = %s
+                    WHERE user_id = %s AND is_active = true
                 """, (user_id,))
                 replacements = {row['original_text']: row['replacement_text'] 
                               for row in cur.fetchall()}
@@ -485,7 +485,6 @@ async def forwarding():
         finally:
             if client:
                 try:
-                    # Clean up client after use
                     await client.disconnect()
                     logger.info("✅ Telegram client disconnected")
                 except Exception as e:
@@ -817,7 +816,6 @@ def update_channels():
 @app.route('/bot/toggle', methods=['POST'])
 @login_required
 def toggle_bot():
-    """Toggle bot status based on saved configuration"""
     try:
         status = request.form.get('status') == 'true'
         user_id = session.get('user_id')
@@ -889,7 +887,7 @@ def toggle_bot():
 
                         return jsonify({
                             'status': True,
-                            'message': 'Bot is now running'
+                            'message': 'Bot started successfully! Messages will now be forwarded.'
                         })
 
                     except Exception as e:
@@ -917,7 +915,7 @@ def toggle_bot():
 
                         return jsonify({
                             'status': False,
-                            'message': 'Bot is now stopped'
+                            'message': 'Bot stopped successfully'
                         })
 
                     except Exception as e:
