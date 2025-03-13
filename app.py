@@ -188,9 +188,12 @@ def async_route(f):
                 telegram_manager._loop
             )
             return future.result(timeout=30)  # Add timeout to prevent hanging
+        except asyncio.TimeoutError:
+            logger.error("❌ Async route timeout error")
+            return jsonify({'error': 'Request timed out'}), 504
         except Exception as e:
             logger.error(f"❌ Async route error: {str(e)}")
-            return jsonify({'error': str(e)}), 500
+            return render_template('error.html', error="An error occurred loading the page. Please try again."), 500
     return wrapped
 
 # Authentication decorator
@@ -423,15 +426,15 @@ async def forwarding():
 
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
-                # Get user data with telegram auth info
+                # Get primary telegram account
                 cur.execute("""
                     SELECT telegram_id, telegram_username, auth_date, session_string
-                    FROM users
-                    WHERE id = %s
+                    FROM telegram_accounts
+                    WHERE user_id = %s AND is_primary = true AND is_active = true
                 """, (user_id,))
-                user = cur.fetchone()
+                primary_account = cur.fetchone()
 
-                if not bool(user and user['telegram_id'] and user['session_string']): #Simplified check
+                if not primary_account:
                     return render_template('dashboard/forwarding.html',
                                       telegram_authorized=False)
 
@@ -454,9 +457,10 @@ async def forwarding():
 
         # Get channel list from Telegram
         channels = []
+        client = None
         try:
             # Create a new client instance for this request
-            client = await telegram_manager.get_client(user['session_string'])
+            client = await telegram_manager.get_client(primary_account['session_string'])
             logger.info("✅ Got Telegram client")
 
             # Get all dialogs (channels)
@@ -473,14 +477,19 @@ async def forwarding():
 
             logger.info(f"✅ Found {len(channels)} channels")
 
-            # Clean up client after use
-            await telegram_manager._cleanup_client()
-
         except Exception as e:
             logger.error(f"❌ Channel list error: {str(e)}")
             return render_template('dashboard/forwarding.html',
                               telegram_authorized=True,
                               error="Failed to fetch channels. Please try logging out and authorizing your Telegram account again.")
+        finally:
+            if client:
+                try:
+                    # Clean up client after use
+                    await client.disconnect()
+                    logger.info("✅ Telegram client disconnected")
+                except Exception as e:
+                    logger.error(f"❌ Client cleanup error: {str(e)}")
 
         return render_template('dashboard/forwarding.html',
                           telegram_authorized=True,
