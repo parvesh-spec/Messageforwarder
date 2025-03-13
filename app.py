@@ -837,64 +837,86 @@ def toggle_bot():
                 if not config:
                     return jsonify({'error': 'Please configure channels first'}), 400
 
-                if status == config['is_active']:
-                    return jsonify({
-                        'status': status,
-                        'message': 'No change needed'
-                    })
-
-                try:
-                    if status:
-                        # Start bot
+                if status:
+                    try:
+                        # Update database first
                         cur.execute("""
                             UPDATE forwarding_configs
                             SET is_active = true,
-                                started_at = CURRENT_TIMESTAMP
+                                updated_at = CURRENT_TIMESTAMP
                             WHERE user_id = %s
                             RETURNING id
                         """, (user_id,))
 
-                        if cur.fetchone():
-                            import main
-                            main.start_user_session(
-                                user_id,
-                                primary_account['telegram_id'],
-                                primary_account['session_string'],
-                                config['source_channel'],
-                                config['destination_channel']
-                            )
-                            return jsonify({
-                                'status': True,
-                                'message': 'Bot started successfully'
-                            })
-                        else:
-                            return jsonify({'error': 'Failed to start bot'}), 500
+                        if not cur.fetchone():
+                            return jsonify({'error': 'Failed to update forwarding status'}), 500
 
-                    else:
-                        # Stop bot
+                        # Start bot
+                        import main
+                        source_channel = str(config['source_channel'])
+                        dest_channel = str(config['destination_channel'])
+
+                        # Ensure proper channel ID format
+                        if not source_channel.startswith('-100'):
+                            source_channel = f"-100{source_channel.lstrip('-')}"
+                        if not dest_channel.startswith('-100'):
+                            dest_channel = f"-100{dest_channel.lstrip('-')}"
+
+                        success = main.add_user_session(
+                            user_id=int(primary_account['telegram_id']),
+                            session_string=primary_account['session_string'],
+                            source_channel=source_channel,
+                            destination_channel=dest_channel
+                        )
+
+                        if not success:
+                            # Rollback on failure
+                            cur.execute("""
+                                UPDATE forwarding_configs 
+                                SET is_active = false 
+                                WHERE user_id = %s
+                            """, (user_id,))
+                            return jsonify({'error': 'Failed to start bot. Please try again.'}), 500
+
+                        return jsonify({
+                            'status': True,
+                            'message': 'Bot is now running'
+                        })
+
+                    except Exception as e:
+                        logger.error(f"❌ Bot start error: {str(e)}")
+                        # Ensure inactive on error
                         cur.execute("""
-                            UPDATE forwarding_configs
-                            SET is_active = false
+                            UPDATE forwarding_configs 
+                            SET is_active = false 
                             WHERE user_id = %s
-                            RETURNING id
+                        """, (user_id,))
+                        return jsonify({'error': str(e)}), 500
+                else:
+                    try:
+                        # Update database first
+                        cur.execute("""
+                            UPDATE forwarding_configs 
+                            SET is_active = false,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE user_id = %s
                         """, (user_id,))
 
-                        if cur.fetchone():
-                            import main
-                            main.remove_user_session(primary_account['telegram_id'])
-                            return jsonify({
-                                'status': False,
-                                'message': 'Bot stopped successfully'
-                            })
-                        else:
-                            return jsonify({'error': 'Failed to stop bot'}), 500
+                        # Stop bot
+                        import main
+                        main.remove_user_session(primary_account['telegram_id'])
 
-                except Exception as e:
-                    logger.error(f"Bot toggle error: {str(e)}")
-                    return jsonify({'error': str(e)}), 500
+                        return jsonify({
+                            'status': False,
+                            'message': 'Bot is now stopped'
+                        })
+
+                    except Exception as e:
+                        logger.error(f"❌ Bot stop error: {str(e)}")
+                        return jsonify({'error': str(e)}), 500
 
     except Exception as e:
-        logger.error(f"Bot toggle error: {str(e)}")
+        logger.error(f"❌ Bot toggle error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/get-replacements')
