@@ -148,16 +148,16 @@ def load_user_replacements(user_id):
                 SELECT t.original_text, t.replacement_text
                 FROM text_replacements t
                 JOIN users u ON u.id = t.user_id
-                WHERE u.telegram_id = %s
+                WHERE u.telegram_id = %s AND t.is_active = true
                 ORDER BY LENGTH(original_text) DESC
             """, (telegram_id,))
 
             replacements = {}
             for row in cur.fetchall():
                 replacements[row['original_text']] = row['replacement_text']
-                logger.info(f"Loaded replacement: '{row['original_text']}' → '{row['replacement_text']}'")
+                logger.info(f"Loaded active replacement: '{row['original_text']}' → '{row['replacement_text']}'")
 
-            logger.info(f"✅ Loaded {len(replacements)} replacements for telegram_id {telegram_id}")
+            logger.info(f"✅ Loaded {len(replacements)} active replacements for telegram_id {telegram_id}")
             return replacements
 
     except Exception as e:

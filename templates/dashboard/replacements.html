@@ -150,33 +150,6 @@ async function removeReplacement(original) {
     }
 }
 
-async function clearReplacements() {
-    if (!confirm('Are you sure you want to clear all replacements?')) {
-        return;
-    }
-
-    try {
-        const token = document.querySelector('input[name="csrf_token"]').value;
-        const response = await fetch('/clear-replacements', {
-            method: 'POST',
-            headers: {
-                'X-CSRFToken': token
-            }
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-            throw new Error(data.error || `Request failed with status ${response.status}`);
-        }
-
-        await loadReplacements();
-        showMessage('All replacements cleared');
-    } catch (error) {
-        showMessage(error.message || 'Failed to clear replacements', true);
-    }
-}
-
 async function loadReplacements() {
     try {
         const response = await fetch('/get-replacements');
