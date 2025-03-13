@@ -394,13 +394,18 @@ def replacements():
     with get_db() as conn:
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
-                SELECT original_text, replacement_text
+                SELECT 
+                    original_text,
+                    replacement_text,
+                    is_active
                 FROM text_replacements
                 WHERE user_id = %s
                 ORDER BY id DESC
             """, (session.get('user_id'),))
-            replacements = {row['original_text']: row['replacement_text'] 
-                          for row in cur.fetchall()}
+            replacements = {row['original_text']: {
+                'text': row['replacement_text'],
+                'is_active': row['is_active']
+            } for row in cur.fetchall()}
 
     return render_template('dashboard/replacements.html',
                          replacements=replacements)
@@ -412,6 +417,7 @@ async def forwarding():
     """Forwarding page route handler"""
     try:
         user_id = session.get('user_id')
+        logger.info(f"Loading forwarding page for user {user_id}")
 
         with get_db() as conn:
             with conn.cursor(cursor_factory=DictCursor) as cur:
@@ -424,18 +430,30 @@ async def forwarding():
                 primary_account = cur.fetchone()
 
                 if not primary_account:
+                    logger.warning(f"No primary Telegram account found for user {user_id}")
                     return render_template('dashboard/forwarding.html',
                                       telegram_authorized=False)
 
-                # Get forwarding config
+                # Get forwarding config with COALESCE to handle NULL values
                 cur.execute("""
-                    SELECT source_channel, destination_channel, is_active
+                    SELECT 
+                        COALESCE(source_channel, '') as source_channel,
+                        COALESCE(destination_channel, '') as destination_channel,
+                        COALESCE(is_active, false) as is_active
                     FROM forwarding_configs
                     WHERE user_id = %s
                 """, (user_id,))
                 config = cur.fetchone()
 
-                # Get replacements
+                if not config:
+                    logger.info(f"No forwarding config found for user {user_id}")
+                    config = {
+                        'source_channel': '',
+                        'destination_channel': '',
+                        'is_active': False
+                    }
+
+                # Get active replacements
                 cur.execute("""
                     SELECT original_text, replacement_text
                     FROM text_replacements
@@ -448,7 +466,6 @@ async def forwarding():
         channels = []
         client = None
         try:
-            # Create a new client instance for this request
             client = await telegram_manager.get_client(primary_account['session_string'])
             logger.info("✅ Got Telegram client")
 
@@ -463,6 +480,7 @@ async def forwarding():
                         'id': channel_id,
                         'name': dialog.name
                     })
+                    logger.info(f"Found channel: {dialog.name} ({channel_id})")
 
             logger.info(f"✅ Found {len(channels)} channels")
 
@@ -482,9 +500,9 @@ async def forwarding():
         return render_template('dashboard/forwarding.html',
                           telegram_authorized=True,
                           channels=channels,
-                          source_channel=config['source_channel'] if config else None,
-                          dest_channel=config['destination_channel'] if config else None,
-                          bot_status=config['is_active'] if config else False,
+                          source_channel=config['source_channel'],
+                          dest_channel=config['destination_channel'],
+                          bot_status=config['is_active'],
                           replacements=replacements)
 
     except Exception as e:
@@ -760,6 +778,8 @@ def update_channels():
         destination = request.form.get('destination')
         user_id = session.get('user_id')
 
+        logger.info(f"Updating channels for user {user_id}: source={source}, destination={destination}")
+
         if not all([source, destination, user_id]):
             return jsonify({'error': 'Missing required data'}), 400
 
@@ -771,6 +791,8 @@ def update_channels():
             source = f"-100{source.lstrip('-')}"
         if not destination.startswith('-100'):
             destination = f"-100{destination.lstrip('-')}"
+
+        logger.info(f"Formatted channels: source={source}, destination={destination}")
 
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -786,7 +808,11 @@ def update_channels():
                         INSERT INTO forwarding_configs 
                         (user_id, source_channel, destination_channel, is_active)
                         VALUES (%s, %s, %s, false)
+                        RETURNING id, source_channel, destination_channel
                     """, (user_id, source, destination))
+
+                    new_config = cur.fetchone()
+                    logger.info(f"Saved new config: {new_config}")
 
                     # Stop any running forwarding
                     import main
@@ -860,7 +886,7 @@ def toggle_bot():
 
                         success = main.add_user_session(
                             user_id=int(primary_account['telegram_id']),
-                            session_string=primary_account['session_string'],
+                                                        session_string=primary_account['session_string'],
                             source_channel=source_channel,
                             destination_channel=dest_channel
                         )
@@ -921,15 +947,22 @@ def get_replacements():
     with get_db() as conn:
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute("""
-                SELECT original_text, replacement_text, is_active
+                SELECT 
+                    original_text,
+                    replacement_text,
+                    is_active
                 FROM text_replacements
                 WHERE user_id = %s
                 ORDER BY id DESC
             """, (session.get('user_id'),))
-            replacements = {row['original_text']: {
-                'text': row['replacement_text'],
-                'is_active': row['is_active']
-            } for row in cur.fetchall()}
+
+            replacements = {}
+            for row in cur.fetchall():
+                replacements[row['original_text']] = {
+                    'text': row['replacement_text'],
+                    'is_active': row['is_active']
+                }
+                logger.info(f"Loaded replacement: {row['original_text']} -> {row['replacement_text']} (Active: {row['is_active']})")
 
     return jsonify(replacements)
 
