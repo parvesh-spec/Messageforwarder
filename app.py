@@ -12,7 +12,6 @@ from functools import wraps
 import psycopg2
 from psycopg2.extras import DictCursor
 from psycopg2 import pool
-from flask_session import Session
 from contextlib import contextmanager
 from werkzeug.security import generate_password_hash, check_password_hash
 from forms import LoginForm, RegisterForm
@@ -32,26 +31,14 @@ app = Flask(__name__)
 # Session configuration
 app.config.update(
     SECRET_KEY=os.environ.get('FLASK_SECRET_KEY', os.urandom(24)),
-    SESSION_TYPE='filesystem',
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_PERMANENT=True,
-    SESSION_FILE_DIR='flask_session',  # Directory for session files
-    SESSION_FILE_THRESHOLD=500,  # Maximum number of session files
-    SESSION_USE_SIGNER=True,  # Sign the session cookie
-    SESSION_KEY_PREFIX='session:',  # Session key prefix
-    SESSION_COOKIE_NAME='session_id',  # Session cookie name
-    SESSION_COOKIE_SECURE=False,  # Set to True in production
-    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access
-    SESSION_COOKIE_SAMESITE='Lax',  # CSRF protection
     WTF_CSRF_TIME_LIMIT=None,  # No time limit for CSRF tokens
     WTF_CSRF_SSL_STRICT=False,  # Don't require HTTPS for CSRF
     DEBUG=True
 )
 
-# Initialize session after config
-Session(app)
-
-# Initialize CSRF protection after session
+# Initialize CSRF protection
 csrf = CSRFProtect(app)
 csrf.init_app(app)
 
@@ -120,7 +107,7 @@ class TelegramManager:
         try:
             if not self._client:
                 self._client = TelegramClient(
-                    StringSession(session_string) if session_string else StringSession(),
+                    ':memory:' if not session_string else StringSession(session_string),
                     self.api_id,
                     self.api_hash,
                     device_model="Replit Web",
@@ -904,7 +891,7 @@ def toggle_bot():
                         # Update database first
                         cur.execute("""
                             UPDATE forwarding_configs 
-                            SET is_active = false,
+                            SET isactive = false,
                                 updated_at = CURRENT_TIMESTAMP
                             WHERE user_id = %s
                         """, (user_id,))
