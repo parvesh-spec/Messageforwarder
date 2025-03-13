@@ -263,8 +263,57 @@ async def setup_user_handlers(user_id, client):
             except Exception as e:
                 logger.error(f"❌ Handler error: {str(e)}")
 
-        # Add event handler
+        async def handle_edit(event):
+            try:
+                # Format channel IDs for comparison
+                chat_id = str(event.chat_id)
+                if not chat_id.startswith('-100'):
+                    chat_id = f"-100{chat_id.lstrip('-')}"
+
+                source_id = str(source)
+                if not source_id.startswith('-100'):
+                    source_id = f"-100{source_id.lstrip('-')}"
+
+                # Compare exact channel IDs
+                if chat_id != source_id:
+                    return
+
+                # Get message mapping
+                edited_msg = event.message
+                message_mapping = MESSAGE_IDS.get(user_id, {})
+                dest_msg_id = message_mapping.get(edited_msg.id)
+
+                if not dest_msg_id:
+                    logger.warning(f"❌ No mapping found for edited message {edited_msg.id}")
+                    return
+
+                # Get destination channel
+                dest_id = str(destination)
+                if not dest_id.startswith('-100'):
+                    dest_id = f"-100{dest_id.lstrip('-')}"
+
+                # Apply text replacements if message has text
+                message_text = edited_msg.text if edited_msg.text else ""
+                if message_text:
+                    message_text = apply_text_replacements(message_text, user_id)
+
+                # Edit message in destination channel
+                dest_channel = await client.get_entity(int(dest_id))
+                await client.edit_message(
+                    dest_channel,
+                    dest_msg_id,
+                    message_text,
+                    file=edited_msg.media if edited_msg.media else None,
+                    formatting_entities=edited_msg.entities
+                )
+                logger.info(f"✅ Message {edited_msg.id} edited in destination channel")
+
+            except Exception as e:
+                logger.error(f"❌ Message edit error: {str(e)}")
+
+        # Setup handlers for new messages and edits
         client.add_event_handler(handle_new_message, events.NewMessage())
+        client.add_event_handler(handle_edit, events.MessageEdited())
         return True
 
     except Exception as e:
