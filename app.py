@@ -891,7 +891,7 @@ def toggle_bot():
                         # Update database first
                         cur.execute("""
                             UPDATE forwarding_configs 
-                            SET isactive = false,
+                            SET is_active = false,
                                 updated_at = CURRENT_TIMESTAMP
                             WHERE user_id = %s
                         """, (user_id,))
