@@ -1119,13 +1119,11 @@ def accounts():
                         ta.*,
                         fc.source_channel,
                         fc.destination_channel,
-                        fc.is_active,
+                        fc.is_active as forwarding_active,
                         COUNT(fl.id) as messages_count
                     FROM telegram_accounts ta
                     LEFT JOIN forwarding_configs fc ON fc.user_id = ta.user_id 
-                        AND fc.telegram_id = ta.telegram_id
                     LEFT JOIN forwarding_logs fl ON fl.user_id = ta.user_id 
-                        AND fl.telegram_id = ta.telegram_id
                     WHERE ta.user_id = %s
                     GROUP BY ta.id, fc.id
                     ORDER BY ta.is_primary DESC, ta.auth_date DESC
