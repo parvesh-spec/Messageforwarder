@@ -434,12 +434,9 @@ async def forwarding():
                     return render_template('dashboard/forwarding.html',
                                       telegram_authorized=False)
 
-                # Get forwarding config with COALESCE to handle NULL values
+                # Get forwarding config without using COALESCE for bigint columns
                 cur.execute("""
-                    SELECT 
-                        COALESCE(source_channel, '') as source_channel,
-                        COALESCE(destination_channel, '') as destination_channel,
-                        COALESCE(is_active, false) as is_active
+                    SELECT source_channel, destination_channel, is_active
                     FROM forwarding_configs
                     WHERE user_id = %s
                 """, (user_id,))
@@ -448,8 +445,8 @@ async def forwarding():
                 if not config:
                     logger.info(f"No forwarding config found for user {user_id}")
                     config = {
-                        'source_channel': '',
-                        'destination_channel': '',
+                        'source_channel': None,
+                        'destination_channel': None,
                         'is_active': False
                     }
 
@@ -497,11 +494,17 @@ async def forwarding():
                 except Exception as e:
                     logger.error(f"❌ Client cleanup error: {str(e)}")
 
+        # Format None values to empty strings for template
+        source_channel = str(config['source_channel']) if config['source_channel'] else ''
+        dest_channel = str(config['destination_channel']) if config['destination_channel'] else ''
+
+        logger.info(f"Rendering forwarding page with source={source_channel}, dest={dest_channel}")
+
         return render_template('dashboard/forwarding.html',
                           telegram_authorized=True,
                           channels=channels,
-                          source_channel=config['source_channel'],
-                          dest_channel=config['destination_channel'],
+                          source_channel=source_channel,
+                          dest_channel=dest_channel,
                           bot_status=config['is_active'],
                           replacements=replacements)
 
